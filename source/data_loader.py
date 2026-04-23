@@ -19,6 +19,18 @@ FILENAME_RE = re.compile(
 
 _OHLC_COLS = ("open", "high", "low", "close")
 
+COL_NAMES = {
+    '<DATE>': 'date',
+    '<TIME>': 'time',
+    '<OPEN>': 'open',
+    '<HIGH>': 'high',
+    '<LOW>': 'low',
+    '<CLOSE>': 'close',
+    '<TICKVOL>': 'tick_vol',
+    '<VOL>': 'volume',
+    '<SPREAD>': 'spread'
+}
+
 
 @dataclass
 class DatasetMeta:
@@ -49,8 +61,7 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
                    "open", "high", "low", "close", "volume"):
         if target in lowered:
             rename[lowered[target]] = target
-    df = df.rename(columns=rename)
-
+    df = df.rename(columns=COL_NAMES)
     if "datetime" not in df.columns:
         if "date" in df.columns and "time" in df.columns:
             df["datetime"] = pd.to_datetime(
@@ -58,6 +69,7 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
                 + df["time"].astype(str).str.strip(),
                 errors="coerce",
             )
+            df.drop(["date", "time"], axis=1, inplace=True)
         elif "timestamp" in df.columns:
             df["datetime"] = pd.to_datetime(df["timestamp"], errors="coerce")
         elif "date" in df.columns:
@@ -85,10 +97,16 @@ def load_csv(path: str | Path) -> pd.DataFrame:
         try:
             df = pd.read_csv(path, sep=sep)
             if df.shape[1] >= 4:
-                return _normalize(df)
+                break
+            else:
+                print("Incorrect Sep...")
+                continue
         except Exception as e:
             last_err = e
-    raise ValueError(f"Could not parse {path}: {last_err}")
+    if df.shape[1] >= 4:
+        return _normalize(df)
+    else:
+        raise ValueError(f"Could not parse {path}: {last_err}")
 
 
 def load_all(data_dir: str | Path = "data") -> Dict[Tuple[str, str], Tuple[DatasetMeta, pd.DataFrame]]:
@@ -108,7 +126,9 @@ def load_all(data_dir: str | Path = "data") -> Dict[Tuple[str, str], Tuple[Datas
 
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Resample an OHLC(V) frame to a coarser frequency (e.g. '1H', '1D')."""
-    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "spread": "sum"}
     if "volume" in df.columns:
         agg["volume"] = "sum"
+    if "tick_vol" in df.columns:
+        agg["tick_vol"] = "sum"
     return df.resample(rule).agg(agg).dropna(subset=list(_OHLC_COLS))
