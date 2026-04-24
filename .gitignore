@@ -21,6 +21,7 @@ ipython_config.py
 # Environments
 .env
 .venv
+.claude
 env/
 venv/
 ENV/
