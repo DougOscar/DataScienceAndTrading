@@ -39,9 +39,10 @@ class DatasetMeta:
     start: pd.Timestamp
     end: pd.Timestamp
     path: Path
+    group: str = ""   # subdirectory name, e.g. "forex", "b3"
 
 
-def _parse_filename(path: Path) -> DatasetMeta | None:
+def _parse_filename(path: Path, group: str = "") -> DatasetMeta | None:
     m = FILENAME_RE.match(path.name)
     if m is None:
         return None
@@ -51,6 +52,7 @@ def _parse_filename(path: Path) -> DatasetMeta | None:
         start=pd.to_datetime(m["start"], format="%Y%m%d%H%M"),
         end=pd.to_datetime(m["end"], format="%Y%m%d%H%M"),
         path=path,
+        group=group,
     )
 
 
@@ -110,17 +112,28 @@ def load_csv(path: str | Path) -> pd.DataFrame:
 
 
 def load_all(data_dir: str | Path = "data") -> Dict[Tuple[str, str], Tuple[DatasetMeta, pd.DataFrame]]:
-    """Discover every CSV in `data_dir` whose name matches the naming scheme."""
+    """Discover every CSV in `data_dir` (and subdirectories) matching the naming scheme.
+
+    Root-level CSVs get ``group=""``.  CSVs inside a subdirectory get
+    ``group=<subdirectory_name>`` (e.g. ``"forex"``, ``"b3"``).
+    """
     data_dir = Path(data_dir)
     out: Dict[Tuple[str, str], Tuple[DatasetMeta, pd.DataFrame]] = {}
     if not data_dir.exists():
         return out
-    for path in sorted(data_dir.glob("*.csv")):
-        meta = _parse_filename(path)
-        if meta is None:
-            continue
-        df = load_csv(path)
-        out[(meta.asset, meta.timeframe)] = (meta, df)
+
+    def _scan(directory: Path, group: str) -> None:
+        for path in sorted(directory.glob("*.csv")):
+            meta = _parse_filename(path, group)
+            if meta is None:
+                continue
+            df = load_csv(path)
+            out[(meta.asset, meta.timeframe)] = (meta, df)
+
+    _scan(data_dir, "")  # root-level files (no group)
+    for subdir in sorted(p for p in data_dir.iterdir() if p.is_dir()):
+        _scan(subdir, subdir.name)
+
     return out
 
 

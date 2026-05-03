@@ -93,6 +93,13 @@ def plot_wfo_dashboard(wfo_result, full_equity: pd.Series | None = None):
             ax.set_xticklabels(heat.index)
             ax.set_title("Selected parameters per fold")
             fig.colorbar(im, ax=ax, shrink=0.8)
+        elif "oos_profit_factor" in windows.columns:
+            pf = windows["oos_profit_factor"].fillna(0)
+            colors = ["seagreen" if v >= 1 else "crimson" for v in pf]
+            ax.bar(windows["fold"].astype(str), pf, color=colors)
+            ax.axhline(1.0, color="black", lw=0.8, ls="--")
+            ax.set_title("Per-fold OOS profit factor")
+            ax.set_xlabel("fold")
 
     ax = axes[1, 1]
     if not windows.empty:
