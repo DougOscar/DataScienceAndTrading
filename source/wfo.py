@@ -83,6 +83,8 @@ def walk_forward(
         oos_res = Backtester(strategy_cls(best_params)).run(oos_df)
         m_oos = compute_metrics(oos_res)
 
+        oos_s = m_oos.get("sharpe_daily", np.nan)
+        deg = float(oos_s / best_score) if (np.isfinite(best_score) and best_score > 0) else np.nan
         row = {
             "fold": i,
             "is_start": is_df.index[0],
@@ -91,10 +93,11 @@ def walk_forward(
             "oos_end": oos_df.index[-1],
             "is_score": best_score,
             "oos_pnl": m_oos.get("total_pnl", 0.0),
-            "oos_sharpe": m_oos.get("sharpe_daily", np.nan),
+            "oos_sharpe": oos_s,
             "oos_profit_factor": m_oos.get("profit_factor", np.nan),
             "oos_win_rate": m_oos.get("win_rate", np.nan),
             "oos_trades": m_oos.get("num_trades", 0),
+            "degradation_ratio": deg,
         }
         row.update({f"param_{k}": getattr(best_params, k) for k in keys})
         rows.append(row)

@@ -13,6 +13,8 @@ from .wfo import walk_forward, WFOResult
 from .robustness import (
     monte_carlo_trades,
     monte_carlo_summary,
+    block_bootstrap_trades,
+    subperiod_analysis,
     parameter_sensitivity,
 )
 
@@ -35,5 +37,7 @@ __all__ = [
     "WFOResult",
     "monte_carlo_trades",
     "monte_carlo_summary",
+    "block_bootstrap_trades",
+    "subperiod_analysis",
     "parameter_sensitivity",
 ]
