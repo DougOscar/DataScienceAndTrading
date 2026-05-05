@@ -3,3 +3,4 @@ pandas>=2.0
 matplotlib>=3.7
 jupyterlab>=4.0
 ipykernel>=6.25
+scikit-learn>=1.3

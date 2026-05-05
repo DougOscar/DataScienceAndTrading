@@ -15,6 +15,12 @@ class StrategyParams:
     atr_period: int = 14
     sl_atr_mult: float = 2.0
     tp_atr_mult: float = 3.0
+    # Session filter — None means no filter (24/5 or whole dataset)
+    session_start: int | None = None  # inclusive hour (0-23)
+    session_end: int | None = None    # exclusive hour; open positions closed at boundary
+    # Position sizing
+    sizing_mode: str = "unit"         # "unit" | "vol_scaled" | "fixed_frac"
+    risk_fraction: float = 0.01       # fraction of equity risked per trade (fixed_frac only)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -30,8 +36,11 @@ class SMACrossoverStrategy:
       * Opposite crossover (reverses the position).
       * Hard stop loss at entry - direction * sl_atr_mult * ATR.
       * Take profit at entry + direction * tp_atr_mult * ATR.
+      * Forced close when the bar is the last inside the session window.
     Sizing:
-      * One unit per trade, PnL measured in price points.
+      * "unit"       — one unit per trade (default, backward-compatible).
+      * "vol_scaled" — size = 1 / ATR; PnL is in ATR-normalised units.
+      * "fixed_frac" — size = equity * risk_fraction / (sl_atr_mult * ATR).
     """
 
     def __init__(self, params: StrategyParams | None = None):
@@ -63,5 +72,14 @@ class SMACrossoverStrategy:
         short_cross = (diff < 0) & (prev_diff >= 0)
 
         signal = np.where(long_cross, 1, np.where(short_cross, -1, 0))
+
+        p = self.params
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
         ind["signal"] = signal.astype(int)
         return ind

@@ -17,6 +17,7 @@ from .robustness import (
     subperiod_analysis,
     parameter_sensitivity,
 )
+from .portfolio import correlation_weights, weighted_portfolio
 
 __all__ = [
     "DatasetMeta",
@@ -40,4 +41,6 @@ __all__ = [
     "block_bootstrap_trades",
     "subperiod_analysis",
     "parameter_sensitivity",
+    "correlation_weights",
+    "weighted_portfolio",
 ]
