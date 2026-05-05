@@ -9,6 +9,19 @@ Use [[_Template]] when documenting a new strategy.
 | # | Name | Type | Markets | Timeframes | Status |
 |---|------|------|---------|------------|--------|
 | 01 | [[01_SMA_Crossover_ATR_Risk\|SMA Crossover + ATR Risk]] | Trend-following | Forex, B3 | 1h–1D / 1min–30min | Backtested |
+| 02 | [[02_RSI_Mean_Reversion\|RSI Mean Reversion + ATR Stops]] | Mean-reversion | Forex, Crypto | 15min–4h | Idea |
+| 03 | [[03_Bollinger_Band_Squeeze_Breakout\|Bollinger Band Squeeze Breakout]] | Breakout / Volatility expansion | Forex, B3, Crypto | 1h–1D | Idea |
+| 04 | [[04_MACD_Histogram_Momentum\|MACD Histogram Momentum]] | Trend-following / Momentum | Forex, B3, Crypto | 1h–1D | Idea |
+| 05 | [[05_Donchian_Channel_Breakout\|Donchian Channel Trend Following]] | Trend-following / Breakout | Forex, B3, Crypto | 4h–1D | Idea |
+| 06 | [[06_EMA_Ribbon_RSI_Filter\|EMA Ribbon with RSI Filter]] | Trend-following | Forex, B3, Crypto | 15min–4h | Idea |
+| 07 | [[07_Keltner_Channel_Mean_Reversion\|Keltner Channel Mean Reversion]] | Mean-reversion | Forex, Crypto | 15min–1h | Idea |
+| 08 | [[08_Hurst_Exponent_Regime_Switcher\|Hurst Exponent Regime Switcher]] | Statistical / Adaptive | Forex, B3, Crypto | 1h–1D | Idea |
+| 09 | [[09_Dual_Thrust_Intraday\|Dual Thrust Intraday Breakout]] | Breakout / Intraday | B3, Crypto | 1min–15min | Idea |
+| 10 | [[10_HMM_Regime_Filter\|HMM Regime Filter]] | Machine Learning / Statistical | Forex, B3, Crypto | 1h–1D | Idea |
+| 11 | [[11_VWAP_Intraday_Reversion\|VWAP Intraday Mean Reversion]] | Mean-reversion / Intraday | B3, Crypto | 1min–15min | Idea |
+| 12 | [[12_Stochastic_Oscillator_Divergence\|Stochastic Oscillator + Divergence]] | Mean-reversion / Momentum | Forex, B3, Crypto | 15min–4h | Idea |
+| 13 | [[13_Linear_Regression_Channel\|Linear Regression Channel]] | Statistical / Dual-mode | Forex, B3, Crypto | 1h–1D | Idea |
+| 14 | [[14_FFT_Cycle_Filter\|FFT Cycle Filter & Forward Projection]] | Statistical / Cycle-following | Forex, B3, Crypto | 1h–1D | Idea |
 
 ## Strategy Evaluation Checklist
 
