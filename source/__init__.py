@@ -1,7 +1,12 @@
 """Reusable building blocks for the notebooks in this repo."""
 
 from .data_loader import DatasetMeta, load_all, load_csv, resample_ohlc
-from .strategy import SMACrossoverStrategy, StrategyParams
+from .strategy import (
+    SMACrossoverStrategy,
+    StrategyParams,
+    RSIMeanReversionStrategy,
+    RSIMeanReversionParams,
+)
 from .backtest import Backtester, BacktestResult, Trade
 from .metrics import compute_metrics, metrics_table
 from .dashboard import (
@@ -26,6 +31,8 @@ __all__ = [
     "resample_ohlc",
     "SMACrossoverStrategy",
     "StrategyParams",
+    "RSIMeanReversionStrategy",
+    "RSIMeanReversionParams",
     "Backtester",
     "BacktestResult",
     "Trade",
