@@ -214,10 +214,27 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 ## Implementation
 
-**Notebook:** `machine_learning/02_hmm_regime_filter.ipynb`
+**Notebook:** `machine_learning/10_hmm_regime_filter.ipynb`
 **Source module:** `source/strategy.py` — `HMMRegimeFilterStrategy`
-**Parameters class:** `StrategyParams`
-**Dependencies:** `hmmlearn` Python library (or equivalent Gaussian HMM implementation)
+**Parameters class:** `HMMRegimeFilterParams`
+**Dependencies:** `scikit-learn` (already in `requirements.txt`)
+
+### Implementation Notes
+
+- **Substitution: GaussianMixture instead of a full Gaussian HMM.**
+  `hmmlearn` is not in `requirements.txt`, and the existing `Backtester`
+  doesn't support periodic mid-backtest retraining. GMM provides
+  `P(state | obs)` directly (no transition matrix) which is what the doc's
+  regime filter consumes. The transition-matrix smoothing a true HMM would
+  add is foregone in v1; the doc's "Known Weaknesses" section notes that
+  even the doc-spec'd HMM is fragile, so the difference is small in practice.
+- Model is fit **once per backtest call** on the first `hmm_train_window`
+  bars. Under WFO each fold gets an independent fit on its in-sample slice.
+- State labeling: ascending mean log_return → bear / neutral / bull.
+- `use_hmm_exit` is exposed but **disabled** — regime-probability-driven
+  close needs a custom `Backtester` exit hook.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped (no `data/crypto/`).
 
 ---
 
