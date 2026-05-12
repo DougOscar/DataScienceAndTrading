@@ -212,3 +212,159 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class VWAPReversionParams:
+    """VWAP intraday mean-reversion parameters.
+
+    Sessions are defined by ``session_start`` / ``session_end``; VWAP and its
+    bands reset at the start of each new session.
+    """
+
+    n_sigma: float = 2.0
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    # The dynamic VWAP-touch TP is approximated by a fixed ATR-based TP
+    # (the Backtester only supports fixed-at-entry SL/TP).
+    tp_atr_mult: float = 1.5
+    vwap_warmup_bars: int = 10
+    entry_cutoff_minutes: int = 30
+    session_start: int = 9
+    session_end: int = 18
+    vwap_volume_col: str = "tick_vol"
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class VWAPReversionStrategy:
+    """Session-VWAP mean-reversion (intraday).
+
+    Indicators (per in-session bar):
+      * ``VWAP`` — volume-weighted cumulative typical price, resets each day.
+      * ``VWAP_std`` — volume-weighted std of typical price around VWAP.
+      * ``VWAP_upper = VWAP + n_sigma × VWAP_std``,
+        ``VWAP_lower = VWAP − n_sigma × VWAP_std``.
+
+    Entry:
+      * Long when ``close <= VWAP_lower`` (past warmup, before entry cutoff).
+      * Short when ``close >= VWAP_upper``.
+
+    Exit (via Backtester):
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry`` (TP approximates the
+        doc's dynamic VWAP-touch target).
+      * Session-end forced close via Backtester's ``session_start`` /
+        ``session_end`` handling.
+      * Opposite band touch reverses the position.
+    """
+
+    def __init__(self, params: VWAPReversionParams | None = None):
+        self.params = params or VWAPReversionParams()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        in_session_arr = (
+            (out.index.hour >= p.session_start) & (out.index.hour < p.session_end)
+        )
+        if hasattr(in_session_arr, "to_numpy"):
+            in_session_arr = in_session_arr.to_numpy()
+        # Pick volume column, falling back if absent.
+        if p.vwap_volume_col in out.columns:
+            vol = out[p.vwap_volume_col].to_numpy(dtype=float)
+        elif "tick_vol" in out.columns:
+            vol = out["tick_vol"].to_numpy(dtype=float)
+        elif "volume" in out.columns:
+            vol = out["volume"].to_numpy(dtype=float)
+        else:
+            vol = np.ones(len(out), dtype=float)
+        # Avoid zero/NaN volume dominating; replace with 1 for stable cumsum.
+        vol = np.where((vol <= 0) | np.isnan(vol), 1.0, vol)
+
+        tp = (out["high"] + out["low"] + out["close"]).to_numpy() / 3.0
+
+        # Session keys → cumulative resets per day.
+        session_id = out.index.normalize().astype("int64").to_numpy()
+
+        # Zero out contributions outside the session.
+        v_in = np.where(in_session_arr, vol, 0.0)
+        tp_in = np.where(in_session_arr, tp, 0.0)
+
+        df_helper = pd.DataFrame(
+            {"v": v_in, "tpv": tp_in * v_in, "tp2v": (tp_in ** 2) * v_in},
+            index=out.index,
+        )
+        cum_v = df_helper["v"].groupby(session_id).cumsum().to_numpy()
+        cum_tpv = df_helper["tpv"].groupby(session_id).cumsum().to_numpy()
+        cum_tp2v = df_helper["tp2v"].groupby(session_id).cumsum().to_numpy()
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            vwap = cum_tpv / cum_v
+            second_moment = cum_tp2v / cum_v
+            variance = second_moment - vwap ** 2
+            variance = np.where(variance < 0, 0.0, variance)
+            vwap_std = np.sqrt(variance)
+
+        # Bar count since session start.
+        ones = pd.Series(in_session_arr.astype(int), index=out.index)
+        bars_in_session = ones.groupby(session_id).cumsum().to_numpy()
+
+        vwap_full = np.where(in_session_arr, vwap, np.nan)
+        std_full = np.where(in_session_arr, vwap_std, np.nan)
+        out["vwap"] = vwap_full
+        out["vwap_std"] = std_full
+        out["vwap_upper"] = vwap_full + p.n_sigma * std_full
+        out["vwap_lower"] = vwap_full - p.n_sigma * std_full
+        out["session_bar"] = bars_in_session
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        in_session = (ind.index.hour >= p.session_start) & (
+            ind.index.hour < p.session_end
+        )
+        minutes_into_day = ind.index.hour * 60 + ind.index.minute
+        cutoff_minute = p.session_end * 60 - p.entry_cutoff_minutes
+        before_cutoff = minutes_into_day < cutoff_minute
+        warmup_ok = ind["session_bar"] >= p.vwap_warmup_bars
+
+        long_touch = (
+            (ind["close"] <= ind["vwap_lower"])
+            & in_session
+            & before_cutoff
+            & warmup_ok
+            & (ind["vwap_std"] > 0)
+        )
+        short_touch = (
+            (ind["close"] >= ind["vwap_upper"])
+            & in_session
+            & before_cutoff
+            & warmup_ok
+            & (ind["vwap_std"] > 0)
+        )
+        signal = np.where(long_touch, 1, np.where(short_touch, -1, 0))
+
+        nan_guard = (
+            ind["atr"].isna() | ind["vwap_upper"].isna() | ind["vwap_lower"].isna()
+        )
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
