@@ -212,3 +212,113 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class StochasticDivergenceParams:
+    """Stochastic oscillator strategy parameters (crossover mode).
+
+    Note: only ``entry_mode="crossover"`` is implemented in v1.  The
+    divergence mode requires programmatic swing-high / swing-low detection
+    (rolling argmax/argmin pivots) which is left for a follow-up.
+    """
+
+    k_period: int = 14
+    d_period: int = 3
+    stoch_oversold: float = 20.0
+    stoch_overbought: float = 80.0
+    atr_period: int = 14
+    sl_atr_mult: float = 1.5
+    tp_atr_mult: float = 2.0
+    entry_mode: str = "crossover"
+    use_d_filter: bool = False
+    # Mid-line and divergence exits cannot be expressed cleanly through the
+    # existing Backtester's contract.
+    use_midline_exit: bool = False
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class StochasticDivergenceStrategy:
+    """Stochastic %K oversold/overbought crossover with ATR stops.
+
+    Entry (crossover mode):
+      * Long when %K crosses **up** through ``stoch_oversold``.
+      * Short when %K crosses **down** through ``stoch_overbought``.
+      * Optional %D confirmation: %D < 50 for longs / %D > 50 for shorts.
+
+    Exit (via Backtester):
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite extreme crossover reverses the position.
+    """
+
+    def __init__(self, params: StochasticDivergenceParams | None = None):
+        self.params = params or StochasticDivergenceParams()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        lowest_low = out["low"].rolling(p.k_period, min_periods=p.k_period).min()
+        highest_high = out["high"].rolling(p.k_period, min_periods=p.k_period).max()
+        denom = highest_high - lowest_low
+        with np.errstate(divide="ignore", invalid="ignore"):
+            k = 100.0 * (out["close"] - lowest_low) / denom
+        out["stoch_k"] = k.where(denom > 0, 50.0)
+        out["stoch_d"] = out["stoch_k"].rolling(
+            p.d_period, min_periods=p.d_period
+        ).mean()
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        if p.entry_mode != "crossover":
+            # Divergence mode is documented but not implemented in v1.
+            ind["signal"] = np.zeros(len(ind), dtype=int)
+            return ind
+
+        k = ind["stoch_k"]
+        prev_k = k.shift()
+        long_cross = (k > p.stoch_oversold) & (prev_k <= p.stoch_oversold)
+        short_cross = (k < p.stoch_overbought) & (prev_k >= p.stoch_overbought)
+        signal = np.where(long_cross, 1, np.where(short_cross, -1, 0))
+
+        if p.use_d_filter:
+            d = ind["stoch_d"]
+            allow_long = (d < 50).fillna(False).to_numpy()
+            allow_short = (d > 50).fillna(False).to_numpy()
+            signal = np.where(
+                (signal == 1) & ~allow_long, 0,
+                np.where((signal == -1) & ~allow_short, 0, signal),
+            )
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = ind["atr"].isna() | ind["stoch_k"].isna()
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
