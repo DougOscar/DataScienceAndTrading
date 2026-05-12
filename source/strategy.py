@@ -212,3 +212,123 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class MACDHistogramParams:
+    """MACD histogram momentum strategy parameters."""
+
+    macd_fast: int = 12
+    macd_slow: int = 26
+    signal_period: int = 9
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.5
+    vol_period: int = 20
+    vol_ratio_min: float = 1.3
+    use_vol_filter: bool = False
+    # Deceleration exit and MACD zero-line gate cannot be expressed cleanly
+    # through the existing Backtester's signal/SL/TP/reversal contract.
+    use_decel_exit: bool = False
+    use_zero_line_gate: bool = False
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def __post_init__(self):
+        if not self.macd_fast < self.macd_slow:
+            raise ValueError(
+                f"Constraint macd_fast < macd_slow violated "
+                f"(got macd_fast={self.macd_fast}, macd_slow={self.macd_slow})"
+            )
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class MACDHistogramStrategy:
+    """MACD histogram zero-line crossover with ATR-based stop loss / take profit.
+
+    Entry:
+      * Long when ``Histogram > 0`` and was non-positive on the previous bar
+        (fresh MACD line / signal line crossover from below).
+      * Short when ``Histogram < 0`` and was non-negative on the previous bar.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite zero-line crossover reverses the position.
+    Filters:
+      * Optional tick-volume confirmation (off by default).
+      * Optional MACD zero-line gate (off — would need a separate exit hook).
+    """
+
+    def __init__(self, params: MACDHistogramParams | None = None):
+        self.params = params or MACDHistogramParams()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        ema_fast = out["close"].ewm(
+            span=p.macd_fast, adjust=False, min_periods=p.macd_fast
+        ).mean()
+        ema_slow = out["close"].ewm(
+            span=p.macd_slow, adjust=False, min_periods=p.macd_slow
+        ).mean()
+        out["macd"] = ema_fast - ema_slow
+        out["macd_signal"] = out["macd"].ewm(
+            span=p.signal_period, adjust=False, min_periods=p.signal_period
+        ).mean()
+        out["macd_hist"] = out["macd"] - out["macd_signal"]
+
+        if p.use_vol_filter and "tick_vol" in out.columns:
+            vsma = out["tick_vol"].rolling(p.vol_period, min_periods=p.vol_period).mean()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["vol_ratio"] = out["tick_vol"] / vsma
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        hist = ind["macd_hist"]
+        prev_hist = hist.shift()
+        long_cross = (hist > 0) & (prev_hist <= 0)
+        short_cross = (hist < 0) & (prev_hist >= 0)
+        signal = np.where(long_cross, 1, np.where(short_cross, -1, 0))
+
+        if p.use_zero_line_gate:
+            allow_long = (ind["macd"] > 0).fillna(False).to_numpy()
+            allow_short = (ind["macd"] < 0).fillna(False).to_numpy()
+            signal = np.where(
+                (signal == 1) & ~allow_long, 0,
+                np.where((signal == -1) & ~allow_short, 0, signal),
+            )
+
+        if p.use_vol_filter and "vol_ratio" in ind.columns:
+            allow = (ind["vol_ratio"] >= p.vol_ratio_min).fillna(False).to_numpy()
+            signal = np.where(allow, signal, 0)
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = ind["atr"].isna() | ind["macd_hist"].isna()
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
