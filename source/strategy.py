@@ -212,3 +212,126 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class EMARibbonParams:
+    """4-EMA ribbon with RSI gate parameters."""
+
+    ema_p1: int = 5
+    ema_p2: int = 8
+    ema_p3: int = 13
+    ema_p4: int = 21
+    rsi_period: int = 14
+    rsi_overbought: float = 65.0
+    rsi_oversold: float = 35.0
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    # Ribbon collapse exit (close-on-de-alignment) cannot be expressed cleanly
+    # through the existing Backtester's signal/SL/TP/reversal contract — leave
+    # disabled.
+    use_ribbon_exit: bool = False
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class EMARibbonStrategy:
+    """EMA ribbon (4 EMAs) trend strategy with RSI trend filter.
+
+    Entry:
+      * Long on a fresh bullish ribbon alignment (``ema1 > ema2 > ema3 > ema4``
+        on bar ``t`` but not on bar ``t-1``) provided ``RSI < rsi_overbought``.
+      * Short on a fresh bearish alignment (``ema1 < ema2 < ema3 < ema4``)
+        provided ``RSI > rsi_oversold``.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite ribbon-alignment signal reverses the position.
+    Notes:
+      * Invalid `ema_p1 < ema_p2 < ema_p3 < ema_p4` combos emit zero signals
+        (rather than raising at construction) so the WFO driver can iterate
+        the full grid.
+    """
+
+    def __init__(self, params: EMARibbonParams | None = None):
+        self.params = params or EMARibbonParams()
+
+    def _wilder_ema(self, s: pd.Series, period: int) -> pd.Series:
+        return s.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        for tag, period in (
+            ("ema1", p.ema_p1),
+            ("ema2", p.ema_p2),
+            ("ema3", p.ema_p3),
+            ("ema4", p.ema_p4),
+        ):
+            out[tag] = out["close"].ewm(
+                span=max(2, period), adjust=False, min_periods=period
+            ).mean()
+
+        # RSI (Wilder).
+        delta = out["close"].diff()
+        gain = delta.clip(lower=0.0)
+        loss = (-delta).clip(lower=0.0)
+        avg_gain = self._wilder_ema(gain, p.rsi_period)
+        avg_loss = self._wilder_ema(loss, p.rsi_period)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rs = avg_gain / avg_loss
+            out["rsi"] = 100.0 - 100.0 / (1.0 + rs)
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        # Invalid ordering → emit no signals (so WFO scores it -inf).
+        if not (p.ema_p1 < p.ema_p2 < p.ema_p3 < p.ema_p4):
+            ind["signal"] = np.zeros(len(ind), dtype=int)
+            return ind
+
+        bull = (ind["ema1"] > ind["ema2"]) & (ind["ema2"] > ind["ema3"]) & (ind["ema3"] > ind["ema4"])
+        bear = (ind["ema1"] < ind["ema2"]) & (ind["ema2"] < ind["ema3"]) & (ind["ema3"] < ind["ema4"])
+
+        fresh_bull = bull & ~bull.shift(1).fillna(False)
+        fresh_bear = bear & ~bear.shift(1).fillna(False)
+
+        long_sig = fresh_bull & (ind["rsi"] < p.rsi_overbought)
+        short_sig = fresh_bear & (ind["rsi"] > p.rsi_oversold)
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = (
+            ind["atr"].isna()
+            | ind["ema4"].isna()
+            | ind["rsi"].isna()
+        )
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind

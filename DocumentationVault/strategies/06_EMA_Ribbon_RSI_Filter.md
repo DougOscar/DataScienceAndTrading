@@ -219,9 +219,22 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 ## Implementation
 
-**Notebook:** `technical_analysis/06_ema_ribbon.ipynb`
+**Notebook:** `technical_analysis/06_ema_ribbon_rsi_filter.ipynb`
 **Source module:** `source/strategy.py` — `EMARibbonStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `EMARibbonParams`
+
+### Implementation Notes
+
+- Only the **fresh-alignment** entry trigger is implemented; the ribbon-
+  collapse exit (`use_ribbon_exit`) would require a custom `Backtester` exit
+  hook and is left **disabled**.
+- The strict EMA ordering `ema_p1 < ema_p2 < ema_p3 < ema_p4` is enforced
+  inside `generate_signals` (invalid combos emit zero signals) so the WFO
+  grid iterator works.
+- WFO grid is **trimmed** vs. the full doc grid (576 combos vs ~31k); every
+  combo satisfies the monotonic ordering by construction.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped — no `data/crypto/` files.
 
 ---
 
