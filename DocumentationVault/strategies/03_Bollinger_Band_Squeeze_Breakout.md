@@ -221,7 +221,21 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 **Notebook:** `technical_analysis/03_bb_squeeze_breakout.ipynb`
 **Source module:** `source/strategy.py` — `BBSqueezeStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `BBSqueezeParams`
+
+### Implementation Notes
+
+- `use_band_reentry_exit` is exposed but **disabled** in the baseline — the
+  band-re-entry exit cannot be expressed cleanly through the existing
+  `Backtester`'s SL / TP / signal-reversal contract; adding a custom-exit
+  hook is a follow-up.
+- `use_vol_filter` is disabled in the baseline so the notebook runs cleanly
+  on datasets that may not carry `tick_vol`.
+- For B3, baseline params include `session_start=9`, `session_end=18` (per the
+  doc's "Time Restrictions" table).
+- Crypto is listed as a target market in this doc but the repo has no
+  `data/crypto/` files; the notebook runs on Forex + B3 only and prints a
+  warning.
 
 ---
 
