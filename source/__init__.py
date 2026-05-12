@@ -16,6 +16,8 @@ from .strategy import (
     StrategyParams,
     RSIMeanReversionStrategy,
     RSIMeanReversionParams,
+    DualThrustStrategy,
+    DualThrustParams,
 )
 from .backtest import Backtester, BacktestResult, Trade
 from .metrics import compute_metrics, metrics_table
@@ -56,6 +58,8 @@ __all__ = [
     "StrategyParams",
     "RSIMeanReversionStrategy",
     "RSIMeanReversionParams",
+    "DualThrustStrategy",
+    "DualThrustParams",
     "Backtester",
     "BacktestResult",
     "Trade",
