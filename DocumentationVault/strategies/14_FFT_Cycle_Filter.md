@@ -332,10 +332,32 @@ numpy.fft.rfft / numpy.fft.irfft  — one-sided real FFT
 
 ## Implementation
 
-**Notebook:** `technical_analysis/13_fft_cycle_filter.ipynb`
+**Notebook:** `technical_analysis/14_fft_cycle_filter.ipynb`
 **Source module:** `source/strategy.py` — `FFTCycleFilterStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `FFTCycleFilterParams`
 **Dependencies:** `numpy` (FFT routines are part of core NumPy; no additional dependencies required)
+
+### Implementation Notes
+
+- Rolling FFT projection is computed in `source.strategy._rolling_fft_delta`
+  using `numpy.fft.rfft`. Per-bar cost is O(N log N); cumulative cost across
+  a multi-year forex 4h series is a few seconds.
+- The one-bar-ahead projection uses the analytical fact that
+  `cos(2π·f·N/N + φ) = cos(φ)` for integer `f`, so the projection at `i=N`
+  is a simple weighted sum of the real parts of the kept FFT coefficients.
+- The in-window reconstruction at `i = N-1` is **Hann-distorted** (no `hann`
+  compensation, since `hann ≈ 0` at the edge makes division unstable). The
+  *delta* between projection and last value is the strategy's signal —
+  both terms carry the same Hann scaling so their difference is meaningful.
+- `Δ` is a log-price difference; ATR is a price difference. The strategy
+  converts ATR to log-units (`ATR / close`) before applying
+  `delta_min_atr × ATR_log` as the noise floor.
+- `min_cycle_bars < max_cycle_bars < fft_window / 2` (Nyquist) is enforced
+  inside `generate_signals` (invalid combos emit zero signals).
+- `use_projection_exit` and `use_cycle_exit` are exposed but **disabled** —
+  need a custom `Backtester` exit hook.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped — no `data/crypto/`.
 
 ---
 

@@ -212,3 +212,215 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class FFTCycleFilterParams:
+    """FFT cycle filter strategy parameters."""
+
+    fft_window: int = 128
+    min_cycle_bars: int = 8
+    max_cycle_bars: int = 64
+    n_harmonics: int = 0
+    delta_min_atr: float = 0.1
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    min_power_fraction: float = 0.0
+    # Projection-reversal / phase-cycle exits cannot be expressed cleanly
+    # through the existing Backtester contract.
+    use_projection_exit: bool = False
+    use_cycle_exit: bool = False
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def _fft_projection_delta(
+    log_close: np.ndarray,
+    hann: np.ndarray,
+    f_min: int,
+    f_max: int,
+    n_harmonics: int,
+    min_power_fraction: float,
+) -> float:
+    """One bar's FFT projection delta on the trailing window of log-prices.
+
+    Returns ``Δ = x_projected − x_filtered[N-1]``.  Returns NaN if the
+    `min_power_fraction` floor isn't met (insufficient signal in the band).
+    """
+    N = len(log_close)
+    x_idx = np.arange(N, dtype=float)
+    slope, intercept = np.polyfit(x_idx, log_close, 1)
+    trend = intercept + slope * x_idx
+    x_detrended = log_close - trend
+
+    x_w = x_detrended * hann
+    X = np.fft.rfft(x_w)
+    n_freqs = len(X)  # N//2 + 1
+
+    keep = np.zeros(n_freqs, dtype=bool)
+    lo = max(1, f_min)
+    hi = min(n_freqs, f_max + 1)
+    if lo < hi:
+        keep[lo:hi] = True
+
+    power = (X.real ** 2 + X.imag ** 2)
+    total_power = power[1:].sum()
+    if total_power <= 0:
+        return float("nan")
+    in_band_power = power[keep].sum()
+    if min_power_fraction > 0 and in_band_power / total_power < min_power_fraction:
+        return float("nan")
+
+    if n_harmonics > 0:
+        in_band_idx = np.where(keep)[0]
+        if len(in_band_idx) > n_harmonics:
+            top = in_band_idx[np.argsort(-power[in_band_idx])[:n_harmonics]]
+            new_keep = np.zeros_like(keep)
+            new_keep[top] = True
+            keep = new_keep
+
+    X_filtered = np.where(keep, X, 0.0)
+
+    # In-window reconstruction at the right edge (Hann-distorted; we accept
+    # this rather than dividing by hann≈0 at the edge, which is unstable).
+    x_recon = np.fft.irfft(X_filtered, n=N)
+    last_filtered = x_recon[-1] + trend[-1]
+
+    # Projection at i=N: cos(2π·f·N/N + φ) = cos(2π·f + φ) = cos(φ) for integer f.
+    # Real-FFT scaling: 2/N for interior coefficients, 1/N for DC and Nyquist.
+    coeffs = np.full(n_freqs, 2.0 / N)
+    coeffs[0] = 1.0 / N
+    if N % 2 == 0:
+        coeffs[-1] = 1.0 / N
+    proj_detrended = float(np.sum(coeffs * X_filtered.real))
+    trend_N = intercept + slope * N
+    x_projected = proj_detrended + trend_N
+    return x_projected - last_filtered
+
+
+def _rolling_fft_delta(
+    close: pd.Series,
+    fft_window: int,
+    min_cycle_bars: int,
+    max_cycle_bars: int,
+    n_harmonics: int,
+    min_power_fraction: float,
+) -> pd.Series:
+    """Per-bar FFT projection delta on a rolling ``fft_window`` of log-close."""
+    N = int(fft_window)
+    n = len(close)
+    out = np.full(n, np.nan)
+    if N < 4 or n < N:
+        return pd.Series(out, index=close.index)
+
+    log_close = np.log(close.to_numpy())
+    if np.isnan(log_close).any():
+        # Replace any NaNs (shouldn't occur in clean OHLC) with forward-fill.
+        log_close = pd.Series(log_close).ffill().to_numpy()
+
+    # Pre-compute Hann window of length N once.
+    hann = 0.5 * (1.0 - np.cos(2 * np.pi * np.arange(N) / (N - 1)))
+
+    f_min = int(np.floor(N / max_cycle_bars))
+    f_max = int(np.ceil(N / min_cycle_bars))
+
+    for i in range(N - 1, n):
+        window = log_close[i - N + 1 : i + 1]
+        if np.isnan(window).any():
+            continue
+        out[i] = _fft_projection_delta(
+            window, hann, f_min, f_max, n_harmonics, min_power_fraction
+        )
+    return pd.Series(out, index=close.index)
+
+
+class FFTCycleFilterStrategy:
+    """Rolling FFT cycle filter with one-bar forward projection.
+
+    Indicator pipeline (per bar ``t``):
+      1. Take the last ``fft_window`` log-closes.
+      2. Detrend (linear fit) and Hann-window.
+      3. FFT → keep frequencies in the period band
+         ``[min_cycle_bars, max_cycle_bars]`` (optionally only the top
+         ``n_harmonics`` by power within the band).
+      4. Compute one-bar-ahead projection via cosine evaluation of each
+         retained harmonic at ``i=N``; add back the linear trend
+         extrapolation.  ``Δ(t) = x_projected − x_filtered[N-1]``.
+
+    Entry:
+      * Long when ``Δ(t) > delta_min_atr × ATR`` and ``Δ(t-1) ≤ 0``.
+      * Short when ``Δ(t) < -delta_min_atr × ATR`` and ``Δ(t-1) ≥ 0``.
+
+    Exit (via Backtester):
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite fresh-shift signal reverses the position.
+    """
+
+    def __init__(self, params: FFTCycleFilterParams | None = None):
+        self.params = params or FFTCycleFilterParams()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        out["fft_delta"] = _rolling_fft_delta(
+            out["close"],
+            p.fft_window,
+            p.min_cycle_bars,
+            p.max_cycle_bars,
+            p.n_harmonics,
+            p.min_power_fraction,
+        )
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        # Invalid band → no signals (avoids confusing WFO scores).
+        if p.min_cycle_bars >= p.max_cycle_bars or p.max_cycle_bars >= p.fft_window // 2:
+            ind["signal"] = np.zeros(len(ind), dtype=int)
+            return ind
+
+        # Δ is a *log-price* difference; ATR is a *price* difference. To make
+        # them comparable, convert ATR to log-price via dividing by close (an
+        # ATR price-change of `atr` is roughly `atr / close` in log space for
+        # small moves).
+        atr_log = ind["atr"] / ind["close"]
+        delta = ind["fft_delta"]
+        prev_delta = delta.shift(1)
+
+        thresh = p.delta_min_atr * atr_log
+        long_sig = (delta > thresh) & (prev_delta <= 0)
+        short_sig = (delta < -thresh) & (prev_delta >= 0)
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = ind["atr"].isna() | ind["fft_delta"].isna()
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
