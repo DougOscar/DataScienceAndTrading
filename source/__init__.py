@@ -1,6 +1,16 @@
 """Reusable building blocks for the notebooks in this repo."""
 
-from .data_loader import DatasetMeta, load_all, load_csv, resample_ohlc
+from .data_loader import (
+    DatasetMeta,
+    LazyDataset,
+    build_lazy_grid,
+    discover_datasets,
+    iter_windowed_bars,
+    load_all,
+    load_all_lazy,
+    load_csv,
+    resample_ohlc,
+)
 from .strategy import (
     SMACrossoverStrategy,
     StrategyParams,
@@ -14,7 +24,7 @@ from .dashboard import (
     plot_wfo_dashboard,
     plot_robustness_dashboard,
 )
-from .wfo import walk_forward, WFOResult
+from .wfo import walk_forward, WFOResult, default_score
 from .robustness import (
     monte_carlo_trades,
     monte_carlo_summary,
@@ -23,10 +33,23 @@ from .robustness import (
     parameter_sensitivity,
 )
 from .portfolio import correlation_weights, weighted_portfolio
+from .parallel import cpu_count, parallel_map, resolve_n_jobs
+from .runner import (
+    GridSpec,
+    reshape_grid_results,
+    run_backtest_grid,
+    run_backtests_with_params,
+    run_wfo_grid,
+)
 
 __all__ = [
     "DatasetMeta",
+    "LazyDataset",
+    "build_lazy_grid",
+    "discover_datasets",
+    "iter_windowed_bars",
     "load_all",
+    "load_all_lazy",
     "load_csv",
     "resample_ohlc",
     "SMACrossoverStrategy",
@@ -43,6 +66,7 @@ __all__ = [
     "plot_robustness_dashboard",
     "walk_forward",
     "WFOResult",
+    "default_score",
     "monte_carlo_trades",
     "monte_carlo_summary",
     "block_bootstrap_trades",
@@ -50,4 +74,12 @@ __all__ = [
     "parameter_sensitivity",
     "correlation_weights",
     "weighted_portfolio",
+    "cpu_count",
+    "parallel_map",
+    "resolve_n_jobs",
+    "GridSpec",
+    "reshape_grid_results",
+    "run_backtest_grid",
+    "run_backtests_with_params",
+    "run_wfo_grid",
 ]
