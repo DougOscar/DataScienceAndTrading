@@ -212,3 +212,126 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class KeltnerReversionParams:
+    """Keltner Channel mean-reversion parameters.
+
+    Two ATR periods are tracked:
+      * ``atr_period`` — feeds the Backtester's SL/TP placement (the ``atr``
+        column).  Same role as in other strategies.
+      * ``kc_atr_period`` — Keltner ATR for the channel width (often shorter
+        / more reactive than the stop ATR).
+    """
+
+    kc_period: int = 20
+    kc_atr_period: int = 10
+    kc_mult: float = 2.0
+    atr_period: int = 14
+    sl_atr_mult: float = 2.5
+    # Approximates the EMA-touch take-profit: at entry the distance from the
+    # outer band to the EMA is roughly ``kc_mult × ATR_kc``.  Using
+    # ``tp_atr_mult ≈ kc_mult`` produces a similar effective RR.
+    tp_atr_mult: float = 2.0
+    adx_period: int = 14
+    adx_max: float = 25.0
+    use_adx_filter: bool = True
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class KeltnerReversionStrategy:
+    """Keltner Channel mean-reversion with ATR-based stop + EMA-target TP.
+
+    Entry:
+      * Long when ``close <= KC_lower`` (price touches/exceeds lower band).
+      * Short when ``close >= KC_upper``.
+    Exit (via Backtester):
+      * Hard SL at ``entry ± sl_atr_mult × ATR_entry`` (stop ATR).
+      * Hard TP at ``entry ± tp_atr_mult × ATR_entry`` — an ATR-based proxy
+        for the doc's dynamic "EMA touch" target.
+      * Opposite band touch reverses the position.
+    Filters:
+      * ADX regime filter (on by default per the doc): only enter when
+        ``ADX < adx_max`` so we don't fight strong trends.
+    """
+
+    def __init__(self, params: KeltnerReversionParams | None = None):
+        self.params = params or KeltnerReversionParams()
+
+    def _wilder_ema(self, s: pd.Series, period: int) -> pd.Series:
+        return s.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        # Stop ATR — used by the Backtester for SL/TP placement.
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+        # Keltner ATR — used only for the channel width.
+        out["kc_atr"] = tr.rolling(p.kc_atr_period, min_periods=p.kc_atr_period).mean()
+
+        out["kc_mid"] = out["close"].ewm(
+            span=max(2, p.kc_period), adjust=False, min_periods=p.kc_period
+        ).mean()
+        out["kc_upper"] = out["kc_mid"] + p.kc_mult * out["kc_atr"]
+        out["kc_lower"] = out["kc_mid"] - p.kc_mult * out["kc_atr"]
+
+        if p.use_adx_filter:
+            up = out["high"].diff()
+            dn = -out["low"].diff()
+            plus_dm = np.where((up > dn) & (up > 0), up, 0.0)
+            minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+            plus_dm = pd.Series(plus_dm, index=out.index)
+            minus_dm = pd.Series(minus_dm, index=out.index)
+            atr_w = self._wilder_ema(tr, p.adx_period)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                plus_di = 100.0 * self._wilder_ema(plus_dm, p.adx_period) / atr_w
+                minus_di = 100.0 * self._wilder_ema(minus_dm, p.adx_period) / atr_w
+                dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+            out["adx"] = self._wilder_ema(dx, p.adx_period)
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        long_touch = ind["close"] <= ind["kc_lower"]
+        short_touch = ind["close"] >= ind["kc_upper"]
+        signal = np.where(long_touch, 1, np.where(short_touch, -1, 0))
+
+        if p.use_adx_filter and "adx" in ind.columns:
+            allow = (ind["adx"] < p.adx_max).fillna(False).to_numpy()
+            signal = np.where(allow, signal, 0)
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = (
+            ind["atr"].isna()
+            | ind["kc_upper"].isna()
+            | ind["kc_lower"].isna()
+        )
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
