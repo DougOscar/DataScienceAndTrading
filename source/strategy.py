@@ -212,3 +212,125 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class DonchianBreakoutParams:
+    """Donchian channel breakout (Turtle-style) parameters."""
+
+    dc_entry: int = 20
+    dc_exit: int = 10
+    atr_period: int = 14
+    sl_atr_mult: float = 3.0
+    # Donchian's primary trailing stop is the dc_exit channel; ATR-based TP is
+    # disabled by default per the doc.  An effectively-infinite tp_atr_mult
+    # keeps the Backtester's TP logic inert.
+    tp_atr_mult: float = 100.0
+    use_tp: bool = False
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    # Note: the constraint dc_exit < dc_entry is *not* enforced in
+    # __post_init__ because the WFO driver iterates the full grid via
+    # itertools.product and would crash on every invalid combo.  Invalid
+    # configs simply produce zero signals (see DonchianBreakoutStrategy) so the
+    # WFO score is -inf and the combo is effectively skipped.
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class DonchianBreakoutStrategy:
+    """Donchian channel breakout with ATR catastrophic stop.
+
+    Entry:
+      * Long when ``close > DC_high_entry`` (prior-bar N-period high).
+      * Short when ``close < DC_low_entry`` (prior-bar N-period low).
+    Exit:
+      * Donchian trailing stop: when long and ``close < DC_low_exit`` (tighter
+        N2-period prior low), flip to short.  Mirror for short → long.  The
+        Backtester's signal-reversal logic implements this directly.
+      * Catastrophic ATR stop at ``entry ± sl_atr_mult × ATR_entry``.
+      * ATR-based TP is disabled by default (``tp_atr_mult=100`` — Backtester
+        will never hit it); flip to a tighter value to re-enable.
+    """
+
+    def __init__(self, params: DonchianBreakoutParams | None = None):
+        self.params = params or DonchianBreakoutParams()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        # Donchian channels — prior bars only (shift by 1 to exclude bar t).
+        prior_high = out["high"].shift(1)
+        prior_low = out["low"].shift(1)
+        out["dc_high_entry"] = prior_high.rolling(
+            p.dc_entry, min_periods=p.dc_entry
+        ).max()
+        out["dc_low_entry"] = prior_low.rolling(
+            p.dc_entry, min_periods=p.dc_entry
+        ).min()
+        out["dc_high_exit"] = prior_high.rolling(
+            p.dc_exit, min_periods=p.dc_exit
+        ).max()
+        out["dc_low_exit"] = prior_low.rolling(
+            p.dc_exit, min_periods=p.dc_exit
+        ).min()
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        # Invalid combo (dc_exit >= dc_entry) → emit no signals so WFO scores
+        # it -inf and moves on.
+        if p.dc_exit >= p.dc_entry:
+            ind["signal"] = np.zeros(len(ind), dtype=int)
+            return ind
+
+        close = ind["close"]
+        long_entry = close > ind["dc_high_entry"]
+        short_entry = close < ind["dc_low_entry"]
+
+        # Trend state derived purely from price vs. the wider entry channel so
+        # the dc_exit reversal only fires when we're "in trend" — flat-state
+        # spurious flips are filtered out.
+        raw_trend = np.where(long_entry, 1, np.where(short_entry, -1, np.nan))
+        trend_state = pd.Series(raw_trend, index=ind.index).ffill().fillna(0)
+        trend_prev = trend_state.shift(1).fillna(0)
+
+        long_exit_to_short = (close < ind["dc_low_exit"]) & (trend_prev == 1)
+        short_exit_to_long = (close > ind["dc_high_exit"]) & (trend_prev == -1)
+
+        long_sig = long_entry | short_exit_to_long
+        short_sig = short_entry | long_exit_to_short
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = (
+            ind["atr"].isna() | ind["dc_high_entry"].isna() | ind["dc_low_entry"].isna()
+        )
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
