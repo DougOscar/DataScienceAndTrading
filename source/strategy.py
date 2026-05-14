@@ -212,3 +212,115 @@ class RSIMeanReversionStrategy:
 
         ind["signal"] = signal.astype(int)
         return ind
+
+
+@dataclass
+class BBSqueezeParams:
+    """Bollinger Band squeeze breakout parameters.
+
+    Field names follow the contract the Backtester reads (sl_atr_mult,
+    tp_atr_mult, session_start, session_end, sizing_mode, risk_fraction).
+    """
+
+    bb_period: int = 20
+    bb_mult: float = 2.0
+    squeeze_lookback: int = 20
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    vol_period: int = 20
+    vol_ratio_min: float = 1.5
+    use_vol_filter: bool = False
+    # Band-re-entry exit (close back inside the broken band) is described in the
+    # doc but cannot be expressed cleanly through the existing Backtester's
+    # signal/SL/TP/reversal contract — leave disabled until a custom-exit hook
+    # is added.
+    use_band_reentry_exit: bool = False
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class BBSqueezeStrategy:
+    """Bollinger Band squeeze breakout with ATR-based stop loss / take profit.
+
+    Entry:
+      * Long when ``close > BB_upper`` and a squeeze (BB Width at its
+        ``squeeze_lookback`` rolling minimum) was active on bar ``t-1`` or
+        ``t-2`` — i.e. volatility was compressed and price is now breaking out.
+      * Short when ``close < BB_lower`` with the same squeeze recency rule.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite breakout signal reverses the position.
+    Filters:
+      * Optional volume confirmation: ``tick_vol / SMA(tick_vol) >= vol_ratio_min``.
+    """
+
+    def __init__(self, params: BBSqueezeParams | None = None):
+        self.params = params or BBSqueezeParams()
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        mid = out["close"].rolling(p.bb_period, min_periods=p.bb_period).mean()
+        std = out["close"].rolling(p.bb_period, min_periods=p.bb_period).std(ddof=1)
+        out["bb_mid"] = mid
+        out["bb_upper"] = mid + p.bb_mult * std
+        out["bb_lower"] = mid - p.bb_mult * std
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / mid
+
+        sq_min = out["bb_width"].rolling(
+            p.squeeze_lookback, min_periods=p.squeeze_lookback
+        ).min()
+        out["squeeze"] = (out["bb_width"] <= sq_min).astype(int)
+
+        if p.use_vol_filter and "tick_vol" in out.columns:
+            vsma = out["tick_vol"].rolling(p.vol_period, min_periods=p.vol_period).mean()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["vol_ratio"] = out["tick_vol"] / vsma
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        p = self.params
+
+        sq_recent = (ind["squeeze"].shift(1).fillna(0) > 0) | (
+            ind["squeeze"].shift(2).fillna(0) > 0
+        )
+        long_breakout = (ind["close"] > ind["bb_upper"]) & sq_recent
+        short_breakout = (ind["close"] < ind["bb_lower"]) & sq_recent
+        signal = np.where(long_breakout, 1, np.where(short_breakout, -1, 0))
+
+        if p.use_vol_filter and "vol_ratio" in ind.columns:
+            allow = (ind["vol_ratio"] >= p.vol_ratio_min).fillna(False).to_numpy()
+            signal = np.where(allow, signal, 0)
+
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+
+        nan_guard = ind["atr"].isna() | ind["bb_upper"].isna() | ind["bb_width"].isna()
+        signal = np.where(nan_guard, 0, signal)
+
+        ind["signal"] = signal.astype(int)
+        return ind
