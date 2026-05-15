@@ -245,7 +245,23 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 **Notebook:** `technical_analysis/08_hurst_regime_switcher.ipynb`
 **Source module:** `source/strategy.py` — `HurstRegimeSwitcherStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `HurstRegimeSwitcherParams`
+
+### Implementation Notes
+
+- Hurst is estimated via **R/S analysis** on the last `hurst_window` log-
+  returns (`source.strategy._rs_hurst`).
+- The Hurst series is recomputed every `hurst_step` bars and **forward-
+  filled** between recomputes — the doc's default `hurst_step=1` is replaced
+  by **`hurst_step=4`** in the baseline to keep WFO wall-clock manageable.
+  The user can drop to 1 for full precision when running a single backtest.
+- `use_regime_exit` is exposed but **disabled** — closing on regime-change
+  needs a custom `Backtester` exit hook.
+- WFO grid is **trimmed** vs the full doc grid (RSI thresholds + period
+  fixed at baseline values); per the doc's own caveats, R/S Hurst is biased
+  on short windows so over-tuning is discouraged.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped — no `data/crypto/` files.
 
 ---
 

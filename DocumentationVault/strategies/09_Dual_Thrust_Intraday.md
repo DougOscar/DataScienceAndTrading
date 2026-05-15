@@ -216,7 +216,22 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 **Notebook:** `technical_analysis/09_dual_thrust_intraday.ipynb`
 **Source module:** `source/strategy.py` — `DualThrustStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `DualThrustParams`
+
+### Implementation Notes
+
+- Daily OHLC is computed from **in-session bars only** (`session_start` /
+  `session_end` define the window). The current session's triggers come from
+  the prior `dt_lookback` sessions, shifted by one to avoid look-ahead.
+- The Backtester's existing `session_start` / `session_end` handling provides
+  the **session-end forced close** referenced in the doc — `DualThrustParams`
+  defaults `session_start=9`, `session_end=18` (B3).
+- `entry_cutoff_minutes` is honoured by suppressing entries when the bar is
+  within `cutoff` minutes of `session_end`.
+- The notebook targets B3 on 5min and 15min. The doc's 1min timeframe is
+  **dropped** from the notebook for WFO cost reasons — the user can add it
+  back by editing `GROUP_TIMEFRAMES` in §2.
+- Crypto group skipped — no `data/crypto/` files.
 
 ---
 

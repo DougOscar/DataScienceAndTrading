@@ -232,9 +232,22 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 ## Implementation
 
-**Notebook:** `technical_analysis/11_stochastic_divergence.ipynb`
+**Notebook:** `technical_analysis/12_stochastic_divergence.ipynb`
 **Source module:** `source/strategy.py` — `StochasticDivergenceStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `StochasticDivergenceParams`
+
+### Implementation Notes
+
+- **Only the crossover mode is implemented** in v1. The divergence mode
+  requires programmatic swing-high / swing-low detection (rolling
+  argmax/argmin pivots) plus a robust last-two-pivots comparison and is a
+  follow-up. `entry_mode="divergence"` currently emits zero signals.
+- `use_midline_exit` is exposed but **disabled** — close on %K=50 needs a
+  custom `Backtester` exit hook.
+- `use_d_filter` (the %D mid-line confirmation) is implemented as an entry
+  filter only and is off by default.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped — no `data/crypto/`.
 
 ---
 
