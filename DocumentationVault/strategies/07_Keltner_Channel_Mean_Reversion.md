@@ -219,7 +219,22 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 **Notebook:** `technical_analysis/07_keltner_channel_reversion.ipynb`
 **Source module:** `source/strategy.py` — `KeltnerReversionStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `KeltnerReversionParams`
+
+### Implementation Notes
+
+- The doc's dynamic **EMA-touch take profit** is **approximated** by a fixed
+  ATR-based TP (`tp_atr_mult × ATR_stop`) since the existing `Backtester`
+  only supports fixed-at-entry SL/TP. Implementing true EMA-touch TP needs
+  a custom exit hook.
+- Two ATR periods are tracked: `atr_period` feeds the Backtester's SL/TP
+  placement (the `atr` column), and `kc_atr_period` is used only for the
+  Keltner channel width.
+- ADX filter is **on** by default per the doc.
+- `reentry_cooldown` from the doc is **not implemented** — would need a
+  stateful signal-generation pass.
+- Crypto group skipped — no `data/crypto/` files. B3 is not a target for
+  this strategy in the doc, so the notebook runs on Forex only.
 
 ---
 
