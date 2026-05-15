@@ -215,6 +215,32 @@ class RSIMeanReversionStrategy:
 
 
 @dataclass
+class HMMRegimeFilterParams:
+    """HMM regime-filter parameters.
+
+    NOTE: the regime model is **sklearn's GaussianMixture**, not a full HMM —
+    the doc calls for a Gaussian HMM with hmmlearn but that dependency isn't
+    in requirements.txt and rolling-window retraining is not supported by the
+    existing Backtester.  GMM gives ``P(state | obs)`` directly (no transition
+    matrix) and is fit **once** on the first ``hmm_train_window`` bars per
+    backtest call (so each WFO fold gets its own fit).  See the notebook for
+    a full discussion of the simplification.
+    """
+
+    n_states: int = 3
+    hmm_train_window: int = 504
+    hmm_prob_threshold: float = 0.70
+    hmm_exit_threshold: float = 0.40
+    rv_window: int = 20
+    vol_period: int = 20
+    sma_fast: int = 20
+    sma_slow: int = 50
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.5
+    # HMM-regime-driven exit cannot be expressed cleanly through the existing
+    # Backtester's signal/SL/TP/reversal contract — leave disabled.
+    use_hmm_exit: bool = False
 class DualThrustParams:
     """Dual Thrust intraday breakout parameters."""
 
@@ -368,6 +394,50 @@ class BBSqueezeParams:
         return asdict(self)
 
 
+class HMMRegimeFilterStrategy:
+    """SMA-crossover trend strategy gated on a Gaussian-Mixture regime model.
+
+    Observation features per bar:
+      * log_return
+      * realized_vol (rolling std of log_return over ``rv_window``)
+      * normalized_volume (``tick_vol / SMA(tick_vol)``) — used only when
+        ``tick_vol`` is present; otherwise two features.
+
+    Regime model: ``sklearn.mixture.GaussianMixture`` with ``n_states``
+    components, fit on the first ``hmm_train_window`` bars of the input.
+    States are labeled by ascending mean of the log_return feature:
+
+      * lowest mean → "bear"
+      * highest mean → "bull"
+      * any middle → "neutral"
+
+    Entry:
+      * Long on a fresh SMA golden cross **and** P(bull) ≥ ``hmm_prob_threshold``.
+      * Short on a fresh SMA death cross **and** P(bear) ≥ ``hmm_prob_threshold``.
+
+    Exit via Backtester: SL/TP + signal reversal.  Periodic GMM retraining is
+    not implemented (the model is fit once per backtest call); each WFO fold
+    therefore gets its own model fit, so on a 5-fold WFO the model is
+    effectively re-trained 5 times.
+    """
+
+    def __init__(self, params: HMMRegimeFilterParams | None = None):
+        self.params = params or HMMRegimeFilterParams()
+
+    def _features(self, out: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """Return (X, valid_mask) for the GMM."""
+        p = self.params
+        log_ret = np.log(out["close"]).diff()
+        realized_vol = log_ret.rolling(p.rv_window, min_periods=p.rv_window).std(ddof=0)
+        cols = [log_ret, realized_vol]
+        if "tick_vol" in out.columns:
+            vsma = out["tick_vol"].rolling(p.vol_period, min_periods=p.vol_period).mean()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                norm_vol = out["tick_vol"] / vsma
+            cols.append(norm_vol)
+        X = np.column_stack([c.to_numpy() for c in cols])
+        valid = ~np.any(np.isnan(X), axis=1) & ~np.any(np.isinf(X), axis=1)
+        return X, valid
 class DualThrustStrategy:
     """Intraday Dual Thrust breakout.
 
@@ -575,6 +645,51 @@ class BBSqueezeStrategy:
             axis=1,
         ).max(axis=1)
         out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+        out["sma_fast"] = out["close"].rolling(p.sma_fast, min_periods=p.sma_fast).mean()
+        out["sma_slow"] = out["close"].rolling(p.sma_slow, min_periods=p.sma_slow).mean()
+
+        out["p_bull"] = np.nan
+        out["p_bear"] = np.nan
+        out["regime"] = ""
+
+        X, valid = self._features(out)
+        train_end = p.hmm_train_window
+        valid_train = valid[:train_end].sum()
+        if valid_train < max(50, p.n_states * 10):
+            return out
+
+        try:
+            from sklearn.mixture import GaussianMixture
+        except ImportError:
+            return out
+
+        X_train = X[:train_end][valid[:train_end]]
+        try:
+            gm = GaussianMixture(
+                n_components=p.n_states,
+                covariance_type="full",
+                random_state=42,
+                max_iter=200,
+                reg_covar=1e-5,
+            ).fit(X_train)
+        except Exception:
+            return out
+
+        # Predict probabilities on the *full* valid history. The model is fit
+        # on the warm-up window; everything after is true out-of-sample.
+        X_valid = X[valid]
+        proba = gm.predict_proba(X_valid)
+
+        # Label states by ascending log-return mean (column 0).
+        order = np.argsort(gm.means_[:, 0])
+        bear_idx, bull_idx = int(order[0]), int(order[-1])
+
+        p_bull_full = np.full(len(out), np.nan)
+        p_bear_full = np.full(len(out), np.nan)
+        p_bull_full[valid] = proba[:, bull_idx]
+        p_bear_full[valid] = proba[:, bear_idx]
+        out["p_bull"] = p_bull_full
+        out["p_bear"] = p_bear_full
 
         # In-session mask — daily aggregates are computed only on in-session bars.
         hour = out.index.hour
@@ -714,6 +829,14 @@ class BBSqueezeStrategy:
         ind = self.compute_indicators(df)
         p = self.params
 
+        diff = ind["sma_fast"] - ind["sma_slow"]
+        prev_diff = diff.shift()
+        golden = (diff > 0) & (prev_diff <= 0)
+        death = (diff < 0) & (prev_diff >= 0)
+
+        long_sig = golden & (ind["p_bull"] >= p.hmm_prob_threshold)
+        short_sig = death & (ind["p_bear"] >= p.hmm_prob_threshold)
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
         in_session = (ind.index.hour >= p.session_start) & (
             ind.index.hour < p.session_end
         )
@@ -825,6 +948,8 @@ class BBSqueezeStrategy:
             signal = np.where(in_session, signal, 0)
 
         nan_guard = (
+            ind["atr"].isna() | ind["sma_slow"].isna() | ind["p_bull"].isna()
+        )
             ind["atr"].isna()
             | ind["hurst"].isna()
             | ind["sma_slow"].isna()
