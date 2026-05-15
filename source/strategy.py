@@ -215,6 +215,16 @@ class RSIMeanReversionStrategy:
 
 
 @dataclass
+class LinearRegressionChannelParams:
+    """Linear Regression Channel dual-mode strategy parameters."""
+
+    lr_period: int = 50
+    lr_mult: float = 2.0
+    slope_threshold: float = 0.3
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    mode: str = "auto"   # "auto" | "trend" | "reversion"
 class StochasticDivergenceParams:
     """Stochastic oscillator strategy parameters (crossover mode).
 
@@ -435,6 +445,86 @@ class BBSqueezeParams:
         return asdict(self)
 
 
+def _rolling_ols_channel(close: np.ndarray, period: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (reg_line_end, slope, std_err) arrays computed in O(N) total.
+
+    For each bar t, ``reg_line_end[t]`` is the OLS regression line value at
+    the right edge of the ``period``-bar window ending at t (i.e. the
+    predicted price at bar t given the rolling fit).  ``std_err`` is the
+    sample standard error of the regression.
+    """
+    n = len(close)
+    out_line = np.full(n, np.nan)
+    out_slope = np.full(n, np.nan)
+    out_se = np.full(n, np.nan)
+    if period < 2 or n < period:
+        return out_line, out_slope, out_se
+
+    # Precompute cumulative sums of y and y².
+    y = close
+    cum_y = np.concatenate(([0.0], np.cumsum(y)))
+    cum_y2 = np.concatenate(([0.0], np.cumsum(y * y)))
+    # cum_ky[k] = sum_{j=0..k-1} j * y[j]
+    j_idx = np.arange(n, dtype=float)
+    cum_jy = np.concatenate(([0.0], np.cumsum(j_idx * y)))
+
+    N = period
+    mean_x = (N - 1) / 2.0
+    sum_xx_centered = N * (N * N - 1) / 12.0  # Σ(x - mean_x)² for x=0..N-1
+
+    for i in range(N - 1, n):
+        a = i - N + 1
+        b = i + 1
+        sum_y = cum_y[b] - cum_y[a]
+        sum_y2 = cum_y2[b] - cum_y2[a]
+        sum_jy = cum_jy[b] - cum_jy[a]
+        # In the window, the x values are 0..N-1; the underlying j-indices
+        # are a..i.  sum_xy (x = j - a) = Σ(j - a)y_j = sum_jy - a * sum_y.
+        sum_xy = sum_jy - a * sum_y
+        mean_y = sum_y / N
+        sum_xy_centered = sum_xy - N * mean_x * mean_y
+        slope = sum_xy_centered / sum_xx_centered
+        intercept = mean_y - slope * mean_x
+        # Residual sum of squares = Σ y² − slope·sum_xy_uncentered − intercept·sum_y
+        ss_res = sum_y2 - slope * sum_xy - intercept * sum_y
+        # Numerical floor.
+        if ss_res < 0:
+            ss_res = 0.0
+        se = np.sqrt(ss_res / (N - 2)) if N > 2 else np.nan
+        reg_end = intercept + slope * (N - 1)
+        out_line[i] = reg_end
+        out_slope[i] = slope
+        out_se[i] = se
+    return out_line, out_slope, out_se
+
+
+class LinearRegressionChannelStrategy:
+    """Linear regression channel — dual-mode (trend or reversion).
+
+    Mode selection (when ``mode="auto"``):
+      * ``|slope_norm| >= slope_threshold`` → trend mode (breakout in slope dir).
+      * ``|slope_norm| < slope_threshold`` → reversion mode (touch outer band).
+
+    Where ``slope_norm = slope × lr_period / ATR`` (number of ATR units the
+    regression line traverses over one full window).
+
+    Trend mode entries:
+      * Long: slope_norm ≥ threshold AND close > upper_band AND prev close
+        was inside the channel.
+      * Short: slope_norm ≤ -threshold AND close < lower_band AND prev close
+        was inside the channel.
+
+    Reversion mode entries:
+      * Long: |slope_norm| < threshold AND close ≤ lower_band.
+      * Short: |slope_norm| < threshold AND close ≥ upper_band.
+
+    Exit (via Backtester):
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite signal reverses the position.
+    """
+
+    def __init__(self, params: LinearRegressionChannelParams | None = None):
+        self.params = params or LinearRegressionChannelParams()
 class StochasticDivergenceStrategy:
     """Stochastic %K oversold/overbought crossover with ATR stops.
 
@@ -725,6 +815,15 @@ class BBSqueezeStrategy:
         ).max(axis=1)
         out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
 
+        reg, slope, se = _rolling_ols_channel(out["close"].to_numpy(), p.lr_period)
+        out["reg_line"] = reg
+        out["reg_slope"] = slope
+        out["reg_se"] = se
+        out["upper_band"] = out["reg_line"] + p.lr_mult * out["reg_se"]
+        out["lower_band"] = out["reg_line"] - p.lr_mult * out["reg_se"]
+        # Normalized slope: ATR units traversed per window.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["slope_norm"] = slope * p.lr_period / out["atr"].to_numpy()
         lowest_low = out["low"].rolling(p.k_period, min_periods=p.k_period).min()
         highest_high = out["high"].rolling(p.k_period, min_periods=p.k_period).max()
         denom = highest_high - lowest_low
@@ -970,6 +1069,46 @@ class BBSqueezeStrategy:
         ind = self.compute_indicators(df)
         p = self.params
 
+        close = ind["close"]
+        prev_close = close.shift()
+        upper = ind["upper_band"]
+        lower = ind["lower_band"]
+        sn = ind["slope_norm"]
+
+        trending = sn.abs() >= p.slope_threshold
+        flat = sn.abs() < p.slope_threshold
+
+        mode = p.mode.lower()
+        if mode == "trend":
+            allow_trend = True
+            allow_rev = False
+        elif mode == "reversion":
+            allow_trend = False
+            allow_rev = True
+        else:
+            allow_trend = True
+            allow_rev = True
+
+        long_trend = (
+            allow_trend
+            & trending
+            & (sn > 0)
+            & (close > upper)
+            & (prev_close <= upper.shift(1))
+        )
+        short_trend = (
+            allow_trend
+            & trending
+            & (sn < 0)
+            & (close < lower)
+            & (prev_close >= lower.shift(1))
+        )
+        long_rev = allow_rev & flat & (close <= lower)
+        short_rev = allow_rev & flat & (close >= upper)
+
+        long_sig = long_trend | long_rev
+        short_sig = short_trend | short_rev
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
         if p.entry_mode != "crossover":
             # Divergence mode is documented but not implemented in v1.
             ind["signal"] = np.zeros(len(ind), dtype=int)
@@ -1130,6 +1269,7 @@ class BBSqueezeStrategy:
             )
             signal = np.where(in_session, signal, 0)
 
+        nan_guard = ind["atr"].isna() | ind["reg_line"].isna() | ind["slope_norm"].isna()
         nan_guard = ind["atr"].isna() | ind["stoch_k"].isna()
         nan_guard = (
             ind["atr"].isna() | ind["sma_slow"].isna() | ind["p_bull"].isna()
