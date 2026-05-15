@@ -215,6 +215,24 @@ class RSIMeanReversionStrategy:
 
 
 @dataclass
+class DualThrustParams:
+    """Dual Thrust intraday breakout parameters."""
+
+    dt_lookback: int = 4
+    k1: float = 0.5
+    k2: float = 0.5
+    atr_period: int = 14
+    sl_atr_mult: float = 1.5
+    tp_atr_mult: float = 2.5
+    # Session window — required for daily aggregation and forced session-end
+    # close.  Defaults match B3 (09:00–18:00 BRT).
+    session_start: int = 9
+    session_end: int = 18
+    # Minutes before session end during which new entries are suppressed.
+    entry_cutoff_minutes: int = 30
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
 class HurstRegimeSwitcherParams:
     """Hurst-exponent regime switcher parameters.
 
@@ -350,6 +368,27 @@ class BBSqueezeParams:
         return asdict(self)
 
 
+class DualThrustStrategy:
+    """Intraday Dual Thrust breakout.
+
+    Each session's upper/lower trigger is computed from the prior
+    ``dt_lookback`` sessions' OHLC via the ``max(HH-LC, HC-LL)`` range
+    definition, then shifted by today's session open ± ``k × Range``.
+
+    Entry (intraday bar ``t``):
+      * Long when ``close(t) > Upper_trigger(t)`` and we're within the session
+        window minus the entry cutoff.
+      * Short when ``close(t) < Lower_trigger(t)`` (same time window).
+
+    Exit (via Backtester):
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Session-end forced close (Backtester reads ``session_start`` /
+        ``session_end`` from params).
+      * Opposite trigger reverses the position via signal reversal.
+    """
+
+    def __init__(self, params: DualThrustParams | None = None):
+        self.params = params or DualThrustParams()
 def _rs_hurst(window_returns: np.ndarray, n_min: int) -> float:
     """Compute Hurst exponent via R/S analysis on a 1-D return window.
 
@@ -537,6 +576,43 @@ class BBSqueezeStrategy:
         ).max(axis=1)
         out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
 
+        # In-session mask — daily aggregates are computed only on in-session bars.
+        hour = out.index.hour
+        in_session = (hour >= p.session_start) & (hour < p.session_end)
+        session_bars = out[in_session].copy()
+
+        if session_bars.empty:
+            out["upper_trigger"] = np.nan
+            out["lower_trigger"] = np.nan
+            return out
+
+        # Daily OHLC from in-session bars.
+        date_key = session_bars.index.normalize()
+        daily = pd.DataFrame(
+            {
+                "open": session_bars["open"].groupby(date_key).first(),
+                "high": session_bars["high"].groupby(date_key).max(),
+                "low": session_bars["low"].groupby(date_key).min(),
+                "close": session_bars["close"].groupby(date_key).last(),
+            }
+        ).sort_index()
+
+        # Range from the prior dt_lookback sessions (shift by 1 to exclude
+        # today and the *current* row's close from look-ahead).
+        prior_high = daily["high"].rolling(p.dt_lookback).max().shift(1)
+        prior_low = daily["low"].rolling(p.dt_lookback).min().shift(1)
+        prior_close_high = daily["close"].rolling(p.dt_lookback).max().shift(1)
+        prior_close_low = daily["close"].rolling(p.dt_lookback).min().shift(1)
+        range_today = np.maximum(
+            prior_high - prior_close_low, prior_close_high - prior_low
+        )
+        daily["upper_trigger"] = daily["open"] + p.k1 * range_today
+        daily["lower_trigger"] = daily["open"] - p.k2 * range_today
+
+        # Broadcast daily triggers back to every intraday bar.
+        intraday_dates = pd.Index(out.index.normalize())
+        out["upper_trigger"] = daily["upper_trigger"].reindex(intraday_dates).to_numpy()
+        out["lower_trigger"] = daily["lower_trigger"].reindex(intraday_dates).to_numpy()
         out["sma_fast"] = out["close"].rolling(p.trend_fast, min_periods=p.trend_fast).mean()
         out["sma_slow"] = out["close"].rolling(p.trend_slow, min_periods=p.trend_slow).mean()
 
@@ -638,6 +714,24 @@ class BBSqueezeStrategy:
         ind = self.compute_indicators(df)
         p = self.params
 
+        in_session = (ind.index.hour >= p.session_start) & (
+            ind.index.hour < p.session_end
+        )
+        # Entry cutoff: block new entries when we're within entry_cutoff_minutes
+        # of the session end.
+        minutes_into_day = ind.index.hour * 60 + ind.index.minute
+        cutoff_minute = p.session_end * 60 - p.entry_cutoff_minutes
+        before_cutoff = minutes_into_day < cutoff_minute
+
+        long_breakout = (ind["close"] > ind["upper_trigger"]) & in_session & before_cutoff
+        short_breakout = (
+            (ind["close"] < ind["lower_trigger"]) & in_session & before_cutoff
+        )
+        signal = np.where(long_breakout, 1, np.where(short_breakout, -1, 0))
+
+        nan_guard = (
+            ind["atr"].isna() | ind["upper_trigger"].isna() | ind["lower_trigger"].isna()
+        )
         # Trend sub-signal: fresh golden / death cross.
         diff = ind["sma_fast"] - ind["sma_slow"]
         prev_diff = diff.shift()
