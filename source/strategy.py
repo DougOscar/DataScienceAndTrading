@@ -215,6 +215,22 @@ class RSIMeanReversionStrategy:
 
 
 @dataclass
+class MACDHistogramParams:
+    """MACD histogram momentum strategy parameters."""
+
+    macd_fast: int = 12
+    macd_slow: int = 26
+    signal_period: int = 9
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.5
+    vol_period: int = 20
+    vol_ratio_min: float = 1.3
+    use_vol_filter: bool = False
+    # Deceleration exit and MACD zero-line gate cannot be expressed cleanly
+    # through the existing Backtester's signal/SL/TP/reversal contract.
+    use_decel_exit: bool = False
+    use_zero_line_gate: bool = False
 class BBSqueezeParams:
     """Bollinger Band squeeze breakout parameters.
 
@@ -241,10 +257,34 @@ class BBSqueezeParams:
     sizing_mode: str = "unit"
     risk_fraction: float = 0.01
 
+    def __post_init__(self):
+        if not self.macd_fast < self.macd_slow:
+            raise ValueError(
+                f"Constraint macd_fast < macd_slow violated "
+                f"(got macd_fast={self.macd_fast}, macd_slow={self.macd_slow})"
+            )
+
     def as_dict(self) -> dict:
         return asdict(self)
 
 
+class MACDHistogramStrategy:
+    """MACD histogram zero-line crossover with ATR-based stop loss / take profit.
+
+    Entry:
+      * Long when ``Histogram > 0`` and was non-positive on the previous bar
+        (fresh MACD line / signal line crossover from below).
+      * Short when ``Histogram < 0`` and was non-negative on the previous bar.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite zero-line crossover reverses the position.
+    Filters:
+      * Optional tick-volume confirmation (off by default).
+      * Optional MACD zero-line gate (off — would need a separate exit hook).
+    """
+
+    def __init__(self, params: MACDHistogramParams | None = None):
+        self.params = params or MACDHistogramParams()
 class BBSqueezeStrategy:
     """Bollinger Band squeeze breakout with ATR-based stop loss / take profit.
 
@@ -278,6 +318,17 @@ class BBSqueezeStrategy:
         ).max(axis=1)
         out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
 
+        ema_fast = out["close"].ewm(
+            span=p.macd_fast, adjust=False, min_periods=p.macd_fast
+        ).mean()
+        ema_slow = out["close"].ewm(
+            span=p.macd_slow, adjust=False, min_periods=p.macd_slow
+        ).mean()
+        out["macd"] = ema_fast - ema_slow
+        out["macd_signal"] = out["macd"].ewm(
+            span=p.signal_period, adjust=False, min_periods=p.signal_period
+        ).mean()
+        out["macd_hist"] = out["macd"] - out["macd_signal"]
         mid = out["close"].rolling(p.bb_period, min_periods=p.bb_period).mean()
         std = out["close"].rolling(p.bb_period, min_periods=p.bb_period).std(ddof=1)
         out["bb_mid"] = mid
@@ -301,6 +352,19 @@ class BBSqueezeStrategy:
         ind = self.compute_indicators(df)
         p = self.params
 
+        hist = ind["macd_hist"]
+        prev_hist = hist.shift()
+        long_cross = (hist > 0) & (prev_hist <= 0)
+        short_cross = (hist < 0) & (prev_hist >= 0)
+        signal = np.where(long_cross, 1, np.where(short_cross, -1, 0))
+
+        if p.use_zero_line_gate:
+            allow_long = (ind["macd"] > 0).fillna(False).to_numpy()
+            allow_short = (ind["macd"] < 0).fillna(False).to_numpy()
+            signal = np.where(
+                (signal == 1) & ~allow_long, 0,
+                np.where((signal == -1) & ~allow_short, 0, signal),
+            )
         sq_recent = (ind["squeeze"].shift(1).fillna(0) > 0) | (
             ind["squeeze"].shift(2).fillna(0) > 0
         )
@@ -319,6 +383,7 @@ class BBSqueezeStrategy:
             )
             signal = np.where(in_session, signal, 0)
 
+        nan_guard = ind["atr"].isna() | ind["macd_hist"].isna()
         nan_guard = ind["atr"].isna() | ind["bb_upper"].isna() | ind["bb_width"].isna()
         signal = np.where(nan_guard, 0, signal)
 

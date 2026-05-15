@@ -16,6 +16,8 @@ from .strategy import (
     StrategyParams,
     RSIMeanReversionStrategy,
     RSIMeanReversionParams,
+    MACDHistogramStrategy,
+    MACDHistogramParams,
     BBSqueezeStrategy,
     BBSqueezeParams,
 )
@@ -58,6 +60,8 @@ __all__ = [
     "StrategyParams",
     "RSIMeanReversionStrategy",
     "RSIMeanReversionParams",
+    "MACDHistogramStrategy",
+    "MACDHistogramParams",
     "BBSqueezeStrategy",
     "BBSqueezeParams",
     "Backtester",
