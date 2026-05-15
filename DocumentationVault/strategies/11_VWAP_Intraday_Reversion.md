@@ -221,9 +221,24 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 ## Implementation
 
-**Notebook:** `technical_analysis/10_vwap_intraday_reversion.ipynb`
+**Notebook:** `technical_analysis/11_vwap_intraday_reversion.ipynb`
 **Source module:** `source/strategy.py` — `VWAPReversionStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `VWAPReversionParams`
+
+### Implementation Notes
+
+- The dynamic **VWAP-touch take profit** is **approximated** by a fixed
+  ATR-based TP (`tp_atr_mult × ATR_stop`) — the existing `Backtester` only
+  supports fixed-at-entry SL/TP.
+- VWAP and bands reset cleanly at each session boundary using a
+  `groupby(date)` cumulative sum on volume-weighted typical price.
+- Volume weight is `tick_vol` (no contract-volume data is shipped; the doc
+  notes this caveat).
+- B3 only — no `data/crypto/` files. 1min timeframe dropped from the
+  baseline (M1 source × WFO × 2 assets × 5 folds gets expensive); user can
+  re-add via `GROUP_TIMEFRAMES`.
+- Session-end forced close is handled by the Backtester via the
+  `session_start` / `session_end` params (defaults `9` / `18`).
 
 ---
 
