@@ -217,7 +217,23 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 **Notebook:** `technical_analysis/04_macd_histogram_momentum.ipynb`
 **Source module:** `source/strategy.py` — `MACDHistogramStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `MACDHistogramParams`
+
+### Implementation Notes
+
+- `use_decel_exit` is exposed but **disabled** — the deceleration exit
+  (`|Histogram(t)| < |Histogram(t-1)|` for two consecutive bars) requires a
+  custom exit hook on `Backtester` that isn't wired yet.
+- `use_zero_line_gate` is implemented inside `generate_signals` as an entry
+  filter only (suppressing entries against MACD's sign).
+- `use_vol_filter` is disabled in the baseline so the notebook runs cleanly
+  on datasets that may not carry `tick_vol`.
+- The `macd_fast < macd_slow` constraint is enforced in
+  `MACDHistogramParams.__post_init__`. The WFO grid is constructed so every
+  combo satisfies it (max fast = 16 < min slow = 20).
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto is listed as a target market in the doc but the repo has no
+  `data/crypto/` files; the notebook runs on Forex + B3 only.
 
 ---
 
