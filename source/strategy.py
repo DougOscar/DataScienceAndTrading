@@ -227,6 +227,43 @@ class DonchianBreakoutParams:
     # keeps the Backtester's TP logic inert.
     tp_atr_mult: float = 100.0
     use_tp: bool = False
+class MACDHistogramParams:
+    """MACD histogram momentum strategy parameters."""
+
+    macd_fast: int = 12
+    macd_slow: int = 26
+    signal_period: int = 9
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.5
+    vol_period: int = 20
+    vol_ratio_min: float = 1.3
+    use_vol_filter: bool = False
+    # Deceleration exit and MACD zero-line gate cannot be expressed cleanly
+    # through the existing Backtester's signal/SL/TP/reversal contract.
+    use_decel_exit: bool = False
+    use_zero_line_gate: bool = False
+class BBSqueezeParams:
+    """Bollinger Band squeeze breakout parameters.
+
+    Field names follow the contract the Backtester reads (sl_atr_mult,
+    tp_atr_mult, session_start, session_end, sizing_mode, risk_fraction).
+    """
+
+    bb_period: int = 20
+    bb_mult: float = 2.0
+    squeeze_lookback: int = 20
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    vol_period: int = 20
+    vol_ratio_min: float = 1.5
+    use_vol_filter: bool = False
+    # Band-re-entry exit (close back inside the broken band) is described in the
+    # doc but cannot be expressed cleanly through the existing Backtester's
+    # signal/SL/TP/reversal contract — leave disabled until a custom-exit hook
+    # is added.
+    use_band_reentry_exit: bool = False
     session_start: int | None = None
     session_end: int | None = None
     sizing_mode: str = "unit"
@@ -237,6 +274,12 @@ class DonchianBreakoutParams:
     # itertools.product and would crash on every invalid combo.  Invalid
     # configs simply produce zero signals (see DonchianBreakoutStrategy) so the
     # WFO score is -inf and the combo is effectively skipped.
+    def __post_init__(self):
+        if not self.macd_fast < self.macd_slow:
+            raise ValueError(
+                f"Constraint macd_fast < macd_slow violated "
+                f"(got macd_fast={self.macd_fast}, macd_slow={self.macd_slow})"
+            )
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -259,6 +302,40 @@ class DonchianBreakoutStrategy:
 
     def __init__(self, params: DonchianBreakoutParams | None = None):
         self.params = params or DonchianBreakoutParams()
+class MACDHistogramStrategy:
+    """MACD histogram zero-line crossover with ATR-based stop loss / take profit.
+
+    Entry:
+      * Long when ``Histogram > 0`` and was non-positive on the previous bar
+        (fresh MACD line / signal line crossover from below).
+      * Short when ``Histogram < 0`` and was non-negative on the previous bar.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite zero-line crossover reverses the position.
+    Filters:
+      * Optional tick-volume confirmation (off by default).
+      * Optional MACD zero-line gate (off — would need a separate exit hook).
+    """
+
+    def __init__(self, params: MACDHistogramParams | None = None):
+        self.params = params or MACDHistogramParams()
+class BBSqueezeStrategy:
+    """Bollinger Band squeeze breakout with ATR-based stop loss / take profit.
+
+    Entry:
+      * Long when ``close > BB_upper`` and a squeeze (BB Width at its
+        ``squeeze_lookback`` rolling minimum) was active on bar ``t-1`` or
+        ``t-2`` — i.e. volatility was compressed and price is now breaking out.
+      * Short when ``close < BB_lower`` with the same squeeze recency rule.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite breakout signal reverses the position.
+    Filters:
+      * Optional volume confirmation: ``tick_vol / SMA(tick_vol) >= vol_ratio_min``.
+    """
+
+    def __init__(self, params: BBSqueezeParams | None = None):
+        self.params = params or BBSqueezeParams()
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         p = self.params
@@ -290,6 +367,34 @@ class DonchianBreakoutStrategy:
         out["dc_low_exit"] = prior_low.rolling(
             p.dc_exit, min_periods=p.dc_exit
         ).min()
+        ema_fast = out["close"].ewm(
+            span=p.macd_fast, adjust=False, min_periods=p.macd_fast
+        ).mean()
+        ema_slow = out["close"].ewm(
+            span=p.macd_slow, adjust=False, min_periods=p.macd_slow
+        ).mean()
+        out["macd"] = ema_fast - ema_slow
+        out["macd_signal"] = out["macd"].ewm(
+            span=p.signal_period, adjust=False, min_periods=p.signal_period
+        ).mean()
+        out["macd_hist"] = out["macd"] - out["macd_signal"]
+        mid = out["close"].rolling(p.bb_period, min_periods=p.bb_period).mean()
+        std = out["close"].rolling(p.bb_period, min_periods=p.bb_period).std(ddof=1)
+        out["bb_mid"] = mid
+        out["bb_upper"] = mid + p.bb_mult * std
+        out["bb_lower"] = mid - p.bb_mult * std
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / mid
+
+        sq_min = out["bb_width"].rolling(
+            p.squeeze_lookback, min_periods=p.squeeze_lookback
+        ).min()
+        out["squeeze"] = (out["bb_width"] <= sq_min).astype(int)
+
+        if p.use_vol_filter and "tick_vol" in out.columns:
+            vsma = out["tick_vol"].rolling(p.vol_period, min_periods=p.vol_period).mean()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["vol_ratio"] = out["tick_vol"] / vsma
         return out
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -319,6 +424,29 @@ class DonchianBreakoutStrategy:
         long_sig = long_entry | short_exit_to_long
         short_sig = short_entry | long_exit_to_short
         signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
+        hist = ind["macd_hist"]
+        prev_hist = hist.shift()
+        long_cross = (hist > 0) & (prev_hist <= 0)
+        short_cross = (hist < 0) & (prev_hist >= 0)
+        signal = np.where(long_cross, 1, np.where(short_cross, -1, 0))
+
+        if p.use_zero_line_gate:
+            allow_long = (ind["macd"] > 0).fillna(False).to_numpy()
+            allow_short = (ind["macd"] < 0).fillna(False).to_numpy()
+            signal = np.where(
+                (signal == 1) & ~allow_long, 0,
+                np.where((signal == -1) & ~allow_short, 0, signal),
+            )
+        sq_recent = (ind["squeeze"].shift(1).fillna(0) > 0) | (
+            ind["squeeze"].shift(2).fillna(0) > 0
+        )
+        long_breakout = (ind["close"] > ind["bb_upper"]) & sq_recent
+        short_breakout = (ind["close"] < ind["bb_lower"]) & sq_recent
+        signal = np.where(long_breakout, 1, np.where(short_breakout, -1, 0))
+
+        if p.use_vol_filter and "vol_ratio" in ind.columns:
+            allow = (ind["vol_ratio"] >= p.vol_ratio_min).fillna(False).to_numpy()
+            signal = np.where(allow, signal, 0)
 
         if p.session_start is not None and p.session_end is not None:
             in_session = (
@@ -330,6 +458,8 @@ class DonchianBreakoutStrategy:
         nan_guard = (
             ind["atr"].isna() | ind["dc_high_entry"].isna() | ind["dc_low_entry"].isna()
         )
+        nan_guard = ind["atr"].isna() | ind["macd_hist"].isna()
+        nan_guard = ind["atr"].isna() | ind["bb_upper"].isna() | ind["bb_width"].isna()
         signal = np.where(nan_guard, 0, signal)
 
         ind["signal"] = signal.astype(int)
