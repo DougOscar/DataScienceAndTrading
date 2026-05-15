@@ -215,6 +215,23 @@ class RSIMeanReversionStrategy:
 
 
 @dataclass
+class EMARibbonParams:
+    """4-EMA ribbon with RSI gate parameters."""
+
+    ema_p1: int = 5
+    ema_p2: int = 8
+    ema_p3: int = 13
+    ema_p4: int = 21
+    rsi_period: int = 14
+    rsi_overbought: float = 65.0
+    rsi_oversold: float = 35.0
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    # Ribbon collapse exit (close-on-de-alignment) cannot be expressed cleanly
+    # through the existing Backtester's signal/SL/TP/reversal contract — leave
+    # disabled.
+    use_ribbon_exit: bool = False
 class DonchianBreakoutParams:
     """Donchian channel breakout (Turtle-style) parameters."""
 
@@ -285,6 +302,28 @@ class BBSqueezeParams:
         return asdict(self)
 
 
+class EMARibbonStrategy:
+    """EMA ribbon (4 EMAs) trend strategy with RSI trend filter.
+
+    Entry:
+      * Long on a fresh bullish ribbon alignment (``ema1 > ema2 > ema3 > ema4``
+        on bar ``t`` but not on bar ``t-1``) provided ``RSI < rsi_overbought``.
+      * Short on a fresh bearish alignment (``ema1 < ema2 < ema3 < ema4``)
+        provided ``RSI > rsi_oversold``.
+    Exit:
+      * Hard SL/TP at ``entry ± atr_mult × ATR_entry``.
+      * Opposite ribbon-alignment signal reverses the position.
+    Notes:
+      * Invalid `ema_p1 < ema_p2 < ema_p3 < ema_p4` combos emit zero signals
+        (rather than raising at construction) so the WFO driver can iterate
+        the full grid.
+    """
+
+    def __init__(self, params: EMARibbonParams | None = None):
+        self.params = params or EMARibbonParams()
+
+    def _wilder_ema(self, s: pd.Series, period: int) -> pd.Series:
+        return s.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 class DonchianBreakoutStrategy:
     """Donchian channel breakout with ATR catastrophic stop.
 
@@ -352,6 +391,25 @@ class BBSqueezeStrategy:
         ).max(axis=1)
         out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
 
+        for tag, period in (
+            ("ema1", p.ema_p1),
+            ("ema2", p.ema_p2),
+            ("ema3", p.ema_p3),
+            ("ema4", p.ema_p4),
+        ):
+            out[tag] = out["close"].ewm(
+                span=max(2, period), adjust=False, min_periods=period
+            ).mean()
+
+        # RSI (Wilder).
+        delta = out["close"].diff()
+        gain = delta.clip(lower=0.0)
+        loss = (-delta).clip(lower=0.0)
+        avg_gain = self._wilder_ema(gain, p.rsi_period)
+        avg_loss = self._wilder_ema(loss, p.rsi_period)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rs = avg_gain / avg_loss
+            out["rsi"] = 100.0 - 100.0 / (1.0 + rs)
         # Donchian channels — prior bars only (shift by 1 to exclude bar t).
         prior_high = out["high"].shift(1)
         prior_low = out["low"].shift(1)
@@ -401,6 +459,20 @@ class BBSqueezeStrategy:
         ind = self.compute_indicators(df)
         p = self.params
 
+        # Invalid ordering → emit no signals (so WFO scores it -inf).
+        if not (p.ema_p1 < p.ema_p2 < p.ema_p3 < p.ema_p4):
+            ind["signal"] = np.zeros(len(ind), dtype=int)
+            return ind
+
+        bull = (ind["ema1"] > ind["ema2"]) & (ind["ema2"] > ind["ema3"]) & (ind["ema3"] > ind["ema4"])
+        bear = (ind["ema1"] < ind["ema2"]) & (ind["ema2"] < ind["ema3"]) & (ind["ema3"] < ind["ema4"])
+
+        fresh_bull = bull & ~bull.shift(1).fillna(False)
+        fresh_bear = bear & ~bear.shift(1).fillna(False)
+
+        long_sig = fresh_bull & (ind["rsi"] < p.rsi_overbought)
+        short_sig = fresh_bear & (ind["rsi"] > p.rsi_oversold)
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
         # Invalid combo (dc_exit >= dc_entry) → emit no signals so WFO scores
         # it -inf and moves on.
         if p.dc_exit >= p.dc_entry:
@@ -456,6 +528,10 @@ class BBSqueezeStrategy:
             signal = np.where(in_session, signal, 0)
 
         nan_guard = (
+            ind["atr"].isna()
+            | ind["ema4"].isna()
+            | ind["rsi"].isna()
+        )
             ind["atr"].isna() | ind["dc_high_entry"].isna() | ind["dc_low_entry"].isna()
         )
         nan_guard = ind["atr"].isna() | ind["macd_hist"].isna()
