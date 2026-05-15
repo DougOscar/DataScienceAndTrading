@@ -18,6 +18,8 @@ from .strategy import (
     RSIMeanReversionParams,
     MACDHistogramStrategy,
     MACDHistogramParams,
+    BBSqueezeStrategy,
+    BBSqueezeParams,
 )
 from .backtest import Backtester, BacktestResult, Trade
 from .metrics import compute_metrics, metrics_table
@@ -60,6 +62,8 @@ __all__ = [
     "RSIMeanReversionParams",
     "MACDHistogramStrategy",
     "MACDHistogramParams",
+    "BBSqueezeStrategy",
+    "BBSqueezeParams",
     "Backtester",
     "BacktestResult",
     "Trade",
