@@ -242,9 +242,25 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 ## Implementation
 
-**Notebook:** `technical_analysis/12_linear_regression_channel.ipynb`
+**Notebook:** `technical_analysis/13_linear_regression_channel.ipynb`
 **Source module:** `source/strategy.py` — `LinearRegressionChannelStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `LinearRegressionChannelParams`
+
+### Implementation Notes
+
+- Rolling OLS is computed in **O(N)** total via cumulative sums (see
+  `source.strategy._rolling_ols_channel`) so the regression line, slope, and
+  standard error are all available at the right edge of every window cheaply.
+- Reversion-mode dynamic TP at the regression-line touch is **approximated**
+  by a fixed ATR-based TP — the existing `Backtester` only supports
+  fixed-at-entry SL/TP.
+- The mode-switch exit (close when `|slope_norm|` crosses the threshold) and
+  channel re-entry exit are likewise **not implemented** — same hook
+  limitation.
+- The `mode` field accepts `"auto"` (default — slope-driven mode switching),
+  `"trend"`, or `"reversion"` to force a single mode.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped — no `data/crypto/`.
 
 ---
 
