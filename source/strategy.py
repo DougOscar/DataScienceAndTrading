@@ -215,6 +215,32 @@ class RSIMeanReversionStrategy:
 
 
 @dataclass
+class HurstRegimeSwitcherParams:
+    """Hurst-exponent regime switcher parameters.
+
+    Combines an SMA-crossover sub-strategy (used in persistent / trending
+    regimes where ``H > hurst_trend_threshold``) with an RSI mean-reversion
+    sub-strategy (used in anti-persistent regimes where
+    ``H < hurst_mean_rev_threshold``).  Random-walk regimes generate no
+    signals.
+    """
+
+    hurst_window: int = 128
+    hurst_n_min: int = 8
+    hurst_step: int = 4
+    hurst_trend_threshold: float = 0.60
+    hurst_mean_rev_threshold: float = 0.40
+    trend_fast: int = 20
+    trend_slow: int = 50
+    rsi_period: int = 14
+    rsi_lower: float = 30.0
+    rsi_upper: float = 70.0
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+    # Regime-change exit cannot be expressed cleanly through the existing
+    # Backtester's signal/SL/TP/reversal contract — leave disabled.
+    use_regime_exit: bool = False
 class KeltnerReversionParams:
     """Keltner Channel mean-reversion parameters.
 
@@ -324,6 +350,83 @@ class BBSqueezeParams:
         return asdict(self)
 
 
+def _rs_hurst(window_returns: np.ndarray, n_min: int) -> float:
+    """Compute Hurst exponent via R/S analysis on a 1-D return window.
+
+    Returns ``np.nan`` if the window is too short or the fit is degenerate.
+    """
+    n = len(window_returns)
+    if n < max(16, n_min * 2):
+        return np.nan
+    sizes: list[int] = []
+    s = n_min
+    while s <= n // 2:
+        sizes.append(s)
+        s *= 2
+    if len(sizes) < 2:
+        return np.nan
+
+    log_n: list[float] = []
+    log_rs: list[float] = []
+    for size in sizes:
+        n_sub = n // size
+        if n_sub < 1:
+            continue
+        rs_values: list[float] = []
+        for k in range(n_sub):
+            chunk = window_returns[k * size : (k + 1) * size]
+            mean_r = chunk.mean()
+            cum_dev = np.cumsum(chunk - mean_r)
+            R = float(cum_dev.max() - cum_dev.min())
+            S = float(chunk.std(ddof=0))
+            if S > 0:
+                rs_values.append(R / S)
+        if rs_values:
+            log_n.append(np.log(size))
+            log_rs.append(np.log(np.mean(rs_values)))
+    if len(log_n) < 2:
+        return np.nan
+    slope, _intercept = np.polyfit(log_n, log_rs, 1)
+    return float(slope)
+
+
+def _rolling_hurst(close: pd.Series, window: int, n_min: int, step: int) -> pd.Series:
+    """Rolling Hurst series, recomputed every ``step`` bars and forward-filled."""
+    log_ret = np.log(close).diff().to_numpy()
+    n = len(log_ret)
+    out = np.full(n, np.nan, dtype=float)
+    for i in range(window, n, max(1, step)):
+        w = log_ret[i - window + 1 : i + 1]
+        if np.isnan(w).any():
+            continue
+        out[i] = _rs_hurst(w, n_min)
+    s = pd.Series(out, index=close.index)
+    return s.ffill()
+
+
+class HurstRegimeSwitcherStrategy:
+    """Adaptive strategy that switches between SMA trend and RSI mean-rev.
+
+    Entry decision flow (at bar close ``t``):
+
+    1. Estimate ``H(t)`` via R/S analysis on the last ``hurst_window`` log
+       returns (recomputed every ``hurst_step`` bars, forward-filled in
+       between).
+    2. If ``H(t) > hurst_trend_threshold`` (persistent regime), emit a long
+       on a fresh SMA golden cross / short on a fresh death cross.
+    3. If ``H(t) < hurst_mean_rev_threshold`` (anti-persistent regime), emit
+       a long when RSI crosses up through ``rsi_lower`` / short when RSI
+       crosses down through ``rsi_upper``.
+    4. Otherwise (random-walk regime): no trade.
+
+    Exits via Backtester: SL/TP + signal reversal.
+    """
+
+    def __init__(self, params: HurstRegimeSwitcherParams | None = None):
+        self.params = params or HurstRegimeSwitcherParams()
+
+    def _wilder_ema(self, s: pd.Series, period: int) -> pd.Series:
+        return s.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 class KeltnerReversionStrategy:
     """Keltner Channel mean-reversion with ATR-based stop + EMA-target TP.
 
@@ -432,6 +535,11 @@ class BBSqueezeStrategy:
             ],
             axis=1,
         ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        out["sma_fast"] = out["close"].rolling(p.trend_fast, min_periods=p.trend_fast).mean()
+        out["sma_slow"] = out["close"].rolling(p.trend_slow, min_periods=p.trend_slow).mean()
+
         # Stop ATR — used by the Backtester for SL/TP placement.
         out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
         # Keltner ATR — used only for the channel width.
@@ -477,6 +585,10 @@ class BBSqueezeStrategy:
         with np.errstate(divide="ignore", invalid="ignore"):
             rs = avg_gain / avg_loss
             out["rsi"] = 100.0 - 100.0 / (1.0 + rs)
+
+        out["hurst"] = _rolling_hurst(
+            out["close"], p.hurst_window, p.hurst_n_min, max(1, p.hurst_step)
+        )
         # Donchian channels — prior bars only (shift by 1 to exclude bar t).
         prior_high = out["high"].shift(1)
         prior_low = out["low"].shift(1)
@@ -526,6 +638,24 @@ class BBSqueezeStrategy:
         ind = self.compute_indicators(df)
         p = self.params
 
+        # Trend sub-signal: fresh golden / death cross.
+        diff = ind["sma_fast"] - ind["sma_slow"]
+        prev_diff = diff.shift()
+        trend_long = (diff > 0) & (prev_diff <= 0)
+        trend_short = (diff < 0) & (prev_diff >= 0)
+
+        # Mean-reversion sub-signal: RSI cross-back.
+        rsi = ind["rsi"]
+        prev_rsi = rsi.shift()
+        mr_long = (rsi > p.rsi_lower) & (prev_rsi <= p.rsi_lower)
+        mr_short = (rsi < p.rsi_upper) & (prev_rsi >= p.rsi_upper)
+
+        trending = ind["hurst"] > p.hurst_trend_threshold
+        mean_reverting = ind["hurst"] < p.hurst_mean_rev_threshold
+
+        long_sig = (trending & trend_long) | (mean_reverting & mr_long)
+        short_sig = (trending & trend_short) | (mean_reverting & mr_short)
+        signal = np.where(long_sig, 1, np.where(short_sig, -1, 0))
         long_touch = ind["close"] <= ind["kc_lower"]
         short_touch = ind["close"] >= ind["kc_upper"]
         signal = np.where(long_touch, 1, np.where(short_touch, -1, 0))
@@ -602,6 +732,10 @@ class BBSqueezeStrategy:
 
         nan_guard = (
             ind["atr"].isna()
+            | ind["hurst"].isna()
+            | ind["sma_slow"].isna()
+            | ind["rsi"].isna()
+        )
             | ind["kc_upper"].isna()
             | ind["kc_lower"].isna()
         )
