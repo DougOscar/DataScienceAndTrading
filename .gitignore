@@ -58,3 +58,6 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Comparison dashboard parquet cache (per-strategy results, regenerated on demand)
+comparison/.cache/

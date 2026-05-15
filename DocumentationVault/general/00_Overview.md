@@ -17,6 +17,7 @@ Data → Resample → Strategy → Backtest → WFO → Robustness → Extension
 | 5 | [[05_Walk_Forward_Optimization]] | In-sample optimization + OOS validation |
 | 6 | [[06_Robustness_Testing]] | Monte Carlo, block bootstrap, sensitivity |
 | 7 | [[07_Extensions]] | Session filter, position sizing, portfolio weighting |
+| 9 | [[09_Strategy_Comparison_Dashboard]] | Cross-strategy comparison across `(group, tf, asset)` baselines |
 
 ## Market Groups
 
@@ -33,7 +34,8 @@ source/
 ├── strategy.py      — SMACrossoverStrategy, StrategyParams
 ├── backtest.py      — Backtester
 ├── metrics.py       — compute_metrics, metrics_table
-├── dashboard.py     — plot_backtest_dashboard, plot_wfo_dashboard, plot_robustness_dashboard
+├── dashboard.py     — plot_backtest_dashboard, plot_wfo_dashboard, plot_robustness_dashboard, plot_strategy_*
+├── comparison.py    — STRATEGY_REGISTRY, run_all_strategies, daily_returns_from_equity
 ├── wfo.py           — walk_forward, WFOResult
 ├── robustness.py    — monte_carlo_trades, block_bootstrap_trades, subperiod_analysis, parameter_sensitivity
 └── portfolio.py     — correlation_weights, weighted_portfolio
