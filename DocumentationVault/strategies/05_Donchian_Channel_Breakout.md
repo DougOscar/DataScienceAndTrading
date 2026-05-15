@@ -211,7 +211,21 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 
 **Notebook:** `technical_analysis/05_donchian_channel_breakout.ipynb`
 **Source module:** `source/strategy.py` — `DonchianBreakoutStrategy`
-**Parameters class:** `StrategyParams`
+**Parameters class:** `DonchianBreakoutParams`
+
+### Implementation Notes
+
+- The Donchian channel trailing exit is implemented via **signal reversal**:
+  when long and `close < DC_low_exit`, the strategy emits a short signal so
+  the Backtester closes the long and opens a short.  Mirror for short→long.
+- ATR-based TP is **disabled** by default (`tp_atr_mult=100.0`, `use_tp=False`)
+  — the dc_exit channel is the primary trailing stop.
+- The constraint `dc_exit < dc_entry` is enforced inside `generate_signals`
+  (invalid combos emit zero signals so WFO scores them -∞) rather than
+  raising at construction — the WFO driver iterates the full grid and can't
+  filter invalid combos.
+- For B3, baseline params include `session_start=9`, `session_end=18`.
+- Crypto group skipped — no `data/crypto/` files.
 
 ---
 
