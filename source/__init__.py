@@ -84,9 +84,11 @@ from .runner import (
 )
 from .spark_loader import (
     PYSPARK_AVAILABLE,
+    SPARK_SUPPORTED_JAVA,
     SparkResampledDataset,
     build_spark_grid,
     canonical_tf,
+    find_compatible_jdk,
     get_spark,
     require_pyspark,
     resample_to_cache,
@@ -191,9 +193,11 @@ __all__ = [
     "run_backtests_with_params",
     "run_wfo_grid",
     "PYSPARK_AVAILABLE",
+    "SPARK_SUPPORTED_JAVA",
     "SparkResampledDataset",
     "build_spark_grid",
     "canonical_tf",
+    "find_compatible_jdk",
     "get_spark",
     "require_pyspark",
     "resample_to_cache",

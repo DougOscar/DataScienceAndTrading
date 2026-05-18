@@ -23,7 +23,10 @@ working for the non-Spark notebooks.
 
 from __future__ import annotations
 
+import glob
 import os
+import re
+import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,19 +86,134 @@ def require_pyspark() -> None:
         raise ImportError(_INSTALL_HINT)
 
 
+# Spark 4.x (PySpark 4.0/4.1) certifies Java 17 and 21 only.  On JDK >= 24 the
+# internal class `jdk.internal.ref.Cleaner` no longer exists, so
+# `org.apache.spark.unsafe.Platform.<clinit>` throws ClassNotFoundException and
+# the SparkContext cannot start (a ClassNotFound — JVM `--add-opens` flags do
+# NOT help; only a supported JDK does).
+SPARK_SUPPORTED_JAVA = (17, 18, 19, 20, 21)
+_JDK_PREFERENCE = (21, 17, 20, 19, 18)  # try the most-tested first
+
+# Where compatible JDKs commonly live (glob patterns; `*` expanded).
+_JDK_SEARCH_GLOBS = (
+    "/usr/lib/jvm/*",
+    "/usr/lib64/jvm/*",
+    "/usr/java/*",
+    "/opt/java/*",
+    "/opt/*/jdk*",
+    str(Path.home() / ".sdkman/candidates/java/*"),
+    str(Path.home() / ".jdks/*"),
+    "/Library/Java/JavaVirtualMachines/*/Contents/Home",
+    "/opt/homebrew/opt/openjdk@*",
+    "/usr/local/opt/openjdk@*",
+)
+
+
+def _java_major(java_home: str | os.PathLike) -> int | None:
+    """Return the Java major version of a JDK home (8, 17, 21, 26…) or None."""
+    java_bin = Path(java_home) / "bin" / ("java.exe" if os.name == "nt" else "java")
+    if not java_bin.exists():
+        return None
+    try:
+        out = subprocess.run(
+            [str(java_bin), "-version"],
+            capture_output=True, text=True, timeout=15,
+        ).stderr
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r'version "(\d+)(?:\.(\d+))?', out)
+    if not m:
+        return None
+    major = int(m.group(1))
+    # Legacy scheme: "1.8.0_x" -> major 8.
+    if major == 1 and m.group(2):
+        return int(m.group(2))
+    return major
+
+
+def find_compatible_jdk(explicit: str | None = None) -> str | None:
+    """Locate a Spark-compatible JDK home (Java in :data:`SPARK_SUPPORTED_JAVA`).
+
+    Checks, in order: ``explicit`` arg, ``$JAVA_HOME``, then the common
+    install locations.  Returns the home path of the most-tested compatible
+    JDK (21 preferred), or ``None`` if only unsupported JDKs are present.
+    """
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(explicit)
+    if os.environ.get("JAVA_HOME"):
+        candidates.append(os.environ["JAVA_HOME"])
+    for pattern in _JDK_SEARCH_GLOBS:
+        candidates.extend(sorted(glob.glob(pattern)))
+
+    by_major: dict[int, str] = {}
+    for c in candidates:
+        if not c or not Path(c).is_dir():
+            continue
+        mj = _java_major(c)
+        if mj in SPARK_SUPPORTED_JAVA and mj not in by_major:
+            by_major[mj] = str(Path(c).resolve())
+    for pref in _JDK_PREFERENCE:
+        if pref in by_major:
+            return by_major[pref]
+    return None
+
+
+def _ensure_compatible_java(explicit: str | None = None) -> str:
+    """Point this process's ``JAVA_HOME``/``PATH`` at a Spark-compatible JDK.
+
+    Raises a precise, actionable :class:`RuntimeError` when only an
+    unsupported JDK (e.g. 24+, which lacks ``jdk.internal.ref.Cleaner``) is
+    installed — Spark would otherwise fail deep in a Py4J stack trace.
+    """
+    home = find_compatible_jdk(explicit)
+    if home is not None:
+        os.environ["JAVA_HOME"] = home
+        bin_dir = str(Path(home) / "bin")
+        if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+        return home
+
+    cur = os.environ.get("JAVA_HOME") or "(PATH default)"
+    cur_major = _java_major(os.environ["JAVA_HOME"]) if os.environ.get("JAVA_HOME") else None
+    raise RuntimeError(
+        "No Spark-compatible JDK found. PySpark 4.x certifies "
+        f"**Java 17 or 21**; detected JAVA_HOME={cur} "
+        f"(major={cur_major}). On JDK >= 24 Spark fails with "
+        "`ClassNotFoundException: jdk.internal.ref.Cleaner` "
+        "(JVM --add-opens flags do NOT fix a missing class).\n"
+        "Fix:\n"
+        "  • Arch/CachyOS:  sudo pacman -S jdk21-openjdk   (-> "
+        "/usr/lib/jvm/java-21-openjdk)\n"
+        "  • Debian/Ubuntu: sudo apt install openjdk-21-jdk\n"
+        "  • macOS:         brew install openjdk@21\n"
+        "  • or SDKMAN:     sdk install java 21-tem\n"
+        "Then either keep your system default and let get_spark() auto-detect "
+        "it, or pass get_spark(java_home='/usr/lib/jvm/java-21-openjdk'), or "
+        "export JAVA_HOME before launching the kernel. Do NOT change the "
+        "system default if other tools need the newer JDK."
+    )
+
+
 def get_spark(
     app_name: str = "multi_filter_portfolio_system",
     *,
     driver_memory: str = "6g",
     shuffle_partitions: int = 64,
+    java_home: str | None = None,
 ):
     """Return a process-wide local ``SparkSession`` (created on first call).
 
     ``local[*]`` uses every core for the distributed CSV scan + window
     aggregation.  Arrow is enabled so ``toPandas()`` on the small resampled
     frame is fast and low-overhead.
+
+    Before the JVM is launched this pins ``JAVA_HOME`` to a Spark-compatible
+    JDK (Java 17/21) — auto-detected, or ``java_home`` if given — and raises a
+    clear error if only an unsupported JDK (24+) is installed.
     """
     require_pyspark()
+    chosen = _ensure_compatible_java(java_home)
     from pyspark.sql import SparkSession
 
     builder = (
@@ -107,6 +225,7 @@ def get_spark(
         .config("spark.sql.execution.arrow.pyspark.enabled", "true")
         .config("spark.ui.showConsoleProgress", "false")
     )
+    print(f"[spark] JAVA_HOME={chosen} (Java {_java_major(chosen)})")
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
     return spark

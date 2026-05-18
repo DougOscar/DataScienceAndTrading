@@ -232,7 +232,7 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
 `portfolio_walk_forward`, `consolidated_index`, `portfolio_parameter_sensitivity`,
 `overfitting_report`
 **Data layer:** `source/spark_loader.py` — PySpark M1 → multi-TF parquet cache
-(`build_spark_grid`); requires `pyspark>=3.5` + a JDK.
+(`build_spark_grid`); requires `pyspark>=3.5` + **JDK 17 or 21**.
 
 ### Implementation Notes
 
@@ -240,6 +240,14 @@ See: [[04_Backtesting_and_Metrics]], [[05_Walk_Forward_Optimization]], [[06_Robu
   system): every M1 file is window-aggregated to the target timeframes via a
   tumbling Spark `window` and parquet-cached by source mtime. Backtests then
   read small parquet slices and fan out across processes.
+- **JDK constraint.** Spark 4.x runs only on **JDK 17 or 21**; JDK 24+ removed
+  `jdk.internal.ref.Cleaner` so `SparkContext` init throws
+  `ClassNotFoundException` (JVM `--add-opens` flags cannot fix a missing
+  class). `get_spark()` auto-detects a compatible JDK (`find_compatible_jdk`),
+  pins `JAVA_HOME` for the Spark JVM only, accepts an explicit
+  `java_home=`, and raises an actionable error if only an unsupported JDK is
+  present. PySpark 4.1 imports/starts on Python 3.14 in practice, but
+  3.11/3.12 is the certified range.
 - **Portfolio constraints are new infrastructure.** `≤ 2 % risk`,
   `≤ 3 concurrent`, and forex currency exclusion are cross-asset and are *not*
   expressible via the single-asset `Backtester` — hence `PortfolioBacktester`.
