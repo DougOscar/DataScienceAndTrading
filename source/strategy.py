@@ -2012,3 +2012,349 @@ class FFTCycleFilterStrategy:
         ind["signal"] = signal.astype(int)
         return ind
 
+
+# ---------------------------------------------------------------------------
+# Multi-Filter Portfolio System (#15)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MultiFilterSystemParams:
+    """Parameters for the multi-confirmation portfolio entry system.
+
+    The system contract (notebook ``technical_analysis/15_*``):
+
+    * one **clear entry trigger** (``entry_signal``: ema_cross / donchian /
+      macd_cross),
+    * **>=3 confirmation filters** (trend, momentum, trend-strength; plus
+      optional Ichimoku / Bollinger-extension / SuperTrend),
+    * a **separate volume filter** (kept distinct from the 3 confirmations),
+    * an ATR stop at ``sl_atr_mult x ATR_entry``,
+    * an **optional** take-profit (``use_take_profit`` -> an optimisation knob),
+    * a systematic, filter-free exit (opposite trigger).
+
+    Field names mirror the Backtester contract (``sl_atr_mult``,
+    ``tp_atr_mult``, ``session_start``, ``session_end``, ``sizing_mode``,
+    ``risk_fraction``) so the single-asset Backtester / WFO / robustness
+    helpers also accept this class unchanged.  The *portfolio* constraints
+    (<=2 % risk, max 3 concurrent, forex currency exclusion) live in
+    :mod:`source.portfolio_backtest`, not here.
+    """
+
+    # --- primary entry trigger ------------------------------------------
+    entry_signal: str = "ema_cross"          # ema_cross | donchian | macd_cross
+    ema_fast: int = 20
+    ema_slow: int = 50
+    donchian_period: int = 20
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+
+    # --- confirmation filter 1: trend regime ----------------------------
+    use_trend_filter: bool = True
+    trend_ema: int = 200
+
+    # --- confirmation filter 2: momentum --------------------------------
+    use_rsi_filter: bool = True
+    rsi_period: int = 14
+    rsi_mid: float = 50.0
+
+    # --- confirmation filter 3: trend strength --------------------------
+    use_adx_filter: bool = True
+    adx_period: int = 14
+    adx_min: float = 20.0
+
+    # --- optional extra confirmations (off by default) ------------------
+    use_ichimoku_filter: bool = False
+    tenkan_period: int = 9
+    kijun_period: int = 26
+    senkou_b_period: int = 52
+    use_bb_filter: bool = False              # block over-extended entries
+    bb_period: int = 20
+    bb_mult: float = 2.0
+    use_supertrend_filter: bool = False
+    supertrend_period: int = 10
+    supertrend_mult: float = 3.0
+
+    # --- separate volume filter -----------------------------------------
+    use_volume_filter: bool = True
+    vol_period: int = 20
+    vol_ratio_min: float = 1.2
+
+    # --- risk / exit ----------------------------------------------------
+    atr_period: int = 14
+    sl_atr_mult: float = 2.0
+    use_take_profit: bool = False            # optimisation candidate
+    tp_atr_mult: float = 3.0
+
+    # --- Backtester / portfolio contract --------------------------------
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "fixed_frac"          # <=2 % risk by default
+    risk_fraction: float = 0.02
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    def is_valid(self) -> bool:
+        """Order constraints for the entry/trend periods.
+
+        Enforced here (not via ``__post_init__`` raise) so the WFO driver,
+        which ``itertools.product``-expands the grid, can score invalid
+        combos as -inf instead of crashing.
+        """
+        if not (self.ema_fast < self.ema_slow):
+            return False
+        if self.use_trend_filter and not (self.ema_slow < self.trend_ema):
+            return False
+        if not (self.macd_fast < self.macd_slow):
+            return False
+        if self.donchian_period < 2 or self.atr_period < 2:
+            return False
+        if self.sl_atr_mult <= 0:
+            return False
+        return True
+
+
+def _wilder(s: pd.Series, period: int) -> pd.Series:
+    return s.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+
+class MultiFilterSystemStrategy:
+    """Trend-following entry with >=3 confirmations + a separate volume filter.
+
+    Entry (long; short is symmetric):
+      * **trigger** fires bullish — fast EMA crosses above slow EMA, or close
+        breaks the prior Donchian high, or MACD line crosses above its signal;
+      * **confirmation 1 (trend):** close above ``trend_ema``;
+      * **confirmation 2 (momentum):** RSI above ``rsi_mid``;
+      * **confirmation 3 (strength):** ADX above ``adx_min``;
+      * optional confirmations: above the Ichimoku Kumo, not over-extended past
+        the upper Bollinger band, SuperTrend bullish;
+      * **separate volume filter:** ``tick_vol / SMA(tick_vol) >= vol_ratio_min``.
+    Exit (systematic, no filters):
+      * opposite trigger reverses/closes the position;
+      * ATR stop at ``entry -/+ sl_atr_mult x ATR_entry``;
+      * optional take-profit at ``entry +/- tp_atr_mult x ATR_entry``.
+
+    ``compute_indicators(df, full=True)`` materialises the whole indicator
+    panel (used by the notebook's feature section); ``generate_signals`` only
+    computes what the *active* filters need so WFO stays fast.
+    """
+
+    def __init__(self, params: MultiFilterSystemParams | None = None):
+        self.params = params or MultiFilterSystemParams()
+
+    # ------------------------------------------------------------------
+    # indicator library
+    # ------------------------------------------------------------------
+    def compute_indicators(self, df: pd.DataFrame, *, full: bool = False) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+        close, high, low = out["close"], out["high"], out["low"]
+
+        prev_close = close.shift()
+        tr = pd.concat(
+            [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1)
+        out["tr"] = tr
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+
+        # --- entry-trigger indicators -----------------------------------
+        out["ema_fast"] = close.ewm(span=p.ema_fast, adjust=False,
+                                    min_periods=p.ema_fast).mean()
+        out["ema_slow"] = close.ewm(span=p.ema_slow, adjust=False,
+                                    min_periods=p.ema_slow).mean()
+        if p.entry_signal == "donchian" or full:
+            out["dc_high"] = high.rolling(p.donchian_period,
+                                          min_periods=p.donchian_period).max()
+            out["dc_low"] = low.rolling(p.donchian_period,
+                                        min_periods=p.donchian_period).min()
+            out["dc_mid"] = (out["dc_high"] + out["dc_low"]) / 2.0
+        if p.entry_signal == "macd_cross" or full:
+            macd = (close.ewm(span=p.macd_fast, adjust=False).mean()
+                    - close.ewm(span=p.macd_slow, adjust=False).mean())
+            out["macd"] = macd
+            out["macd_signal"] = macd.ewm(span=p.macd_signal, adjust=False).mean()
+            out["macd_hist"] = out["macd"] - out["macd_signal"]
+
+        # --- confirmation indicators ------------------------------------
+        if p.use_trend_filter or full:
+            out["trend_ema"] = close.ewm(span=p.trend_ema, adjust=False,
+                                         min_periods=p.trend_ema).mean()
+        if p.use_rsi_filter or full:
+            delta = close.diff()
+            gain = _wilder(delta.clip(lower=0.0), p.rsi_period)
+            loss = _wilder((-delta).clip(lower=0.0), p.rsi_period)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["rsi"] = 100.0 - 100.0 / (1.0 + gain / loss)
+        if p.use_adx_filter or full:
+            up = high.diff()
+            dn = -low.diff()
+            plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0),
+                                index=out.index)
+            minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0),
+                                 index=out.index)
+            atr_w = _wilder(tr, p.adx_period)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                plus_di = 100.0 * _wilder(plus_dm, p.adx_period) / atr_w
+                minus_di = 100.0 * _wilder(minus_dm, p.adx_period) / atr_w
+                dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+            out["plus_di"] = plus_di
+            out["minus_di"] = minus_di
+            out["adx"] = _wilder(dx, p.adx_period)
+        if p.use_ichimoku_filter or full:
+            tenkan = (high.rolling(p.tenkan_period).max()
+                      + low.rolling(p.tenkan_period).min()) / 2.0
+            kijun = (high.rolling(p.kijun_period).max()
+                     + low.rolling(p.kijun_period).min()) / 2.0
+            out["tenkan"] = tenkan
+            out["kijun"] = kijun
+            out["senkou_a"] = ((tenkan + kijun) / 2.0).shift(p.kijun_period)
+            out["senkou_b"] = (
+                (high.rolling(p.senkou_b_period).max()
+                 + low.rolling(p.senkou_b_period).min()) / 2.0
+            ).shift(p.kijun_period)
+        if p.use_bb_filter or full:
+            mid = close.rolling(p.bb_period, min_periods=p.bb_period).mean()
+            std = close.rolling(p.bb_period, min_periods=p.bb_period).std(ddof=1)
+            out["bb_mid"] = mid
+            out["bb_upper"] = mid + p.bb_mult * std
+            out["bb_lower"] = mid - p.bb_mult * std
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / mid
+        if p.use_supertrend_filter or full:
+            atr_st = tr.rolling(p.supertrend_period,
+                                min_periods=p.supertrend_period).mean()
+            hl2 = (high + low) / 2.0
+            upper = hl2 + p.supertrend_mult * atr_st
+            lower = hl2 - p.supertrend_mult * atr_st
+            c = close.to_numpy()
+            ub = upper.to_numpy()
+            lb = lower.to_numpy()
+            d = np.ones(len(out))
+            for i in range(1, len(out)):
+                if np.isnan(ub[i]) or np.isnan(lb[i]):
+                    d[i] = d[i - 1]
+                elif c[i] > ub[i - 1]:
+                    d[i] = 1
+                elif c[i] < lb[i - 1]:
+                    d[i] = -1
+                else:
+                    d[i] = d[i - 1]
+            out["supertrend_dir"] = pd.Series(d, index=out.index)
+
+        if full:
+            # extra read-only panel indicators (notebook feature section only)
+            tp = (high + low + close) / 3.0
+            sma_tp = tp.rolling(20).mean()
+            mad = (tp - sma_tp).abs().rolling(20).mean()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["cci"] = (tp - sma_tp) / (0.015 * mad)
+            hh = high.rolling(14).max()
+            ll = low.rolling(14).min()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["williams_r"] = -100.0 * (hh - close) / (hh - ll)
+            out["roc"] = close.pct_change(12) * 100.0
+            if "tick_vol" in out.columns:
+                sign = np.sign(close.diff().fillna(0.0))
+                out["obv"] = (sign * out["tick_vol"]).cumsum()
+                day = out.index.normalize()
+                pv = (tp * out["tick_vol"]).groupby(day).cumsum()
+                vv = out["tick_vol"].groupby(day).cumsum()
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    out["vwap"] = pv / vv
+            low_k = low.rolling(14).min()
+            high_k = high.rolling(14).max()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out["stoch_k"] = 100.0 * (close - low_k) / (high_k - low_k)
+            out["stoch_d"] = out["stoch_k"].rolling(3).mean()
+
+        if p.use_volume_filter or full:
+            if "tick_vol" in out.columns:
+                vsma = out["tick_vol"].rolling(p.vol_period,
+                                               min_periods=p.vol_period).mean()
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    out["vol_ratio"] = out["tick_vol"] / vsma
+            else:
+                out["vol_ratio"] = np.nan
+        return out
+
+    # ------------------------------------------------------------------
+    # signal generation
+    # ------------------------------------------------------------------
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        ind = self.compute_indicators(df, full=False)
+        n = len(ind)
+
+        # Invalid grid combo -> emit no trades (WFO scores it -inf, no crash).
+        if not p.is_valid():
+            ind["signal"] = np.zeros(n, dtype=int)
+            return ind
+
+        close = ind["close"]
+
+        if p.entry_signal == "donchian":
+            long_raw = close > ind["dc_high"].shift(1)
+            short_raw = close < ind["dc_low"].shift(1)
+        elif p.entry_signal == "macd_cross":
+            diff = ind["macd"] - ind["macd_signal"]
+            pdiff = diff.shift()
+            long_raw = (diff > 0) & (pdiff <= 0)
+            short_raw = (diff < 0) & (pdiff >= 0)
+        else:  # ema_cross (default)
+            diff = ind["ema_fast"] - ind["ema_slow"]
+            pdiff = diff.shift()
+            long_raw = (diff > 0) & (pdiff <= 0)
+            short_raw = (diff < 0) & (pdiff >= 0)
+
+        long_ok = np.array(long_raw.fillna(False).to_numpy(dtype=bool), copy=True)
+        short_ok = np.array(short_raw.fillna(False).to_numpy(dtype=bool), copy=True)
+
+        if p.use_trend_filter:
+            valid_te = (~ind["trend_ema"].isna()).to_numpy()
+            up = (close > ind["trend_ema"]).to_numpy()
+            long_ok &= up
+            short_ok &= ~up & valid_te
+        if p.use_rsi_filter:
+            r = ind["rsi"]
+            long_ok &= (r > p.rsi_mid).fillna(False).to_numpy()
+            short_ok &= (r < p.rsi_mid).fillna(False).to_numpy()
+        if p.use_adx_filter:
+            strong = (ind["adx"] >= p.adx_min).fillna(False).to_numpy()
+            long_ok &= strong
+            short_ok &= strong
+        if p.use_ichimoku_filter:
+            kumo_top = ind[["senkou_a", "senkou_b"]].max(axis=1)
+            kumo_bot = ind[["senkou_a", "senkou_b"]].min(axis=1)
+            long_ok &= (close > kumo_top).fillna(False).to_numpy()
+            short_ok &= (close < kumo_bot).fillna(False).to_numpy()
+        if p.use_bb_filter:
+            # don't chase: skip longs already above the upper band (and shorts
+            # below the lower band) — a separate over-extension guard.
+            long_ok &= (close <= ind["bb_upper"]).fillna(False).to_numpy()
+            short_ok &= (close >= ind["bb_lower"]).fillna(False).to_numpy()
+        if p.use_supertrend_filter:
+            st = ind["supertrend_dir"].to_numpy()
+            long_ok &= st > 0
+            short_ok &= st < 0
+
+        signal = np.where(long_ok, 1, np.where(short_ok, -1, 0))
+
+        # separate volume filter (independent of the 3 confirmations)
+        if p.use_volume_filter:
+            vok = (ind["vol_ratio"] >= p.vol_ratio_min).fillna(False).to_numpy()
+            signal = np.where(vok, signal, 0)
+
+        if p.session_start is not None and p.session_end is not None:
+            in_sess = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_sess, signal, 0)
+
+        signal = np.where(ind["atr"].isna().to_numpy(), 0, signal)
+        ind["signal"] = signal.astype(int)
+        return ind
+

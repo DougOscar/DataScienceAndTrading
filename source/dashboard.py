@@ -88,13 +88,44 @@ def plot_wfo_dashboard(wfo_result, full_equity: pd.Series | None = None):
         param_cols = [c for c in windows.columns if c.startswith("param_")]
         if param_cols:
             heat = windows.set_index("fold")[param_cols]
-            im = ax.imshow(heat.values.T, aspect="auto", cmap="viridis")
+            # param_* columns may be categorical/object (filter names,
+            # regimes, bools, None). Build a numeric matrix for coloring:
+            # numeric cols pass through, non-numeric cols are factorized.
+            numeric = pd.DataFrame(index=heat.index)
+            labels = pd.DataFrame(index=heat.index)
+            for c in param_cols:
+                col = heat[c]
+                as_num = pd.to_numeric(col, errors="coerce")
+                if as_num.notna().any():
+                    numeric[c] = as_num
+                    labels[c] = col.map(
+                        lambda v: "" if pd.isna(v) else f"{v:g}"
+                        if isinstance(v, (int, float)) else str(v))
+                else:
+                    codes, _ = pd.factorize(col)
+                    numeric[c] = pd.Series(codes, index=heat.index).where(
+                        codes >= 0)
+                    labels[c] = col.astype(str)
+            # normalize each param independently so colors are comparable
+            mat = numeric.values.T.astype(float)
+            rng = np.nanmax(mat, axis=1) - np.nanmin(mat, axis=1)
+            rng[rng == 0] = 1.0
+            norm = (mat - np.nanmin(mat, axis=1)[:, None]) / rng[:, None]
+            im = ax.imshow(norm, aspect="auto", cmap="viridis",
+                           vmin=0, vmax=1)
             ax.set_yticks(range(len(param_cols)))
             ax.set_yticklabels([c.replace("param_", "") for c in param_cols])
             ax.set_xticks(range(len(heat)))
             ax.set_xticklabels(heat.index)
             ax.set_title("Selected parameters per fold")
-            fig.colorbar(im, ax=ax, shrink=0.8)
+            for yi, c in enumerate(param_cols):
+                for xi in range(len(heat)):
+                    txt = labels[c].iloc[xi]
+                    if txt:
+                        ax.text(xi, yi, txt, ha="center", va="center",
+                                fontsize=7,
+                                color="white" if norm[yi, xi] < 0.5
+                                else "black")
         else:
             wr = windows["oos_win_rate"].fillna(0) if "oos_win_rate" in windows.columns else pd.Series([0] * len(windows))
             bar_colors = ["seagreen" if v >= 0.5 else "crimson" for v in wr]

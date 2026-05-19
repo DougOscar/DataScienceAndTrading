@@ -4,3 +4,7 @@ matplotlib>=3.7
 jupyterlab>=4.0
 ipykernel>=6.25
 scikit-learn>=1.3
+# PySpark powers the 3-market data layer (M1 -> multi-timeframe resample).
+# Requires a JDK on PATH (JAVA_HOME). pyarrow accelerates Spark<->pandas.
+pyspark>=3.5
+pyarrow>=14.0
