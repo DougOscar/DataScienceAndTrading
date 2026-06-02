@@ -22,11 +22,8 @@ Use [[_Template]] when documenting a new strategy.
 | 12 | [[12_Stochastic_Oscillator_Divergence\|Stochastic Oscillator + Divergence]] | Mean-reversion / Momentum | Forex, B3, Crypto | 15min–4h | Idea |
 | 13 | [[13_Linear_Regression_Channel\|Linear Regression Channel]] | Statistical / Dual-mode | Forex, B3, Crypto | 1h–1D | Idea |
 | 14 | [[14_FFT_Cycle_Filter\|FFT Cycle Filter & Forward Projection]] | Statistical / Cycle-following | Forex, B3, Crypto | 1h–1D | Idea |
+| 15 | [[15_Multi_Filter_Portfolio_System\|Multi-Filter Portfolio System]] | Trend-following / Multi-confirmation portfolio | Forex, Crypto, B3 | 15min–1D | Backtested |
 | 16 | [[16_Deep_RL_Trading\|Deep Reinforcement Learning Trading Agent]] | Machine Learning / Deep Reinforcement Learning | Forex, B3 | 30min–4h | Planning |
-
-> Strategy 15 (Multi-Filter Portfolio System) is documented on the in-flight
-> `feature/multi-filter-portfolio-system` branch and will appear here once that
-> PR merges to `main`.
 
 ## Strategy Evaluation Checklist
 

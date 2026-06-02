@@ -53,7 +53,6 @@ _INSTALL_HINT = (
 
 # pandas offset alias -> Spark tumbling-window duration string.
 _TF_TO_SPARK_WINDOW = {
-    "1min": "1 minute",
     "5min": "5 minutes",
     "15min": "15 minutes",
     "30min": "30 minutes",
@@ -65,7 +64,6 @@ _TF_TO_SPARK_WINDOW = {
 
 # Canonical aliases so callers can write "5m"/"1H"/"1d" etc.
 _TF_ALIASES = {
-    "1m": "1min", "M1": "1min", "1T": "1min",
     "5m": "5min", "15m": "15min", "30m": "30min",
     "1H": "1h", "2H": "2h", "4H": "4h",
     "1d": "1D", "d": "1D", "daily": "1D",
