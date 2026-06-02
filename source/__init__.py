@@ -40,6 +40,8 @@ from .strategy import (
     MACDHistogramParams,
     BBSqueezeStrategy,
     BBSqueezeParams,
+    DeepRLTradingStrategy,
+    DeepRLTradingParams,
 )
 from .backtest import Backtester, BacktestResult, Trade
 from .metrics import compute_metrics, metrics_table
@@ -119,6 +121,8 @@ __all__ = [
     "MACDHistogramParams",
     "BBSqueezeStrategy",
     "BBSqueezeParams",
+    "DeepRLTradingStrategy",
+    "DeepRLTradingParams",
     "Backtester",
     "BacktestResult",
     "Trade",
