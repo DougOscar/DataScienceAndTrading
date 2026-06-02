@@ -2013,6 +2013,71 @@ class FFTCycleFilterStrategy:
         return ind
 
 
+
+@dataclass
+class DeepRLTradingParams:
+    """Parameters for the Deep RL trading agent (strategy #16).
+
+    Field names that the :class:`source.backtest.Backtester` reads
+    (``sl_atr_mult``, ``tp_atr_mult``, ``session_start``, ``session_end``,
+    ``sizing_mode``, ``risk_fraction``, ``atr_period``) are kept so the
+    existing backtest / metrics / dashboard pipeline works unchanged on the
+    *signal-replay* of a trained policy.
+
+    The SL/TP multiples default to a sentinel ``1e6`` so neither stop ever
+    triggers during replay — exits are entirely policy-driven (the agent
+    controls exposure by switching its action). See the strategy doc.
+    """
+
+    # --- environment / feature knobs -----------------------------------
+    obs_window: int = 32
+    rv_window: int = 20
+    vol_period: int = 20
+    bb_period: int = 20
+    bb_mult: float = 2.0
+    rolling_z_window: int = 252
+    episode_len: int = 2048
+    max_drawdown_fraction: float = 0.30
+    tx_cost_bps: float = 5.0  # round-trip cost proxy in basis points
+
+    # --- RL hyperparameters --------------------------------------------
+    algorithm: str = "PPO"            # "PPO" | "DQN"
+    gamma: float = 0.99
+    learning_rate: float = 3e-4
+    policy_arch: tuple = (64, 64)
+
+    # --- v2 features: exposed but DISABLED in v1 -----------------------
+    use_continuous_action: bool = False
+    use_differential_sharpe: bool = False
+    use_drawdown_penalty: bool = False
+    use_holding_penalty: bool = False
+    use_lstm_policy: bool = False
+    use_cnn_policy: bool = False
+    use_flat_close_signal: bool = False
+
+    # --- Backtester-required fields (sentinel SL/TP disable the stops) --
+    atr_period: int = 14
+    sl_atr_mult: float = 1e6
+    tp_atr_mult: float = 1e6
+    session_start: int | None = None
+    session_end: int | None = None
+    sizing_mode: str = "unit"
+    risk_fraction: float = 0.01
+
+    @property
+    def tx_cost(self) -> float:
+        """Transaction-cost fraction per unit position change (bps → fraction)."""
+        return self.tx_cost_bps / 1e4
+
+    def is_valid(self) -> bool:
+        """Grid-combo validity gate (never raises — WFO scores invalid as -inf)."""
+        if self.obs_window < 1 or self.rolling_z_window < 2:
+            return False
+        if self.obs_window + self.rolling_z_window > 4096:
+            return False
+        if self.algorithm not in ("PPO", "DQN"):
+            return False
+        return True
 # ---------------------------------------------------------------------------
 # Multi-Filter Portfolio System (#15)
 # ---------------------------------------------------------------------------
@@ -2095,6 +2160,73 @@ class MultiFilterSystemParams:
     def as_dict(self) -> dict:
         return asdict(self)
 
+
+class DeepRLTradingStrategy:
+    """Backtester-compatible *replay* of a trained RL policy.
+
+    This class does **no learning**. It carries a precomputed per-bar
+    ``signal`` array (the output of
+    :func:`source.rl.train.evaluate_policy_to_signals`) and exposes it through
+    the standard ``generate_signals`` contract so the trained agent flows
+    through the same ``Backtester`` / ``compute_metrics`` / dashboards as every
+    other strategy in the repo.
+
+    Parameters
+    ----------
+    params:
+        :class:`DeepRLTradingParams`.
+    signal_array:
+        Optional int array aligned 1:1 with the DataFrame passed to
+        ``generate_signals`` (values in ``{-1, 0, +1}``). When ``None`` (or a
+        length mismatch, or an invalid param combo) the strategy emits all
+        zeros — so a bare instance is inert and WFO scores it ``-inf``.
+    """
+
+    def __init__(self, params: DeepRLTradingParams | None = None,
+                 signal_array=None):
+        self.params = params or DeepRLTradingParams()
+        self._signal_array = (
+            None if signal_array is None else np.asarray(signal_array, dtype=int)
+        )
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        p = self.params
+        out = df.copy()
+        prev_close = out["close"].shift()
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(p.atr_period, min_periods=p.atr_period).mean()
+        return out
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        ind = self.compute_indicators(df)
+        n = len(ind)
+        if (
+            not self.params.is_valid()
+            or self._signal_array is None
+            or len(self._signal_array) != n
+        ):
+            ind["signal"] = np.zeros(n, dtype=int)
+            return ind
+
+        signal = self._signal_array.copy()
+        p = self.params
+        if p.session_start is not None and p.session_end is not None:
+            in_session = (
+                (ind.index.hour >= p.session_start)
+                & (ind.index.hour < p.session_end)
+            )
+            signal = np.where(in_session, signal, 0)
+        # Never open on a NaN-ATR bar (Backtester requires a valid ATR to size).
+        signal = np.where(ind["atr"].isna(), 0, signal)
+        ind["signal"] = signal.astype(int)
+        return ind
     def is_valid(self) -> bool:
         """Order constraints for the entry/trend periods.
 

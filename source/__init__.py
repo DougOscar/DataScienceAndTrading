@@ -40,6 +40,8 @@ from .strategy import (
     MACDHistogramParams,
     BBSqueezeStrategy,
     BBSqueezeParams,
+    DeepRLTradingStrategy,
+    DeepRLTradingParams,
     MultiFilterSystemStrategy,
     MultiFilterSystemParams,
 )
@@ -151,6 +153,8 @@ __all__ = [
     "MACDHistogramParams",
     "BBSqueezeStrategy",
     "BBSqueezeParams",
+    "DeepRLTradingStrategy",
+    "DeepRLTradingParams",
     "MultiFilterSystemStrategy",
     "MultiFilterSystemParams",
     "Backtester",

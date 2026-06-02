@@ -4,7 +4,18 @@ matplotlib>=3.7
 jupyterlab>=4.0
 ipykernel>=6.25
 scikit-learn>=1.3
-# PySpark powers the 3-market data layer (M1 -> multi-timeframe resample).
-# Requires a JDK on PATH (JAVA_HOME). pyarrow accelerates Spark<->pandas.
+
+# PySpark powers the multi-timeframe data layer (M1 -> resampled parquet cache;
+# source/spark_loader.py). Requires a JDK 17 or 21 on PATH/JAVA_HOME — Spark 4.x
+# does NOT run on JDK 24+ (get_spark() auto-detects a compatible JDK).
 pyspark>=3.5
 pyarrow>=14.0
+
+# Deep RL stack (strategy #16, machine_learning/16_deep_rl_trading.ipynb).
+# IMPORTANT: install torch from PyTorch's own index for the CUDA build — the
+# default PyPI wheel is CPU-only and training on CPU is infeasibly slow:
+#   pip install --index-url https://download.pytorch.org/whl/cu126 torch torchvision
+# On Python 3.14 (no stable wheels yet) use a Python 3.12 venv (see README / §0).
+torch>=2.3
+stable-baselines3[extra]>=2.3
+gymnasium>=0.29

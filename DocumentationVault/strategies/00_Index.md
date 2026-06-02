@@ -23,6 +23,7 @@ Use [[_Template]] when documenting a new strategy.
 | 13 | [[13_Linear_Regression_Channel\|Linear Regression Channel]] | Statistical / Dual-mode | Forex, B3, Crypto | 1h–1D | Idea |
 | 14 | [[14_FFT_Cycle_Filter\|FFT Cycle Filter & Forward Projection]] | Statistical / Cycle-following | Forex, B3, Crypto | 1h–1D | Idea |
 | 15 | [[15_Multi_Filter_Portfolio_System\|Multi-Filter Portfolio System]] | Trend-following / Multi-confirmation portfolio | Forex, Crypto, B3 | 15min–1D | Backtested |
+| 16 | [[16_Deep_RL_Trading\|Deep Reinforcement Learning Trading Agent]] | Machine Learning / Deep Reinforcement Learning | Forex, B3 | 30min–4h | Planning |
 
 ## Strategy Evaluation Checklist
 
