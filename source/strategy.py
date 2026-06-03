@@ -2078,6 +2078,9 @@ class DeepRLTradingParams:
         if self.algorithm not in ("PPO", "DQN"):
             return False
         return True
+
+    def as_dict(self) -> dict:
+        return asdict(self)
 # ---------------------------------------------------------------------------
 # Multi-Filter Portfolio System (#15)
 # ---------------------------------------------------------------------------
