@@ -227,7 +227,7 @@ def test_ambiguous_same_bar_with_m1_resolves_by_time_order():
         dict(open=1.1025, high=1.1030, low=1.0980, close=1.0985, spread=2),  # SL only, never reached
     ]
     m1 = _bars(m1_rows, start=bars["ts"][2], step=timedelta(minutes=20))
-    result = run_backtest(bars, signals, _spec(), m1=m1)
+    result = run_backtest(bars, signals, _spec(), m1=m1, timeframe="H1")
     t = _row(result.trades)
     assert t["exit_reason"] == "target"
     assert t["exit_price"] == pytest.approx(1.1027)
@@ -301,13 +301,6 @@ def test_short_stop_only_still_triggers_a_real_stop_ignoring_the_missing_target(
 # --------------------------------------------------------------------------- M1 window bounds (red-team M1):
 # the M1 window for HTF bar j must be [ts_j, ts_j + timeframe), never ts[j+1] and never len(m1).
 
-def test_infer_span_matches_the_true_timeframe_for_uniformly_spaced_bars():
-    from quantlab.engine import _infer_span
-
-    ts = np.array([T0 + i * timedelta(hours=1) for i in range(5)], dtype="datetime64[ms]")
-    assert _infer_span(ts) == np.timedelta64(60, "m")
-
-
 def test_map_m1_bounds_last_bar_does_not_leak_past_its_own_span():
     """Last-bar case (red-team p02 case B): an m1 frame that runs well past
     the last HTF bar's own window must not all be mapped to it."""
@@ -359,6 +352,98 @@ def test_map_m1_bounds_d1_intraday_end_excludes_the_dropped_partial_day():
     starts, ends = _map_m1_bounds(d1_ts, m1_ts, np.timedelta64(1440, "m"))
 
     assert ends[-1] - starts[-1] == 48  # 1440 minutes / 30 == 48, none of day 3
+
+
+# --------------------------------------------------------------------------- N3/N4 (re-verify
+# 2026-09-24): timeframe is required whenever m1 is given, and an M1/HTF OHLC consistency
+# check catches a wrong-but-plausible explicit declaration.
+
+def test_run_backtest_requires_timeframe_when_m1_given():
+    """Regression (red-team N3): there is no min-gap-based inference fallback
+    left at all -- m1= without an explicit timeframe= must raise a clear
+    error, not silently guess a span from bars' own smallest ts gap (which
+    overstates the true span on a sparse/session-filtered frame)."""
+    bars = _bars([dict(_QUIET_ROW) for _ in range(3)])
+    signals = _signals(
+        [dict(signal=1, stop_dist=0.0050, target_dist=0.0100)] + [dict()] * 2
+    )
+    m1 = _bars([dict(_QUIET_ROW) for _ in range(3)])
+    with pytest.raises(ValueError, match="timeframe"):
+        run_backtest(bars, signals, _spec(), m1=m1)
+
+
+def test_run_backtest_sparse_daily_frame_requires_timeframe_instead_of_inferring():
+    """Regression (red-team N3, report's sparse-frame case): a frame that
+    keeps only one bar per day would have its 1-day ts-gap mistaken for the
+    true (sub-day) timeframe under the old inference rule. Now it must raise
+    instead of silently mapping a whole day's worth of M1 to a single bar."""
+    bars = _bars([dict(_QUIET_ROW) for _ in range(3)], step=timedelta(days=1))
+    signals = _signals(
+        [dict(signal=1, stop_dist=0.0050, target_dist=0.0100)] + [dict()] * 2
+    )
+    m1 = _bars([dict(_QUIET_ROW) for _ in range(3)], step=timedelta(days=1))
+    with pytest.raises(ValueError, match="timeframe"):
+        run_backtest(bars, signals, _spec(), m1=m1)
+
+
+def test_run_backtest_wrong_explicit_timeframe_raises_on_ohlc_mismatch():
+    """Regression (red-team N4): a mis-declared (but explicitly given, so the
+    N3 check alone can't catch it) timeframe must no longer be accepted
+    silently. D1 bars declared as timeframe="H1" restrict each day's mapped
+    M1 window to just its first hour; that truncated window's own max/min
+    then disagrees with the D1 bar's real (whole-day) high/low, and
+    run_backtest must raise naming the first offending bar."""
+    d1_bars = _bars([
+        dict(open=1.1000, high=1.1200, low=1.0900, close=1.1050, spread=2),  # day 1: full-day range
+        dict(open=1.1050, high=1.1080, low=1.1020, close=1.1060, spread=2),  # day 2
+    ], step=timedelta(days=1))
+    signals = _signals([
+        dict(signal=1, stop_dist=0.0500, target_dist=None),
+        dict(),
+    ])
+    # Only 1 M1 row exists, inside day 1's *wrongly*-declared 1-hour window -- its own
+    # max/min (1.1005/1.0995) disagrees with the D1 bar's real high/low (1.1200/1.0900).
+    m1 = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),
+    ], start=d1_bars["ts"][0], step=timedelta(hours=1))
+    with pytest.raises(ValueError, match="inconsistent"):
+        run_backtest(d1_bars, signals, _spec(), m1=m1, timeframe="H1")
+
+
+def test_find_m1_inconsistency_returns_the_first_offending_bar():
+    """Hand-computed unit test of the consistency check itself, isolated from
+    run_backtest's other validation."""
+    from quantlab.engine import _M1_CONSISTENCY_TOL, _find_m1_inconsistency
+
+    h = np.array([1.1010, 1.1050, 1.1030])
+    l = np.array([1.0990, 1.1000, 1.1010])
+    # bar0's window [0,1): max=1.1005/min=1.0995 vs its own declared 1.1010/1.0990 -> mismatch
+    m1_h = np.array([1.1005, 1.1010, 1.1200, 1.1030])
+    m1_l = np.array([1.0995, 1.1000, 1.1100, 1.1010])
+    m1_start = np.array([0, 1, 3], dtype=np.int64)
+    m1_end = np.array([1, 3, 4], dtype=np.int64)
+
+    j, mx, mn = _find_m1_inconsistency(h, l, m1_h, m1_l, m1_start, m1_end, _M1_CONSISTENCY_TOL)
+    assert j == 0
+    assert mx == pytest.approx(1.1005)
+    assert mn == pytest.approx(1.0995)
+
+
+def test_find_m1_inconsistency_skips_bars_with_no_m1_coverage_and_returns_minus_one():
+    """A bar with an empty M1 window (start == end) must be skipped outright
+    (its own declared high/low can be anything -- there is nothing to check
+    against), and an otherwise fully-consistent frame must return -1."""
+    from quantlab.engine import _M1_CONSISTENCY_TOL, _find_m1_inconsistency
+
+    h = np.array([1.1005, 1.1200, 5.0])     # bar2's h/l are nonsense but uncovered -> ignored
+    l = np.array([1.0995, 1.1050, -5.0])
+    m1_h = np.array([1.1005, 1.1100, 1.1200])
+    m1_l = np.array([1.0995, 1.1050, 1.1100])
+    m1_start = np.array([0, 1, 3], dtype=np.int64)
+    m1_end = np.array([1, 3, 3], dtype=np.int64)  # bar2: empty window
+
+    j, mx, mn = _find_m1_inconsistency(h, l, m1_h, m1_l, m1_start, m1_end, _M1_CONSISTENCY_TOL)
+    assert j == -1
 
 
 def test_run_backtest_walk_forward_slice_ignores_m1_from_the_next_fold():
@@ -420,9 +505,12 @@ def test_mae_mfe_capped_at_fill_price_on_exit_bar_without_m1():
 
 
 def test_mae_mfe_walks_m1_sub_bars_up_to_the_hit_sub_bar_only():
-    """With M1, excursions are accumulated sub-bar by sub-bar in order, up to
-    and including the one that triggers the exit -- a rally in a *later*
-    sub-bar of the same HTF bar must never be walked."""
+    """With M1, excursions are accumulated sub-bar by sub-bar in order: every
+    sub-bar *before* the hit contributes its own full range, the hit sub-bar
+    contributes only the fill-capped excursion (re-verify 2026-09-24, M5
+    residual -- see the ECB-minute-style test below for the case where the
+    hit sub-bar's own range is what would otherwise inflate MAE), and a rally
+    in a *later* sub-bar of the same HTF bar must never be walked at all."""
     spec = _spec(point=1e-5)
     bars = _bars([
         dict(open=1.1, high=1.1001, low=1.0999, close=1.1, spread=10),
@@ -454,9 +542,51 @@ def test_mae_mfe_walks_m1_sub_bars_up_to_the_hit_sub_bar_only():
     result = run_backtest(bars, signals, spec, m1=m1, timeframe="H1")
     t = _row(result.trades)
 
+    # ep=1.1001, SL=1.0990 (see the arithmetic above); sub-bar0 (bar2 minute0) touches SL,
+    # filling at the level (1.0990, no slippage) -- capped excursion = (1.1001-1.0990)/1e-5 = 110
+    # (re-verify 2026-09-24, M5 residual: pre-fix this was 210, sub-bar0's own uncapped low 1.0980)
     assert t["exit_reason"] == "stop"
-    assert t["mae_points"] == pytest.approx(210.0)   # sub-bar 0's own low (1.0980) counts in full
+    assert t["mae_points"] == pytest.approx(110.0)   # capped at the fill, not sub-bar0's raw low (-> 210)
     assert t["mfe_points"] == pytest.approx(10.0)    # the rally sub-bar is never walked
+
+
+def test_short_m1_exit_minute_excursion_capped_at_fill_ecb_style_spike():
+    """Regression (red-team M5 residual, re-verify 2026-09-24). The report's
+    real worst case was a 2019-09-12 ECB-announcement-minute short with MAE
+    446 against a realised loss of only 159: the exit minute's OWN full range
+    (well beyond the level that actually triggered the stop) was still
+    counted in full, even though a resting stop order only ever fills once
+    and price action after that fill -- even inside the very same minute --
+    never happened to an already-closed position. This is the same bug as
+    the whole-bar-path fix already covers, one level deeper: on the M1 path
+    it must apply *inside* the single sub-bar that triggers the exit too."""
+    bars = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),  # fill bar
+        dict(open=1.1000, high=1.1200, low=1.0995, close=1.1150, spread=2),  # "ECB" spike bar
+    ])
+    signals = _signals([
+        dict(signal=-1, stop_dist=0.0020, target_dist=None),
+        dict(), dict(),
+    ])
+    m1 = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),  # bar1's own minute
+        dict(open=1.1000, high=1.1200, low=1.0995, close=1.1150, spread=2),  # bar2's own minute: the spike
+    ], start=bars["ts"][1], step=timedelta(hours=1))
+
+    result = run_backtest(bars, signals, _spec(), m1=m1, timeframe="H1")
+    t = _row(result.trades)
+
+    # entry=1.1000 (raw Bid, short) ; SL=1.1000+0.0020=1.1020
+    # bar2's only M1 sub-bar IS the whole spike minute: ask_o=1.1000+2pt=1.1002 (<SL -> not a
+    # gap) ; ask_h=1.1200+2pt=1.1202 (>=SL -> touch), fills at the level: 1.1020
+    assert t["exit_reason"] == "stop"
+    assert t["exit_price"] == pytest.approx(1.1020)
+    assert t["pnl_points"] == pytest.approx(-20.0)
+    # pre-fix (buggy): mae would be (ask_h-entry)/point = (1.1202-1.1000)/0.0001 = 202.0 -- the
+    # spike's full range counted even though it happened only AFTER the stop had already filled
+    assert t["mae_points"] == pytest.approx(20.0)   # capped at the realised loss, matching pnl
+    assert t["mfe_points"] == pytest.approx(3.0)    # from bar1's (non-hit) sub-bar, unaffected by the cap
 
 
 def test_short_excursions_measured_on_ask_not_bid():
@@ -718,8 +848,9 @@ def test_spread_multiplier_and_stressed_shift_entry_and_stop_fill():
         dict(signal=1, stop_dist=0.0030, target_dist=None),
         dict(), dict(),
     ])
-    cost_a = CostModel(version="fbs-v1")  # spread x1, no slippage
-    cost_b = cost_a.stressed()            # DESIGN §4.2 default: x1.5 spread, +1pt slippage
+    cost_a = CostModel(version_tag="fbs-v1")  # spread x1, no slippage, stop_fill="level"
+    cost_b = cost_a.stressed()                # DESIGN §4.2 default: x1.5 spread, +1pt slippage,
+                                               # stop_fill="bar_extreme" (red-team N5)
 
     result_a = run_backtest(bars, signals, _spec(), cost_a)
     result_b = run_backtest(bars, signals, _spec(), cost_b)
@@ -730,10 +861,13 @@ def test_spread_multiplier_and_stressed_shift_entry_and_stop_fill():
     # entry_b = 1.1005 + 4*1.5*0.0001    = 1.1011 ; SL_b = 1.1011-0.0030 = 1.0981
     assert a["entry_price"] == pytest.approx(1.1009)
     assert b["entry_price"] == pytest.approx(1.1011)
-    # neither gaps (open 1.1005 > either SL); fill_a = SL_a (no slippage); fill_b = SL_b - 1pt slippage
+    # neither gaps (open 1.1005 > either SL); fill_a = SL_a, no bar_extreme, no slippage.
+    # fill_b: stop_fill="bar_extreme" now applies too (N5) -> fills at bar2's own low (0.0970)
+    # instead of SL_b, minus 1pt slippage: 1.0970-0.0001 = 1.0969 (not the pre-N5 "SL_b - 1pt").
     assert a["exit_price"] == pytest.approx(1.0979)
-    assert b["exit_price"] == pytest.approx(1.0981 - 0.0001)
-    assert cost_b.version == "fbs-v1+stress(x1.5spread,+1slip)"
+    assert b["exit_price"] == pytest.approx(1.0970 - 0.0001)
+    # version (red-team N5): deterministic encoding of every non-default knob, fixed order.
+    assert cost_b.version == "fbs-v1+spread_mult1.5+slippage1+stop_fill=bar_extreme"
     assert cost_a.version == "fbs-v1"  # stressed() never mutates the base model
 
 
@@ -848,10 +982,78 @@ def test_engine_swap_every_day_spec_counts_weekend_swap():
     result = run_backtest(bars, signals, spec, CostModel())
     t = _row(result.trades)
     # FX rule (swap_every_day=False) gives nights=4, weighted=6.0 (see
-    # test_engine_swap_integration_over_a_full_week); the crypto rule adds
-    # Fri->Sat and Sat->Sun -> 6 raw nights, weighted 8.0 (Wed still triples)
+    # test_engine_swap_integration_over_a_full_week); the crypto rule adds Fri->Sat and
+    # Sat->Sun -> 6 raw nights, weighted 6.0 (minor-4 follow-up, re-verify 2026-09-24: an
+    # every-day symbol is never ALSO tripled on swap_3day, so Wed counts as a flat 1.0 here
+    # too -- pre-fix this was weighted 8.0, over-charging Wednesday's extra x2)
     assert t["nights"] == 6
-    assert t["swap_points"] == pytest.approx(-16.0)
+    assert t["swap_points"] == pytest.approx(-12.0)
+
+
+def test_nights_weighted_swap_every_day_does_not_also_triple_wednesday():
+    """Regression (minor-4 follow-up, re-verify 2026-09-24): swap_every_day
+    must not ALSO apply the FX/metals Wednesday x3 -- that multiplier exists
+    specifically to compensate FX/metals for the two nights it skips
+    (Fri->Sat, Sat->Sun); a symbol already charged every single night has no
+    gap left to compensate for, so tripling Wednesday on top would
+    double-count the weekend. A full Mon-open -> next-Mon-close week must
+    come out to exactly 7 weighted nights (one per calendar night), not 9."""
+    entry = datetime(2024, 1, 1, 10, 0)  # Monday
+    exit_ = datetime(2024, 1, 8, 10, 0)  # next Monday: a full 7-night week (Jan 3 is Wednesday)
+    raw, weighted = _nights_weighted(entry, exit_, swap_3day=2, swap_every_day=True)
+    assert raw == 7
+    assert weighted == pytest.approx(7.0)  # not 9.0 (pre-fix: 6 nights x1.0 + Wed x3.0)
+
+
+def test_swap_mode_interest_uses_entry_price_and_annual_rate():
+    """Hand-computed test (red-team N1): swap_mode="interest" (MT5's
+    SYMBOL_SWAP_MODE_INTEREST_CURRENT/_OPEN) charges an annual percentage of
+    *price* per night: swap per night = price * contract_size * rate/100/360
+    per lot, approximated with the trade's own entry price for every night
+    held. Same D1-bar week as test_engine_swap_integration_over_a_full_week
+    (weighted_nights=6.0), so the only new arithmetic is the interest formula
+    itself."""
+    days = [datetime(2024, 1, 1), datetime(2024, 1, 2), datetime(2024, 1, 3),
+            datetime(2024, 1, 4), datetime(2024, 1, 5), datetime(2024, 1, 8)]
+    rows = [
+        dict(open=1.1000, high=1.1010, low=1.0990, close=1.1005, spread=2),
+        dict(open=1.1000, high=1.1010, low=1.0990, close=1.1005, spread=2),  # fill bar
+        dict(open=1.1000, high=1.1010, low=1.0990, close=1.1005, spread=2),
+        dict(open=1.1000, high=1.1010, low=1.0990, close=1.1005, spread=2),
+        dict(open=1.1000, high=1.1010, low=1.0990, close=1.1005, spread=2),
+        dict(open=1.1005, high=1.1015, low=1.0995, close=1.1010, spread=2),  # eod bar
+    ]
+    bars = pl.DataFrame({
+        "ts": days,
+        "open": [r["open"] for r in rows], "high": [r["high"] for r in rows],
+        "low": [r["low"] for r in rows], "close": [r["close"] for r in rows],
+        "spread": [float(r["spread"]) for r in rows],
+    }, schema_overrides={"ts": pl.Datetime("ms")}).with_columns(
+        pl.col("ts").dt.replace_time_zone("UTC").alias("ts_utc"),
+        pl.col("spread").alias("spread_max"),
+        pl.lit(100).cast(pl.Int64).alias("tick_vol"),
+    )
+    signals = _signals([
+        dict(signal=1, stop_dist=0.0100, target_dist=0.0100),
+        dict(), dict(), dict(), dict(), dict(),
+    ])
+    spec = _spec(swap_mode="interest", swap_long=5.0, swap_short=-3.0)  # annual % of price
+    result = run_backtest(bars, signals, spec, CostModel())
+    t = _row(result.trades)
+
+    # entry_price = open[1] + spread[1]*point = 1.1000 + 2*0.0001 = 1.1002 ; nights weighted = 6.0
+    # (see test_engine_swap_integration_over_a_full_week for the isolated night-counting arithmetic)
+    assert t["entry_price"] == pytest.approx(1.1002)
+    assert t["nights"] == 4
+    assert t["swap_points"] == pytest.approx(0.0)  # interest mode never touches swap_points
+    # swap_money_per_lot = weighted_nights(6.0) * entry_price(1.1002) * contract_size(100_000)
+    #                      * annual_rate(5.0) / 100 / 360
+    expected = 6.0 * 1.1002 * spec.contract_size * 5.0 / 100.0 / 360.0
+    assert t["swap_money_per_lot"] == pytest.approx(expected)
+
+    # swap sensitivity band (DESIGN §4.3) still scales it linearly, same as the other modes
+    result_hi = run_backtest(bars, signals, spec, CostModel(swap_multiplier=1.5))
+    assert _row(result_hi.trades)["swap_money_per_lot"] == pytest.approx(expected * 1.5)
 
 
 # --------------------------------------------------------------------------- performance

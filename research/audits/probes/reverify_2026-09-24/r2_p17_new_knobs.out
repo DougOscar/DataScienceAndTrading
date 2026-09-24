@@ -1,0 +1,9 @@
+(a) stop_fill=level       version='fbs-v0-uncalibrated' stressed.version='fbs-v0-uncalibrated+spread_mult1.5+slippage1+stop_fill=bar_extreme': pnl no-M1=-2224  with-M1=-2224
+(a) stop_fill=bar_extreme version='fbs-v0-uncalibrated+stop_fill=bar_extreme' stressed.version='fbs-v0-uncalibrated+spread_mult1.5+slippage1+stop_fill=bar_extreme': pnl no-M1=-8214  with-M1=-4010
+(b) EURUSD D1: median spread=20.0 median spread_max=38.0 p90 spread_max=59.0 max=200.0
+    shorts no-M1: n=19 pnl=-2027 stops=5 | with-M1: pnl=-2027 stops=5
+(b) EURUSD H1: median spread=9.0 median spread_max=10.0 p90 spread_max=16.0 max=101.0
+    shorts no-M1: n=71 pnl=-2656 stops=27 | with-M1: pnl=-2176 stops=26
+(c) with M1: stop exits 86; MAE > 1.05x loss in 0, max ratio 1.00 (exit sub-bar's full range is included; the fill happened before that range completed)
+    worst: {'entry_ts': datetime.datetime(2019, 1, 4, 7, 0), 'exit_ts': datetime.datetime(2019, 1, 4, 15, 0), 'direction': 1, 'entry_price': 1.1393499999999999, 'exit_price': 1.1363671428571427, 'pnl_points': -298.2857142857176, 'mae_points': 298.2857142857176}
+(d) USDJPY money-mode swap -5/lot/night: sum swap_money_per_lot=-210.0; booked in pnl_ccy (USD) = -1.91 -> treated as JPY (x 1/USDJPY); if the export says CURRENCY_DEPOSIT the correct USD amount is -210.0

@@ -58,29 +58,46 @@ the full list):
   model. Targets are never affected: a resting limit order never fills worse
   than its own price.
 * **M1 window per HTF bar j is exactly ``[ts_j, ts_j + timeframe)``** --
-  bounded by the HTF bar's own span (an explicit ``timeframe=`` kwarg, or
-  inferred from the smallest gap between consecutive ``bars.ts`` values when
-  omitted), and *never* by the next bar's ``ts`` alone and *never* by the end
-  of the ``m1`` frame. A session/weekend/holiday gap right after bar j, or an
-  ``m1`` frame that runs past the last HTF bar (e.g. "load M1 once, backtest
-  many walk-forward fold slices of HTF bars"), must not leak prices from
-  *after* bar j's own close into bar j's SL/TP check (red-team M1). See
-  :func:`_map_m1_bounds`.
+  bounded by the HTF bar's own span, and *never* by the next bar's ``ts``
+  alone and *never* by the end of the ``m1`` frame. A session/weekend/holiday
+  gap right after bar j, or an ``m1`` frame that runs past the last HTF bar
+  (e.g. "load M1 once, backtest many walk-forward fold slices of HTF bars"),
+  must not leak prices from *after* bar j's own close into bar j's SL/TP
+  check (red-team M1). See :func:`_map_m1_bounds`.
+* **``timeframe=`` is required whenever ``m1=`` is given (red-team N3/N4,
+  re-verify 2026-09-24)**, with no min-gap-based inference fallback: on a
+  sparse or session-filtered ``bars`` frame (e.g. one bar per day), the
+  smallest gap between consecutive ``bars['ts']`` values silently overstates
+  the true span, re-opening the exact M1 look-ahead the previous bullet
+  closes. As a second, independent guard against a *wrong-but-plausible*
+  explicit ``timeframe`` (e.g. D1 bars run as if they were H1), every bar
+  with M1 coverage is validated on every call: its own ``high``/``low`` must
+  equal the max/min of its mapped M1 window (Bid) to within
+  :data:`_M1_CONSISTENCY_TOL` (1e-9) -- a mismatch raises immediately, naming
+  the first offending bar, since real HTF bars are resampled from the same M1
+  archive and should match to floating-point precision. See
+  :func:`_find_m1_inconsistency`.
 * **MAE/MFE only reflect prices the still-open position actually saw
   (red-team M5).** On every bar/sub-bar that does *not* close the trade, the
   bar's own full high/low (Ask-adjusted for shorts, see below) is used, since
   the position genuinely was open for the whole bar. On the bar/sub-bar that
-  *does* close the trade: with M1, sub-bars are walked and their excursions
-  accumulated in order, stopping at (and including) the sub-bar that
-  triggers the exit -- later sub-bars in the same HTF bar are simply never
-  looked at. Without M1 (or with an empty M1 window for that bar), the exit
-  bar's contribution is capped at the fill price itself on both sides,
-  because we only know a hit happened *somewhere* in the bar's range and
+  *does* close the trade -- whether that's the whole HTF bar (no M1, or an
+  empty M1 window for that bar) or a single M1 sub-bar within it -- the
+  contribution is capped at the fill price itself on both sides, because we
+  only know a hit happened *somewhere* in that bar's/sub-bar's range and
   cannot rule out that price kept moving (favourably *or* adversely) only
   after the position had already closed -- e.g. a post-stop rally must not
-  inflate MFE. **Shorts' excursions are measured on Ask** (``high``/``low`` +
-  that bar's effective spread), matching the price a short's stop/target
-  actually triggers on, not on raw Bid.
+  inflate MFE, and (re-verify 2026-09-24, M5 residual) neither may the *rest
+  of the very same M1 minute* that triggered the exit, such as a news-spike
+  minute whose own high/low reaches far beyond the level that actually
+  triggered the fill. With M1, sub-bars are walked and their excursions
+  accumulated in order: every sub-bar *before* the hit contributes its own
+  full range (the position was genuinely open for the whole of it); the hit
+  sub-bar itself contributes only the fill-capped excursion; later sub-bars
+  in the same HTF bar are simply never looked at. **Shorts' excursions are
+  measured on Ask** (``high``/``low`` + that bar's effective spread),
+  matching the price a short's stop/target actually triggers on, not on raw
+  Bid.
 * Exit reasons: ``signal`` (flat/reversal driven by the strategy),
   ``stop`` / ``gap_stop``, ``target`` / ``gap_target``, ``force`` (session
   flattening), ``eod`` (end of data).
@@ -106,6 +123,14 @@ the full list):
 * Nights/swap counting is documented in :func:`_nights_weighted`; whether
   swap accrues on Friday/Saturday nights too (crypto CFDs at FBS-like
   brokers) is ``spec.swap_every_day`` (see ``quantlab.costs.InstrumentSpec``).
+  An every-day symbol's nights are never *also* tripled on ``swap_3day``
+  (that x3 exists only to compensate FX/metals for the two nights it skips).
+* ``swap_mode="interest"`` (red-team N1) is modelled as price * contract_size
+  * rate/100/360 per lot per night (see the ``swap_mode=="interest"`` branch
+  below); the currency it -- and ``swap_mode="money"`` -- are denominated in
+  is ``spec.swap_ccy``, resolved by ``quantlab.costs`` from the real MT5 swap
+  mode enum where available and converted to account currency by
+  ``quantlab.sizing.apply_sizing``, *not* assumed to be quote currency.
 """
 
 from __future__ import annotations
@@ -241,6 +266,36 @@ def _wholebar_short(o: float, h: float, l: float, spread_open_pts: float, spread
 
 
 @njit(cache=True)
+def _find_m1_inconsistency(h, l, m1_h, m1_l, m1_start, m1_end, tol):
+    """First HTF bar (if any) whose own high/low disagree with the max/min of its
+    mapped M1 window, beyond ``tol`` (red-team N3/N4, re-verify 2026-09-24).
+
+    A single linear pass over exactly the M1 rows each bar's own window covers
+    (bounded by :func:`_map_m1_bounds`, so no double-counting and no more than
+    ``len(m1)`` total comparisons regardless of ``len(bars)``). Bars with an
+    empty M1 window (no coverage) are skipped -- there is nothing to check.
+    Returns ``(-1, 0.0, 0.0)`` when every covered bar is consistent, else
+    ``(j, m1_high, m1_low)`` for the first offending bar.
+    """
+    n = h.shape[0]
+    for j in range(n):
+        s0 = m1_start[j]
+        s1 = m1_end[j]
+        if s1 <= s0:
+            continue
+        mx = m1_h[s0]
+        mn = m1_l[s0]
+        for t in range(s0 + 1, s1):
+            if m1_h[t] > mx:
+                mx = m1_h[t]
+            if m1_l[t] < mn:
+                mn = m1_l[t]
+        if abs(mx - h[j]) > tol or abs(mn - l[j]) > tol:
+            return j, mx, mn
+    return -1, 0.0, 0.0
+
+
+@njit(cache=True)
 def _run_core(
     o, h, l, c, eff_spread, eff_spread_max, point,
     signal_i8, stop_dist, target_dist, force_exit,
@@ -345,10 +400,38 @@ def _run_core(
                 s1 = m1_end[j]
                 if s1 > s0:
                     for t in range(s0, s1):
-                        # Excursion from this sub-bar, applied *before* the hit
-                        # check, for every sub-bar actually walked -- the loop
-                        # breaks at the hit sub-bar, so later sub-bars in this
-                        # HTF bar are never seen (red-team M5).
+                        # Hit check FIRST (M5 residual, re-verify 2026-09-24): whether *this*
+                        # sub-bar closes the trade determines how its excursion may be counted.
+                        if position == 1:
+                            hit, price, reason = _chk_long(
+                                m1_o[t], m1_h[t], m1_l[t], sl_c, tp_c, slip_price, bar_extreme
+                            )
+                        else:
+                            hit, price, reason, scost = _chk_short(
+                                m1_o[t], m1_h[t], m1_l[t], m1_spread[t], m1_spread[t], point,
+                                sl_c, tp_c, slip_price, bar_extreme
+                            )
+                        if hit:
+                            # This sub-bar's excursion is capped at the fill price itself,
+                            # mirroring the no-M1 whole-bar cap below: price action *after* the
+                            # fill -- even within this SAME M1 minute (e.g. a news-spike minute
+                            # whose range keeps moving well past the stop once it has already
+                            # triggered) -- never happened to an already-closed position. Earlier
+                            # (non-hit) sub-bars already contributed their own full range above;
+                            # later sub-bars in this HTF bar are never walked at all (break).
+                            if position == 1:
+                                adverse = (ep - price) / point
+                                favorable = (price - ep) / point
+                            else:
+                                adverse = (price - ep) / point
+                                favorable = (ep - price) / point
+                            if adverse > cur_mae:
+                                cur_mae = adverse
+                            if favorable > cur_mfe:
+                                cur_mfe = favorable
+                            break
+                        # Not this sub-bar's hit: the position genuinely was open for the whole
+                        # of it, so its own full range counts (red-team M5).
                         if position == 1:
                             sub_adverse = (ep - m1_l[t]) / point
                             sub_favorable = (m1_h[t] - ep) / point
@@ -361,18 +444,6 @@ def _run_core(
                             cur_mae = sub_adverse
                         if sub_favorable > cur_mfe:
                             cur_mfe = sub_favorable
-
-                        if position == 1:
-                            hit, price, reason = _chk_long(
-                                m1_o[t], m1_h[t], m1_l[t], sl_c, tp_c, slip_price, bar_extreme
-                            )
-                        else:
-                            hit, price, reason, scost = _chk_short(
-                                m1_o[t], m1_h[t], m1_l[t], m1_spread[t], m1_spread[t], point,
-                                sl_c, tp_c, slip_price, bar_extreme
-                            )
-                        if hit:
-                            break
                 else:
                     if position == 1:
                         hit, price, reason, adverse, favorable = _wholebar_long(
@@ -495,12 +566,20 @@ def _nights_weighted(entry_ts: datetime, exit_ts: datetime, swap_3day: int,
     ``swap_3day`` weekday's x3 multiplier). This makes a FX Friday-open ->
     Monday-close hold count exactly 1 night (Friday's, charged at Saturday
     00:00) while a *crypto* Friday-open -> Monday-close hold counts 3 (Fri,
-    Sat, Sun), each at its own weight -- the triple-day multiplier still
-    applies by weekday regardless of ``swap_every_day`` (brokers may or may
-    not triple a crypto symbol's Wednesday night too; this is a per-symbol
-    fact the broker export should eventually confirm, so the same rule is
-    applied uniformly here until then). A Mon-open -> Thu-close FX hold counts
-    3 nights with the swap_3day one (default Wednesday) weighted x3.
+    Sat, Sun).
+
+    **``swap_every_day`` nights are never also tripled (red-team minor-4
+    follow-up).** The FX/metals x3 on ``swap_3day`` exists specifically to
+    compensate for the two nights that rule skips (Fri->Sat, Sat->Sun); a
+    symbol that is already charged every single night of the week has no gap
+    left to compensate for, so applying the x3 *on top of* that would
+    double-count the weekend -- a full Mon-open -> next-Mon-close crypto week
+    would come out to 9 weighted nights (6 normal + Wed's extra x2) instead of
+    the correct 7 (one per calendar night, no exceptions). So every
+    ``swap_every_day`` night is weighted 1.0 flat, regardless of weekday; only
+    the FX/metals branch (``swap_every_day=False``) ever applies the x3. A
+    Mon-open -> Thu-close FX hold still counts 3 nights with the swap_3day one
+    (default Wednesday) weighted x3.
     """
     if exit_ts <= entry_ts:
         return 0, 0.0
@@ -511,7 +590,10 @@ def _nights_weighted(entry_ts: datetime, exit_ts: datetime, swap_3day: int,
         midnight = datetime.combine(d + timedelta(days=1), datetime.min.time())
         if midnight > exit_ts:
             break
-        if swap_every_day or d.weekday() <= 4:  # Mon=0 .. Fri=4
+        if swap_every_day:
+            raw += 1
+            weighted += 1.0
+        elif d.weekday() <= 4:  # Mon=0 .. Fri=4
             raw += 1
             weighted += 3.0 if d.weekday() == swap_3day else 1.0
         d += timedelta(days=1)
@@ -535,24 +617,7 @@ def _to_bool_array(x, bars: pl.DataFrame, n: int) -> np.ndarray:
     return arr
 
 
-def _infer_span(htf_np: np.ndarray) -> np.timedelta64:
-    """Fallback HTF bar span when ``timeframe`` isn't passed to :func:`run_backtest`
-    explicitly: the smallest positive gap between consecutive ``bars['ts']``
-    values. This is correct for the ordinary case (uniformly-spaced bars,
-    possibly with a handful of larger session/weekend/holiday gaps -- the
-    *smallest* gap is still the true timeframe). Pass ``timeframe=`` explicitly
-    for any frame whose gaps are *all* larger than the true span (e.g. a
-    2-bar Friday+Monday D1 slice), where this inference would overstate it.
-    """
-    if htf_np.shape[0] < 2:
-        raise ValueError(
-            "cannot infer the HTF bar span from a single-bar frame; pass timeframe=... to run_backtest"
-        )
-    diffs = np.diff(htf_np)
-    pos = diffs[diffs > np.timedelta64(0, "ns")]
-    if pos.shape[0] == 0:
-        raise ValueError("cannot infer the HTF bar span: bars['ts'] is not strictly increasing")
-    return pos.min()
+_M1_CONSISTENCY_TOL = 1e-9  # red-team N3/N4: HTF high/low vs. its M1 window's max/min, absolute points
 
 
 def _map_m1_bounds(htf_ts: pl.Series, m1_ts: pl.Series, span: np.timedelta64) -> tuple[np.ndarray, np.ndarray]:
@@ -606,18 +671,29 @@ def run_backtest(
     ``bars``/``signals`` follow the contracts in ``quantlab.contracts`` (same
     length/order; Bid OHLC + points spread; +1/-1/0/null signal with PRICE-unit
     stop_dist/target_dist). ``m1`` (optional) is an M1 bar frame with the same
-    schema, used to resolve same-HTF-bar SL/TP ambiguity. ``timeframe``
-    (optional, one of ``"M1"/"M5"/"M15"/"M30"/"H1"/"H4"/"D1"``) declares
-    ``bars``' own timeframe so the M1 window per bar can be bounded exactly
-    (see :func:`_map_m1_bounds`); if omitted, it is inferred from ``bars``
-    itself (the smallest gap between consecutive ``ts`` values) -- pass it
-    explicitly for any ``bars`` slice whose only gaps could be mistaken for
-    the timeframe (e.g. a 2-row Friday+Monday D1 slice). Ignored when ``m1``
-    is not given. ``force_exit`` is an optional per-bar boolean (column name
-    in ``bars``, a Series, or an array-like) used for B3 session flattening:
-    on a ``True`` bar, any open position is closed at that bar's close (after
-    that bar's own SL/TP is checked), and no *new* entry is opened on that bar
-    even if the signal asks for one.
+    schema, used to resolve same-HTF-bar SL/TP ambiguity. ``timeframe`` (one
+    of ``"M1"/"M5"/"M15"/"M30"/"H1"/"H4"/"D1"``, declaring ``bars``' own
+    timeframe so the M1 window per bar can be bounded exactly, see
+    :func:`_map_m1_bounds`) is **required whenever ``m1`` is given** (red-team
+    N3/N4, re-verify 2026-09-24) -- there is no inference fallback: guessing
+    the span from ``bars``' own smallest ``ts`` gap silently overstates it on
+    a sparse/session-filtered frame (e.g. one bar per day), re-opening the
+    exact M1 look-ahead this function otherwise closes. As a second,
+    independent guard, every bar with M1 coverage is validated (every call)
+    against its own mapped M1 window's max/min high/low, to catch a
+    wrong-but-plausible explicit ``timeframe`` too (e.g. D1 bars run as if
+    they were H1) -- see :func:`_find_m1_inconsistency`. Ignored (and
+    optional) when ``m1`` is not given. ``force_exit`` is an optional per-bar
+    boolean (column name in ``bars``, a Series, or an array-like) used for B3
+    session flattening: on a ``True`` bar, any open position is closed at
+    that bar's close (after that bar's own SL/TP is checked), and no *new*
+    entry is opened on that bar even if the signal asks for one.
+
+    ``m1`` must cover each HTF bar it overlaps **completely**: slice M1 on HTF bar
+    boundaries (e.g. load both with the same ``start``/``end``), never mid-bar. A partial
+    window makes the high/low consistency check above fail loudly for that bar
+    (red-team R2-4) -- by design, since a partial window would silently mis-resolve
+    intrabar stop/target order.
     """
     _check_columns(bars, BAR_COLUMNS, "bars")
     _check_columns(signals, SIGNAL_COLUMNS, "signals")
@@ -647,17 +723,37 @@ def run_backtest(
 
     use_m1 = m1 is not None
     if use_m1:
+        if timeframe is None:
+            raise ValueError(
+                "run_backtest: timeframe=... is required whenever m1= is given (red-team N3/N4, "
+                "re-verify 2026-09-24) -- inferring bars' own span from its smallest ts-gap silently "
+                "overstates the span on a sparse/session-filtered frame (e.g. one bar per day), which "
+                "re-opens the very M1 look-ahead this function otherwise closes. Pass the bars' true "
+                f"timeframe explicitly, one of {sorted(_TIMEFRAME_MINUTES)}."
+            )
         _check_columns(m1, BAR_COLUMNS, "m1")
         m1_o = m1["open"].cast(pl.Float64).to_numpy()
         m1_h = m1["high"].cast(pl.Float64).to_numpy()
         m1_l = m1["low"].cast(pl.Float64).to_numpy()
         m1_raw_spread = m1["spread"].cast(pl.Float64).to_numpy()
         m1_spread = cost.effective_spread(m1_raw_spread)
-        if timeframe is not None:
-            span = np.timedelta64(_TIMEFRAME_MINUTES[timeframe], "m")
-        else:
-            span = _infer_span(bars["ts"].to_numpy())
+        span = np.timedelta64(_TIMEFRAME_MINUTES[timeframe], "m")
         m1_start, m1_end = _map_m1_bounds(bars["ts"], m1["ts"], span)
+
+        # Independent guard against a wrong-but-plausible explicit `timeframe` (red-team N4, e.g.
+        # D1 bars run as if they were H1): every bar with M1 coverage must have its own high/low
+        # equal the max/min of its mapped M1 window, since real HTF bars are resampled from the
+        # same M1 archive (bit-identical, not just approximately equal).
+        bad_j, m1_high, m1_low = _find_m1_inconsistency(h, l, m1_h, m1_l, m1_start, m1_end, _M1_CONSISTENCY_TOL)
+        if bad_j >= 0:
+            bad_ts = bars["ts"][int(bad_j)]
+            raise ValueError(
+                f"run_backtest: bars row {bad_j} (ts={bad_ts}) is inconsistent with its own M1 window "
+                f"under timeframe={timeframe!r} -- bar high={h[bad_j]!r} vs M1 max={m1_high!r}, "
+                f"bar low={l[bad_j]!r} vs M1 min={m1_low!r} (tolerance {_M1_CONSISTENCY_TOL:g}). This "
+                "usually means timeframe is wrong for these bars, or bars/m1 were not resampled from "
+                "the same underlying data (red-team N3/N4)."
+            )
     else:
         m1_o = m1_h = m1_l = m1_spread = np.zeros(0, dtype=np.float64)
         m1_start = np.zeros(n, dtype=np.int64)
@@ -719,11 +815,25 @@ def run_backtest(
         per_night = np.where(direction == 1, spec.swap_long, spec.swap_short)
         swap_money_per_lot = weighted_nights * per_night * cost.swap_multiplier
     elif spec.swap_mode == "interest":
+        # red-team N1: SYMBOL_SWAP_MODE_INTEREST_CURRENT / _OPEN charge an annual percentage of
+        # *price* per night, in the instrument's quote currency: swap per night = price *
+        # contract_size * rate/100/360 per lot (spec.swap_long/swap_short hold the annual %).
+        # Approximated here using the trade's own entry price for every night held: exact for
+        # _INTEREST_OPEN (which is defined off the position's opening price), an approximation
+        # for _INTEREST_CURRENT (which technically reprices off *each night's own* close -- not
+        # available at this trade-aggregate granularity, only entry/exit prices are).
+        per_night_rate = np.where(direction == 1, spec.swap_long, spec.swap_short)
+        swap_money_per_lot = (
+            weighted_nights * entry_price * spec.contract_size * per_night_rate / 100.0 / 360.0
+            * cost.swap_multiplier
+        )
         if n_trades > 0 and np.any(weighted_nights > 0):
             warnings.warn(
-                f"{spec.symbol}: swap_mode='interest' is not modelled (needs notional + rate curve); "
-                "swap_points and swap_money_per_lot are 0 for held-overnight trades. Flag any system "
-                "whose edge depends on swap for this symbol.",
+                f"{spec.symbol}: swap_mode='interest' approximates every held night's rollover price "
+                "with the trade's own entry price (exact for SYMBOL_SWAP_MODE_INTEREST_OPEN; an "
+                "approximation for SYMBOL_SWAP_MODE_INTEREST_CURRENT, which technically reprices "
+                "nightly off each night's own close). Flag any system whose edge depends on swap for "
+                "this symbol.",
                 stacklevel=2,
             )
     # "disabled" -> both stay 0.

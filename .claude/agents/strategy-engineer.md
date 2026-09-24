@@ -29,8 +29,11 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
   ONNX-compatible (LightGBM/XGBoost/sklearn/PyTorch with supported ops).
 
 ## Mandatory tests (in `tests/`)
-1. **Truncation test** — for a sample of timestamps *t*, signals computed on `data[:t]` equal the
-   signals at *t* computed on the full data.
+1. **Look-ahead audit** — `quantlab.testing.assert_no_lookahead(StrategyClass, bars)` (pass the
+   class / a zero-arg factory, never an instance; never pass `max_forced_cuts` in committed tests)
+   **and** `assert_engine_causal(..., m1=..., timeframe=...)` **and**
+   `assert_strategy_source_clean(<strategy module path>)`. Multi-timeframe inputs come only via
+   `align_higher_timeframe` in the caller; strategy modules do no I/O and no import-time work.
 2. **Known-answer test** — a tiny hand-built price series with hand-computed trades/PnL.
 3. **Rule-conformance test** — each rule in the card maps to an assertion (e.g., no position
    outside session for B3, stop never widened).

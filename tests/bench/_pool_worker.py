@@ -36,13 +36,15 @@ def init(htf_spec: dict, m1_spec: dict, spec, cost) -> None:
     _STATE["spec"] = spec
     _STATE["cost"] = cost
     _STATE["_handles"] = h1_handles + m1_handles  # keep SharedMemory attachments alive
-    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1)  # numba warm-up, once per worker
+    # "H1" only: this pool worker is only ever driven by test_budgets.py's
+    # test_process_pool_throughput_beats_single_process, which hardcodes symbol/htf = "EURUSD"/"H1".
+    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1, timeframe="H1")  # numba warm-up
 
 
 def run_one(params: dict) -> dict:
     bars, m1, spec, cost = _STATE["bars"], _STATE["m1"], _STATE["spec"], _STATE["cost"]
     sig = sma_cross_atr_signals(bars, **params)
-    result = run_backtest(bars, sig, spec, cost, m1=m1)
+    result = run_backtest(bars, sig, spec, cost, m1=m1, timeframe="H1")
     t = result.trades
     # Return a small summary, not the trades frame -- an optimisation study
     # only needs a handful of metrics per trial, and shipping the full frame

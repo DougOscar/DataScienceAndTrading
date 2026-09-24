@@ -22,7 +22,7 @@ Input: `$ARGUMENTS` — hypothesis issue number(s). Read `research/DESIGN.md` fi
 | Stage | Agent | Done when |
 |---|---|---|
 | S1 power check | validation-statistician | MinTRL feasible → continue; else **KILL-EARLY** recommendation |
-| S2 implement | strategy-engineer → red-team (code audit) | tests pass, no BLOCKER; relabel issue `testing`; create `research/systems/<book>/<issue#>_<slug>/` with `hypothesis.md` |
+| S2 implement | strategy-engineer → red-team (code audit) | tests pass incl. exhaustive `assert_no_lookahead(StrategyClass, …)`, `assert_engine_causal(…, timeframe=…)` and `assert_strategy_source_clean`; no BLOCKER; relabel issue `testing`; create `research/systems/<book>/<issue#>_<slug>/` with `hypothesis.md` |
 | S3 baseline | strategy-engineer | baseline with prior params, costs on; gross vs cost edge reported |
 | S4 optimise | optimization-architect | study logged in ledger, plateau selection, WFO re-fit schedule simulated |
 | S5 validate | validation-statistician | gate table + pre-registered holdout band |

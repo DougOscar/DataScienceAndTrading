@@ -54,9 +54,9 @@ def test_gather_ts_matches_pre_fix_full_to_list_reference():
     m1 = data.load_bars(symbol, "M1", start=DEV_START, end=DEV_END)
     sig = sma_cross_atr_signals(bars)
     spec = costs.load_instrument(symbol, book="FBS")
-    cost = costs.CostModel(version="fbs-v0-uncalibrated")
+    cost = costs.CostModel(version_tag="fbs-v0-uncalibrated")
 
-    result = run_backtest(bars, sig, spec, cost, m1=m1)
+    result = run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf)
     assert result.trades.height > 50, "need a real sample of trades for this to mean anything"
 
     # Reference extraction: the pre-fix algorithm, replayed against the exact
@@ -93,9 +93,9 @@ def test_gather_matches_to_list_on_a_second_real_symbol():
     m1 = data.load_bars(symbol, "M1", start=DEV_START, end=DEV_END)
     sig = sma_cross_atr_signals(bars)
     spec = costs.load_instrument(symbol, book="FBS")
-    cost = costs.CostModel(version="fbs-v0-uncalibrated")
+    cost = costs.CostModel(version_tag="fbs-v0-uncalibrated")
 
-    result = run_backtest(bars, sig, spec, cost, m1=m1)
+    result = run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf)
     assert result.trades.height > 20
 
     ts_list_reference = bars["ts"].to_list()

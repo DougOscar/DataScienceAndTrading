@@ -1,0 +1,41 @@
+reader_bound_polars        in signals()            -> ESCAPED (auditor passed)  [1s]
+reader_bound_polars        in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_parquetfile         in signals()            -> ESCAPED (auditor passed)  [10s]
+reader_parquetfile         in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_dataset             in signals()            -> ESCAPED (auditor passed)  [6s]
+reader_dataset             in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_pandas              in signals()            -> caught: look-ahead detected (full run) | a raw Parquet/CSV reader (polars or pyarrow) was called from inside a  [0s]
+reader_pandas              in __init__ (factory=)  -> caught: look-ahead detected (strategy construction (factory)) | a raw Parquet/CSV reader (polars or pyarrow) was called from inside a  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_open_bytes          in signals()            -> ESCAPED (auditor passed)  [11s]
+reader_open_bytes          in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_polars_submodule    in signals()            -> ESCAPED (auditor passed)  [1s]
+reader_polars_submodule    in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_bound_load_bars     in signals()            -> caught: look-ahead detected (full run) | quantlab.data.load_bars was called while a look-ahead audit is in pro  [0s]
+reader_bound_load_bars     in __init__ (factory=)  -> caught: look-ahead detected (strategy construction (factory)) | quantlab.data.load_bars was called while a look-ahead audit is in pro  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_thread              in signals()            -> caught: look-ahead detected (full run) | a raw Parquet/CSV reader (polars or pyarrow) was called from inside a  [0s]
+reader_thread              in __init__ (factory=)  -> caught: look-ahead detected (strategy construction (factory)) | a raw Parquet/CSV reader (polars or pyarrow) was called from inside a  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_raw_thread          in signals()            -> errored KeyError: 'd'  [0s]
+reader_raw_thread          in __init__ (factory=)  -> errored KeyError: 'd'  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_subprocess          in signals()            -> ESCAPED (auditor passed)  [25s]
+reader_subprocess          in __init__ (factory=)  -> ESCAPED (auditor passed)  [1s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_import_time_cache   in signals()            -> ESCAPED (auditor passed)  [0s]
+reader_import_time_cache   in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_cache_dir           in signals()            -> ESCAPED (auditor passed)  [0s]
+reader_cache_dir           in __init__ (factory=)  -> ESCAPED (auditor passed)  [0s]
+after audits: pl.scan_parquet restored = True | pq.read_table restored = True
+reader_reload              in signals()            -> errored ValueError: <Token var=<ContextVar name='quantlab_data_audit_in_progress' default=False at 0  [0s]
+reader_reload              in __init__ (factory=)  -> errored ValueError: <Token var=<ContextVar name='quantlab_data_audit_in_progress' default=False at 0  [0s]
+after audits: pl.scan_parquet restored = False | pq.read_table restored = False
+pre-built instance (strategy=, data fetched in __init__ before the audit) -> ESCAPED (auditor passed)
+AUDIT_IN_PROGRESS object id stable after reload test: True

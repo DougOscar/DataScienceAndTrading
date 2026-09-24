@@ -69,30 +69,64 @@ depending on whether the *market* actually closes over the transition:
   Europe/Helsinki DST transition across the full data history (2016-2026+) is
   handled the same way.
 
-* **Crypto** (trades 24/7, so it is the only market with *real* bars sitting
-  inside an EU DST transition hour — evidence from the raw feed itself settles
-  what its clock does there): at the autumn fall-back the feed has exactly one
-  pass through the repeated local hour (60 M1 rows, not 120 — see
-  ``research/audits/probes/p15_crypto_dst_ts_utc.py``), and at the spring
-  gap it has a full 48-60 rows sitting inside the hour that should not exist.
-  Both facts together mean crypto's server clock **never implements the EU
-  DST transition at all** — it just keeps incrementing through both the gap
-  and the repeat, unlike FX/metals which genuinely stop trading over the
-  transition weekend. Applying the FX/metals rule above to that kind of clock
-  makes the "shifted" non-existent hour collide exactly with the real,
-  unshifted next hour (both resolve to the same UTC instant — a duplicate —
-  because shifting by the DST gap and then applying the *post*-transition
-  offset is algebraically identical to applying the *pre*-transition offset
-  directly, and a real, unambiguous bar already sits there under the
-  post-transition offset). The fix is therefore not another per-row special
-  case: crypto is localised with a single **fixed, non-DST ("standard time")
-  offset for the whole book, all year round** (:func:`_standard_utc_offset`),
-  which is trivially monotonic (a constant shift) and matches the fall-back
-  evidence (no repeat) as well as the spring-forward evidence (no gap).
+* **Crypto** (trades 24/7, so it is the only market that can have *real* ticks
+  land inside an EU DST transition hour): earlier analysis (see the old
+  ``research/audits/2026-09-23_phase0_redteam.md`` Minor 3) concluded from the
+  spring-forward evidence alone that crypto's server clock never implements
+  the EU DST transition, and localised it with a single fixed, non-DST offset
+  all year round. **That conclusion was wrong (finding N2).**
+  ``research/audits/probes/p16_crypto_clock_xcorr.py`` cross-correlates
+  |1-minute returns| between BTCUSD and XAUUSD/EURUSD, keyed by *naive server
+  time*: the peak sits at **lag 0 in both summer and winter, every year
+  checked (2019, 2022, 2024)**. Two clocks that read the same wall-clock
+  number at the same instant, all year, in both DST regimes, are — by
+  construction — running the *same* DST rule. Keying the same series by the
+  old fixed-offset ``ts_utc`` instead moves the *summer* peak to **lag +60
+  min**: the fixed-offset rule silently mislabels every summer crypto bar
+  1 hour into the future relative to the true instant. So crypto is localised
+  with the **same zoneinfo rule as FX/metals** (:func:`_localize_expr`), not a
+  fixed offset.
+
+  That leaves a real, narrower anomaly to explain: unlike FX/metals, crypto
+  *does* have raw M1 rows whose naive server time falls inside the local hour
+  that a DST-observing clock skips at the spring-forward (``ts.dt.hour() ==
+  3`` on the transition Sunday, Europe/Helsinki). Two checks settle what these
+  rows are:
+
+  * **Same-day FX/metals comparison.** FX is flat closed all Sunday until its
+    late-evening weekly open (``load_bars("EURUSD", "M1", start=<that Sunday>,
+    end=<+1 day>)`` returns 0 rows for every spring-forward Sunday in the
+    dev period) — there is no FX data to collide with, and no way for FX
+    itself to ever exercise this path, which is exactly why the FX/metals
+    branch above only *theoretically* needs a non-existent-hour rule.
+  * **Adjacent-hour comparison, within BTCUSD itself.** The 03:xx rows are not
+    flat, repeated or synthetic filler: OHLC keeps moving tick-by-tick and
+    ``tick_vol`` stays in the same 1-14 range as the surrounding 02:xx/04:xx
+    minutes (2019-03-31, hand-checked). So the *feed* really did keep ticking,
+    once a minute, straight through what the platform's own DST rule says
+    should not exist — a genuine broker/platform bug in the older
+    scheduler that generated crypto minute labels without the FX/metals
+    session-close logic that (incidentally) makes the DST skip a non-issue
+    for them. The bug is date-scoped, not permanent: per-year counts of these
+    rows (``research/audits/probes/reverify_2026-09-24/p16_crypto_clock_xcorr.out``
+    investigation; counts reproduced for all three crypto symbols) run
+    48-60 rows/year for 2017-2020, then drop to a stray 4 rows/year from 2021
+    onward — consistent with a scheduler fix around 2021, leaving only
+    boundary jitter.
+
+  These rows are **broker artefacts**: keeping them (via the FX/metals
+  shift-forward heal, which was the pre-N2 bug — see Minor 3) collides them
+  with the real, already-present next-hour data and produces duplicate
+  ``ts_utc``; inventing a distinct offset for them would report an hour of
+  trading that, under the platform's own stated clock convention, never
+  happened. :func:`load_bars` therefore **drops** them outright for crypto
+  symbols (never shifts/heals them), and :func:`calendar_anomalies` reports
+  the dropped minutes per date so they stay visible to anyone who needs them.
 """
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -100,11 +134,43 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import polars as pl
 
 from . import config, contracts, ledger
+
+# --------------------------------------------------------------------------- look-ahead audit guard
+# Set (and reset) by quantlab.testing around an audited strategy.signals() call (or, via the
+# `factory` argument, around the strategy's own construction) -- see quantlab.testing's module
+# docstring and its M2 fix. Checked at the top of every function in this module that can hand
+# a caller real price data, so the guard holds regardless of *how* that function was reached:
+# `import quantlab.data as data; data.load_bars(...)`, `from quantlab.data import load_bars`
+# bound before the audit even started, a private helper called directly, data fetched once in
+# a strategy's own `__init__` and closed over, etc. Rebinding the module attribute (the pre-M2-
+# fix approach) only ever caught the first of those.
+AUDIT_IN_PROGRESS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "quantlab_data_audit_in_progress", default=False
+)
+
+
+class AuditedDataAccess(RuntimeError):
+    """Raised by any :mod:`quantlab.data` entry point called while
+    :data:`AUDIT_IN_PROGRESS` is set -- i.e. from inside a look-ahead-audited
+    ``strategy.signals()`` call or, via ``factory=``, the strategy's own construction.
+    Strategies must be a pure function of the ``bars`` frame they are given (DESIGN
+    §4.3/§10); see :mod:`quantlab.testing`."""
+
+
+def _forbid_during_audit(entry_point: str) -> None:
+    if AUDIT_IN_PROGRESS.get():
+        raise AuditedDataAccess(
+            f"quantlab.data.{entry_point} was called while a look-ahead audit is in progress. "
+            "Strategies must not fetch their own data -- a Strategy.signals() (and, if audited "
+            "via `factory=`, its __init__) must be a pure function of the `bars` frame it is "
+            "given. Multi-timeframe strategies must receive the higher-timeframe bars already "
+            "causally joined onto `bars` by their caller -- see quantlab.testing.align_higher_timeframe."
+        )
+
 
 # --------------------------------------------------------------------------- timeframes
 _TF_MINUTES: dict[str, int] = {"M1": 1, "M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240, "D1": 1440}
@@ -116,11 +182,8 @@ _RAW_COLUMNS = ("ts", "open", "high", "low", "close", "spread", "tick_vol")
 
 # Bump whenever `_resample_full`'s semantics change: this is folded into the cache key
 # (Minor 8) so a stale on-disk cache from before the change can never be served silently.
-_RESAMPLE_SCHEMA_VERSION = "v2-2026-09-23"
-
-# A winter reference date for reading each book's non-DST ("standard time") UTC offset.
-# Only used for 24/7 (crypto) instruments -- see the module docstring's "DST" section.
-_STANDARD_TIME_REFERENCE = datetime(2024, 1, 15)
+# v3: crypto's spring-forward-gap M1 rows (N2) are now dropped before aggregation, not after.
+_RESAMPLE_SCHEMA_VERSION = "v3-2026-09-24"
 
 
 # --------------------------------------------------------------------------- catalog
@@ -184,16 +247,28 @@ def _resolve_source(cat: pl.DataFrame, symbol: str, source_file: str | Path | No
 
 
 # --------------------------------------------------------------------------- resampling + cache
-def _cache_file(src_path: Path, timeframe: str) -> Path:
+def _cache_file(src_path: Path, timeframe: str, *, extra: str = "") -> Path:
+    """``extra`` folds any additional resampling parameter (currently: the crypto DST-gap
+    tz, see :func:`_load_resampled`) into the cache key so it can never collide with a
+    cache entry built under a different value."""
     stat = src_path.stat()
-    key = f"{src_path.name}|{stat.st_size}|{int(stat.st_mtime)}|{timeframe}|{_RESAMPLE_SCHEMA_VERSION}"
+    key = f"{src_path.name}|{stat.st_size}|{int(stat.st_mtime)}|{timeframe}|{_RESAMPLE_SCHEMA_VERSION}|{extra}"
     digest = hashlib.sha1(key.encode()).hexdigest()[:20]
     return config.CACHE_DIR / f"{src_path.stem}_{timeframe}_{digest}.parquet"
 
 
-def _resample_full(src_path: Path, timeframe: str) -> pl.DataFrame:
-    """Resample the *entire* native file to ``timeframe`` bars (no start/end filter)."""
+def _resample_full(src_path: Path, timeframe: str, *, drop_non_existent_local_tz: str | None = None) -> pl.DataFrame:
+    """Resample the *entire* native file to ``timeframe`` bars (no start/end filter).
+
+    ``drop_non_existent_local_tz`` (crypto only, N2 — module docstring's "DST" section):
+    drop raw M1 rows whose naive server time falls inside a spring-forward gap under this
+    tz *before* aggregating, so a bucket coarser than the gap itself (H4/D1) isn't quietly
+    built from those broker-artefact minutes.
+    """
+    _forbid_during_audit("_resample_full")
     lf = pl.scan_parquet(src_path).select(list(_RAW_COLUMNS)).sort("ts")
+    if drop_non_existent_local_tz is not None:
+        lf = lf.filter(~_non_existent_local_mask("ts", drop_non_existent_local_tz))
     out = (
         lf.group_by_dynamic("ts", every=_TF_EVERY[timeframe], closed="left", label="left")
         .agg(
@@ -209,12 +284,20 @@ def _resample_full(src_path: Path, timeframe: str) -> pl.DataFrame:
     return out.collect()
 
 
-def _load_resampled(src_path: Path, native_tf: str, timeframe: str) -> pl.LazyFrame:
-    """Full series at ``timeframe`` (ts, OHLC, spread, spread_max, tick_vol), cached (DESIGN §7)."""
+def _load_resampled(src_path: Path, native_tf: str, timeframe: str, *,
+                     drop_non_existent_local_tz: str | None = None) -> pl.LazyFrame:
+    """Full series at ``timeframe`` (ts, OHLC, spread, spread_max, tick_vol), cached (DESIGN §7).
+
+    ``drop_non_existent_local_tz``: see :func:`_resample_full`. Threaded through here too
+    (rather than filtered by the caller after the fact) so it also applies to the native
+    M1 pass-through path and is folded into the cache key -- a call with vs. without it
+    must never share a cached file.
+    """
+    _forbid_during_audit("_load_resampled")
     if timeframe == native_tf:
         # Pass-through: no groupby needed, so no cache either (predicate/projection
         # pushdown on the raw file is already fast; caching would just duplicate it).
-        return (
+        lf = (
             pl.scan_parquet(src_path)
             .select(list(_RAW_COLUMNS))
             .with_columns(
@@ -223,11 +306,14 @@ def _load_resampled(src_path: Path, native_tf: str, timeframe: str) -> pl.LazyFr
             )
             .sort("ts")
         )
-    cache_path = _cache_file(src_path, timeframe)
+        if drop_non_existent_local_tz is not None:
+            lf = lf.filter(~_non_existent_local_mask("ts", drop_non_existent_local_tz))
+        return lf
+    cache_path = _cache_file(src_path, timeframe, extra=drop_non_existent_local_tz or "")
     if cache_path.exists():
         return pl.scan_parquet(cache_path)
     config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    full = _resample_full(src_path, timeframe)
+    full = _resample_full(src_path, timeframe, drop_non_existent_local_tz=drop_non_existent_local_tz)
     # Atomic write (Minor 8): write to a private temp file in the same directory (so
     # os.replace is a same-filesystem rename, not a copy) then swap it into place, so a
     # concurrent reader either sees no file or a fully-written one -- never a partial read.
@@ -252,23 +338,15 @@ def _localize_expr(col: str, tz_name: str) -> pl.Expr:
     return pl.coalesce([primary, shifted]).dt.convert_time_zone("UTC")
 
 
-def _standard_utc_offset(tz_name: str) -> timedelta:
-    """``tz_name``'s non-DST ("standard time") UTC offset, read off a fixed winter date.
-
-    Used only for 24/7 (crypto) instruments (module docstring, "DST" section) — their
-    server clock never observes the EU DST transition, so it is localised with this one
-    fixed offset all year round instead of :func:`_localize_expr`'s per-row zoneinfo rule.
+def _non_existent_local_mask(col: str, tz_name: str) -> pl.Expr:
+    """True where a naive local time in ``col`` does not exist under ``tz_name`` — the
+    EU spring-forward gap (module docstring, "DST" section / N2). FX/metals/B3 never have
+    real rows here in practice (they are flat closed over the whole transition weekend);
+    crypto does, and those rows are broker artefacts that :func:`load_bars` drops and
+    :func:`calendar_anomalies` reports, rather than shifting/healing them like
+    :func:`_localize_expr` does for the (theoretical, for FX/metals/B3) non-existent case.
     """
-    offset = ZoneInfo(tz_name).utcoffset(_STANDARD_TIME_REFERENCE)
-    if offset is None:  # pragma: no cover - zoneinfo always returns an offset for aware dt
-        raise ValueError(f"could not determine a UTC offset for {tz_name!r}")
-    return offset
-
-
-def _localize_expr_fixed_offset(col: str, tz_name: str) -> pl.Expr:
-    """Naive server time -> tz-aware UTC using a single, constant (non-DST) offset."""
-    offset = _standard_utc_offset(tz_name)
-    return (pl.col(col) - offset).dt.replace_time_zone("UTC")
+    return pl.col(col).dt.replace_time_zone(tz_name, ambiguous="earliest", non_existent="null").is_null()
 
 
 def _to_naive_datetime(value: datetime | str | None) -> datetime | None:
@@ -291,6 +369,7 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
     Returns exactly :data:`contracts.BAR_COLUMNS`, sorted by ``ts``.  See the
     module docstring for the resampling and holdout-guard rules.
     """
+    _forbid_during_audit("load_bars")
     if timeframe not in _TF_MINUTES:
         raise ValueError(f"unknown timeframe {timeframe!r}; expected one of {sorted(_TF_MINUTES)}")
 
@@ -325,7 +404,11 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
 
     span = _TF_TIMEDELTA[timeframe]
     src_path = Path(row["file"])
-    lf = _load_resampled(src_path, native_tf, timeframe)
+    # Crypto (N2, module docstring "DST" section): drop spring-forward-gap M1 rows before
+    # resampling, so they can never contaminate a coarser bucket either. Every other market
+    # is unaffected (they are flat closed over the whole transition weekend in practice).
+    dst_gap_tz = book_obj.tz_name if row["market"] == "crypto" else None
+    lf = _load_resampled(src_path, native_tf, timeframe, drop_non_existent_local_tz=dst_gap_tz)
     if start_dt is not None:
         lf = lf.filter(pl.col("ts") >= start_dt)
     # Whole-bucket containment: drops any bar (partial or not) whose window
@@ -334,11 +417,9 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
     lf = lf.filter((pl.col("ts") + span) <= resolved_end)
 
     bars = lf.collect()
-    # Crypto never observes the EU DST transition (module docstring, "DST" section) -> a
-    # fixed, non-DST offset all year round; every other market uses the real zoneinfo rule.
-    tz_expr = (_localize_expr_fixed_offset if row["market"] == "crypto" else _localize_expr)(
-        "ts", book_obj.tz_name
-    )
+    # Crypto now uses the same zoneinfo DST rule as FX/metals/B3 (N2 -- see module docstring);
+    # its gap rows are already gone, so `_localize_expr`'s shift-heal branch is dead for it too.
+    tz_expr = _localize_expr("ts", book_obj.tz_name)
     bars = bars.with_columns(
         tz_expr.alias("ts_utc"),
         pl.col("spread").cast(pl.Float64),
@@ -356,6 +437,7 @@ def infer_point(symbol: str, *, sample: int = 2500) -> float:
     a decimal count. The file is still scanned lazily (not through :func:`load_bars`,
     which would pay for a resample this doesn't need) so the head/tail sampling stays cheap.
     """
+    _forbid_during_audit("infer_point")
     cat = catalog()
     row = _resolve_source(cat, symbol, None)
     if row["book"] is None:
@@ -380,28 +462,37 @@ def infer_point(symbol: str, *, sample: int = 2500) -> float:
 def calendar_anomalies(symbol: str) -> pl.DataFrame:
     """Server-time calendar anomalies in ``symbol``'s raw M1 feed, for auditors.
 
-    Currently flags M1 rows labelled as falling on a **Sunday** in naive server time —
-    FX/metals/crypto sessions should not normally have Sunday bars, but a handful exist
-    (2016 onboarding for several FX pairs; isolated minutes around the 2024-10-27 EU
-    DST fall-back) and DESIGN keeps the data faithful to the raw MT5 feed rather than
-    silently dropping them. One consequence worth knowing: resampling to D1 (or any
-    coarser timeframe) will happily produce a tiny, otherwise-invisible Sunday-dated bar
-    from just a handful of Sunday minutes — this helper is how to find the underlying
-    rows without re-deriving them from the raw M1 file every time.
+    The definition of "anomalous" is market-specific:
+
+    * **FX/metals/B3** (sessions that close over the weekend): M1 rows labelled as falling
+      on a **Sunday** in naive server time. FX/metals sessions should not normally have
+      Sunday bars, but a handful exist (2016 onboarding for several FX pairs; isolated
+      minutes around the 2024-10-27 EU DST fall-back) and DESIGN keeps the data faithful to
+      the raw MT5 feed rather than silently dropping them. One consequence worth knowing:
+      resampling to D1 (or any coarser timeframe) will happily produce a tiny, otherwise-
+      invisible Sunday-dated bar from just a handful of Sunday minutes — this helper is how
+      to find the underlying rows without re-deriving them from the raw M1 file every time.
+    * **Crypto** (trades 24/7 — a Sunday bar is completely normal for it, so the check above
+      would be meaningless noise): M1 rows whose naive server time falls inside an EU
+      spring-forward gap hour (N2 — module docstring's "DST" section). These are the exact
+      rows :func:`load_bars` now drops for crypto symbols; they are reported here (rather
+      than silently vanishing) so the excluded minutes stay visible and countable.
 
     Returns one row per anomalous **date** (dev-period only): ``date``, ``n_minutes``,
     ``first_ts``, ``last_ts`` (naive server time). Empty (but correctly typed) if none.
     """
+    _forbid_during_audit("calendar_anomalies")
     cat = catalog()
     row = _resolve_source(cat, symbol, None)
     if row["book"] is None:
         raise ValueError(f"{symbol}: market {row['market']!r} has no entry in config.MARKET_TO_BOOK")
-    holdout_start = config.get_book(row["book"]).holdout_start
-    m1 = (
-        pl.scan_parquet(row["file"]).select("ts")
-        .filter((pl.col("ts") < holdout_start) & (pl.col("ts").dt.weekday() == 7))
-        .collect()
-    )
+    book_obj = config.get_book(row["book"])
+    base = pl.scan_parquet(row["file"]).select("ts").filter(pl.col("ts") < book_obj.holdout_start)
+    if row["market"] == "crypto":
+        flagged = base.filter(_non_existent_local_mask("ts", book_obj.tz_name))
+    else:
+        flagged = base.filter(pl.col("ts").dt.weekday() == 7)
+    m1 = flagged.collect()
     if m1.height == 0:
         return pl.DataFrame(schema={
             "date": pl.Date, "n_minutes": pl.UInt32, "first_ts": pl.Datetime("ms"), "last_ts": pl.Datetime("ms"),
@@ -465,6 +556,7 @@ def _asof_closes(symbol: str, ts_utc: pl.Series, *, book: str, system: str | Non
     the internal ``load_bars`` window past the cutoff and spuriously raises
     :class:`contracts.HoldoutLocked`.
     """
+    _forbid_during_audit("_asof_closes")
     book_obj = config.get_book(book)
     naive_local = (
         ts_utc.dt.convert_time_zone(book_obj.tz_name).dt.replace_time_zone(None).cast(pl.Datetime("ms"))
@@ -503,6 +595,7 @@ def conversion_rate(from_ccy: str, to_ccy: str, ts_utc: pl.Series, *, book: str 
     Localise explicitly first, e.g. ``ts.dt.replace_time_zone(book_tz, ambiguous=...,
     non_existent=...).dt.convert_time_zone("UTC")``.
     """
+    _forbid_during_audit("conversion_rate")
     from_ccy, to_ccy = from_ccy.upper(), to_ccy.upper()
     if not (isinstance(ts_utc.dtype, pl.Datetime) and ts_utc.dtype.time_zone is not None):
         raise ValueError(

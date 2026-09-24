@@ -77,7 +77,8 @@ def test_unlock_recorded_in_ledger_grants_holdout_access(monkeypatch, tmp_path, 
         data.load_bars("EURUSD", "H1", end="2025-06-01", include_holdout=True, system="eurusd_probe")
 
     ledger.record_holdout_unlock(book="FBS", system="eurusd_probe", study_id="fbs-0001-a1",
-                                 pass_band={"sharpe_p10": 0.1})
+                                 pass_band={"sharpe_p10": 0.1},
+                                 user_confirmation=ledger.unlock_phrase("FBS", "eurusd_probe"))
     bars = data.load_bars("EURUSD", "H1", end="2025-06-01", include_holdout=True, system="eurusd_probe")
     assert bars["ts"].max() >= FBS.holdout_start
     assert bars["ts"].max() < datetime(2025, 6, 1)
@@ -275,11 +276,13 @@ def _last_sunday(year: int, month: int) -> datetime:
 
 @pytest.mark.parametrize("symbol", ["BTCUSD", "ETHUSD", "LTCUSD"])
 def test_crypto_ts_utc_strictly_increasing_across_every_dst_transition_weekend(symbol):
-    """Minor 3: root cause was the spring-forward "shift the naive clock forward" rule
-    colliding with real crypto bars already sitting in the skipped hour (see the module
-    docstring's DST section and research/audits/probes/p15_crypto_dst_ts_utc.py). Checks
-    every EU DST transition weekend across the symbol's own dev-period history, kept fast
-    by only loading the one transition day each time (not the whole multi-year range).
+    """N2 (was Minor 3): crypto is localised with the same zoneinfo DST rule as FX/metals
+    (see the module docstring's DST section), and its spring-forward-gap M1 rows -- broker
+    artefacts, not real DST ambiguity -- are dropped by :func:`load_bars` rather than
+    shifted/healed, which is what used to make the old fixed-offset *and* the naive
+    shift-forward rule both produce duplicate/backward ``ts_utc`` here. Checks every EU DST
+    transition weekend across the symbol's own dev-period history, kept fast by only loading
+    the one transition day each time (not the whole multi-year range).
     """
     start_year = data.catalog().filter(pl.col("symbol") == symbol).row(0, named=True)["start"].year
     holdout_start = FBS.holdout_start
@@ -298,6 +301,79 @@ def test_crypto_ts_utc_strictly_increasing_across_every_dst_transition_weekend(s
             assert bars["ts_utc"].is_duplicated().sum() == 0, f"{symbol} {year}-{month:02d}: duplicate ts_utc"
             windows_checked += 1
     assert windows_checked > 0
+
+
+def test_crypto_and_fx_share_the_same_dst_offset_in_summer_and_winter():
+    """N2 regression: research/audits/probes/p16_crypto_clock_xcorr.py cross-correlated
+    |1-min returns| of BTCUSD against XAUUSD/EURUSD, keyed by naive server time, and found
+    the peak at lag 0 in both summer and winter -- i.e. crypto's server clock reads the same
+    wall-clock DST offset as FX at every instant, not a fixed offset. This is the same fact
+    checked directly and cheaply (no correlation, just equality on a couple of days): for
+    any naive server minute both feeds share, BTCUSD and EURUSD must localise to the exact
+    same ``ts_utc``, in the summer (EEST, +3) and winter (EET, +2) regimes alike.
+    """
+    for start, end in [("2022-07-01", "2022-07-02"), ("2022-01-10", "2022-01-11")]:
+        btc = data.load_bars("BTCUSD", "M1", start=start, end=end).select("ts", "ts_utc")
+        eur = data.load_bars("EURUSD", "M1", start=start, end=end).select("ts", "ts_utc")
+        joined = btc.join(eur, on="ts", suffix="_fx")
+        assert joined.height > 100, f"{start}: too few shared minutes to be a meaningful check"
+        assert (joined["ts_utc"] == joined["ts_utc_fx"]).all(), f"{start}: crypto/FX ts_utc offset differs"
+
+
+@pytest.fixture
+def crypto_spring_gap_bars(tmp_path, install_catalog):
+    """Synthetic crypto M1 rows spanning the 2019-03-31 Europe/Helsinki spring-forward gap
+    (naive local hour 03:00-03:59 does not exist that day): two genuine ticks either side of
+    it, and two rows sitting inside the gap that mirror the real feed's pre-2021 broker
+    artefact (N2) -- moving OHLC, not flat/duplicated, exactly like the real evidence."""
+    rows = [
+        (datetime(2019, 3, 31, 2, 58), 100.0, 100.0, 100.0, 100.0, 5, 0, 1),
+        (datetime(2019, 3, 31, 2, 59), 100.1, 100.1, 100.1, 100.1, 5, 0, 1),
+        (datetime(2019, 3, 31, 3, 0), 999.0, 999.0, 999.0, 999.0, 9, 0, 1),    # artefact: inside the gap
+        (datetime(2019, 3, 31, 3, 30), 998.0, 998.0, 998.0, 998.0, 9, 0, 1),   # artefact: inside the gap
+        (datetime(2019, 3, 31, 4, 0), 100.2, 100.2, 100.2, 100.2, 5, 0, 1),
+        (datetime(2019, 3, 31, 4, 1), 100.3, 100.3, 100.3, 100.3, 5, 0, 1),
+    ]
+    path = write_m1_parquet(tmp_path / "TESTCRYPTO_M1.parquet", rows)
+    install_catalog([catalog_row(file=path, symbol="TESTCRYPTO", market="crypto",
+                                 start=datetime(2019, 3, 31, 2), end=datetime(2019, 3, 31, 5), rows=len(rows))])
+    return path
+
+
+def test_crypto_spring_gap_rows_are_dropped_from_load_bars(crypto_spring_gap_bars):
+    m1 = data.load_bars("TESTCRYPTO", "M1", book="FBS")
+    assert m1["close"].to_list() == [100.0, 100.1, 100.2, 100.3]        # the two artefact rows are gone
+    diffs = m1["ts_utc"].diff().drop_nulls()
+    assert (diffs.cast(pl.Int64) > 0).all()                            # strictly increasing across the gap
+    assert m1["ts_utc"].is_duplicated().sum() == 0
+
+
+def test_crypto_spring_gap_dropped_before_resampling_not_after(crypto_spring_gap_bars):
+    """The artefact minutes must not survive inside a coarser bucket either (they would if
+    the drop happened only after resampling, since an H4/D1 bucket's own open time need not
+    itself fall inside the gap)."""
+    h1 = data.load_bars("TESTCRYPTO", "H1", book="FBS").sort("ts")
+    assert h1["ts"].to_list() == [datetime(2019, 3, 31, 2), datetime(2019, 3, 31, 4)]
+    assert h1["tick_vol"].to_list() == [10, 10]                        # only the 2 genuine ticks/bucket
+    assert 999.0 not in h1["high"].to_list() and 998.0 not in h1["high"].to_list()
+
+
+def test_crypto_spring_gap_rows_reported_by_calendar_anomalies(crypto_spring_gap_bars):
+    anomalies = data.calendar_anomalies("TESTCRYPTO")
+    assert anomalies.height == 1
+    row = anomalies.row(0, named=True)
+    assert row["date"] == date(2019, 3, 31)
+    assert row["n_minutes"] == 2
+    assert row["first_ts"] == datetime(2019, 3, 31, 3, 0)
+    assert row["last_ts"] == datetime(2019, 3, 31, 3, 30)
+
+
+def test_calendar_anomalies_crypto_sundays_are_not_flagged(crypto_spring_gap_bars):
+    """Crypto trades 24/7 -- unlike FX/metals/B3, a Sunday bar is completely normal for it,
+    so the Sunday check that applies to those markets must not fire for crypto. 2019-03-31
+    is itself a Sunday, and the fixture's genuine (non-gap) rows on it must not show up."""
+    anomalies = data.calendar_anomalies("TESTCRYPTO")
+    assert anomalies["n_minutes"].sum() == 2         # only the 2 gap-artefact minutes, not all 6 rows
 
 
 # --------------------------------------------------------------------------- point size

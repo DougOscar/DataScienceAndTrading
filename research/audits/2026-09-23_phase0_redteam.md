@@ -387,3 +387,158 @@ Recommendation: pass Phase 0 for the **FX/metals, no-swap-dependent** scope only
 - Add a red-team checklist item for raw parquet reads and data captured in `__init__`; no runtime sandbox can catch those.
 
 Keep crypto (N2) and any swap-sensitive system (N1/M4) out of Phase 1+ gate runs until those are fixed.
+
+---
+
+## Re-verification round 2 (2026-09-24)
+
+**How this was checked**
+- Library under test: `research/audits/probes/reverify_2026-09-24/r2_library_sha1.txt`. It did not change while the probes ran.
+- Test suite: **198 passed** (`r2_pytest.out`).
+- Outputs are in `probes/reverify_2026-09-24/r2_*.out`.
+- Probes adapted to the new APIs without weakening them:
+  - `timeframe=` added wherever `m1=` is used: `r2_p07`, `r2_p08`, `r2_p10`, `r2_p12`, `r2_p13`, and `p02c`, which replaces `p02b`.
+- New probes:
+  - `p19` swap-currency mapping, end to end via a fake broker TSV;
+  - `p20` sandbox escapes, each run in a fresh process;
+  - `p21` forced-cut cap;
+  - `p22` HTF/M1 consistency check;
+  - `p23` unlock phrase.
+
+### Items re-checked
+
+| ID | Status | Evidence |
+|---|---|---|
+| B1 shorts without both levels | **CLOSED** (unchanged) | `r2_p01`. |
+| Hand-checks (7 trades) | **still exact** | `r2_p08`: every fill, reason and pnl_points matches raw M1. `r2_p13`: the ambiguous-bar trade resolves to target +159.93 with M1, and to stop −319.86 without M1. |
+| M1 / N3 / N4 M1 window and timeframe | **CLOSED** | See the `p02c` breakdown after this table. |
+| M3 conversion timing | **CLOSED** (unchanged) | `r2_p05b`, `r2_p14b`: rates are the closed-bar as-of, `rate_fn` gets UTC times, and all rates match an independent recomputation. |
+| M5 MAE/MFE (incl. M1 residual) | **CLOSED** | `r2_p10` (a): the synthetic long now shows MAE = MFE-capped = loss 110. (b): 0 of 86 stop exits have MAE > 1.2× loss, max ratio 1.00. `r2_p17` (c): the ECB-minute case is gone. |
+| N1 money-swap currency | **CLOSED** (the export is still pending) | `p19` with a fake export, account currency USD, 1 lot. See the breakdown after this table. |
+| N2 crypto `ts_utc` | **CLOSED** | `r2_p16`: in 2022 and 2024, BTC vs XAUUSD/EURUSD peaks at lag 0 on the library's `ts_utc` in summer and in winter. 2019 is too noisy to tell either way. `r2_p15`: 0 duplicates, 0 backward steps. `calendar_anomalies("BTCUSD")` lists the dropped artefact hours: 48-60 rows on each 2017-2020 spring-forward day, and 4 rows (03:00-03:03) on 2021-2025. |
+| N5 cost-model version | **CLOSED** | `r2_p17` (a): `version` = `fbs-v0-uncalibrated+stop_fill=bar_extreme`; `stressed()` = `…+spread_mult1.5+slippage1+stop_fill=bar_extreme`. |
+| N6 auditor cost | **CLOSED as a cost problem. Regression, see R2-2** | Dense strategies now finish in seconds. |
+| minor 4 crypto nights | **CLOSED** | `r2_p18_crypto_nights.out`: BTC Mon→Mon = 7 nights / 7 weighted; Fri→Mon = 3; EURUSD Mon→Mon = 5 nights / 7 weighted. |
+| minor 9 holdout unlock | **Improved, STILL OPEN (MINOR)** | `p23`: agent code can call `unlock_phrase(book, system)` and pass the result, and the unlock succeeds. The phrase is public and deterministic. `.claude/settings.local.json` has no deny rule for `record_holdout_unlock`, `unlock_phrase` or writes to `research/ledger/holdout_access.jsonl`. The confirmation is stored, so the unlock is auditable, but it is not enforced. |
+| M2 look-ahead sandbox | **PARTIALLY CLOSED — STILL OPEN** | See R2-1 and R2-2. |
+
+**`p02c` breakdown (M1 / N3 / N4):**
+- A last-bar long with full M1 and `timeframe="H1"` exits `eod` 1.11650.
+- Omitting `timeframe` with `m1` raises.
+- A one-bar-per-day frame with `timeframe="H1"` exits `eod`; declared as `D1` it is rejected by the consistency check.
+- D1 bars declared as H1 are rejected.
+- An H1 WFO slice declared as D1, with M1 running past the slice, is rejected on its last bar.
+- `assert_engine_causal(timeframe="H1")` passes at 40 cut points with full-year M1.
+
+**`p19` breakdown (N1):** fake export, USD account, 1 lot.
+
+| symbol and MT5 mode | swap currency | swap per lot | booked |
+|---|---|---|---|
+| USDJPY `CURRENCY_DEPOSIT` | `ACCOUNT` | −15.00 | −15.00 USD (was −1.91 before) |
+| USDJPY `CURRENCY_DEPOSIT`, EUR account | `ACCOUNT` | −15.00 | −15.00 EUR (identity, correct) |
+| EURUSD `CURRENCY_SYMBOL` | EUR | −15 EUR | −17.26 USD (×1.1507) |
+| EURJPY `CURRENCY_MARGIN` | EUR | −30 EUR | −34.49 USD |
+| GBPUSD `INTEREST_CURRENT` (−2%/yr) | USD | 1.26343 × 100 000 × 2% / 360 × 2 nights | −14.04 USD (hand arithmetic matches) |
+| AUDUSD `POINTS` | USD | −15 pts | −15.00 USD |
+
+**Does the HTF/M1 consistency check reject legitimate data? (`p22`)**
+- **Accepted, correctly:**
+  - EURUSD H1, H4 and D1 against M1 over the same window.
+  - The broker's native H1 file against M1: 0 of 6 212 bars differ in high or low.
+  - H1 with warm-up history from 2018-12 and M1 only from 2019-01-01. Bars without M1 coverage are skipped.
+  - BTCUSD H1, H4 and D1 against M1 across the 2019, 2020 and 2021 spring-forward weeks and the 2019 fall-back week. The dropped artefact minutes are removed from both M1 and the resample, so there is no HTF/M1 mismatch.
+- **Rejected, correctly:**
+  - D1 declared as H1, and H4 declared as H1.
+  - H1 bars paired with GBPUSD M1.
+  - M1 with one bar deleted.
+- **Rejected, strict but defensible:**
+  - M1 that starts mid-bar (10:30 against an H1 bar at 10:00).
+  - M1 that ends mid-day against a D1 bar.
+
+  Walk-forward code must slice M1 on HTF bar boundaries. Partial coverage would otherwise silently truncate a bar's stop/target path, so rejecting it is the safer behaviour. Worth a sentence in the `run_backtest` docstring.
+- **Accepted, harmless:** H1 bars declared as D1 over a same-window M1. The `min(next_start, ts+span)` bound caps every interior window. Where it matters (the last bar with M1 running further, or a session-gapped frame), the check does reject it (`p02c` G, D′).
+- `spread_max` plays no part in the check, so it cannot cause false rejections.
+
+### Findings still open or new in round 2
+
+**R2-1 — MAJOR. The look-ahead sandbox is still escapable, including by two innocent-looking patterns.**
+
+`p20` runs each attempt in a fresh process. The leak joins today's full D1 bar direction onto H1 bars, which wins 96.8% of trades in a backtest.
+
+- **Caught** (`r2_p09b`, `p20`):
+  - `quantlab.data.load_bars`, whether called via the module attribute or bound earlier with `from … import`;
+  - `_load_resampled`;
+  - `pl.scan_parquet` / `read_parquet` called via the attribute;
+  - `pandas.read_parquet` (it goes through the patched `pq.read_table`);
+  - `ThreadPoolExecutor` / `threading.Thread`, caught only because the reader patch is process-global. The contextvar is not inherited by new threads.
+- **ESCAPED** (the auditor passes):
+
+  | escape | innocent-looking? |
+  |---|---|
+  | data loaded at **module import time** into a module-level cache | yes |
+  | a **pre-built instance** passed as `strategy=` with data fetched in `__init__` (`factory=` is optional) | yes |
+  | `from polars import scan_parquet` bound at import time | fairly common |
+  | `polars.io.parquet.functions.scan_parquet` | deliberate |
+  | `pyarrow.parquet.ParquetFile(...).read()` | deliberate |
+  | `pyarrow.dataset.dataset(...)` | deliberate |
+  | `open(file, "rb")` → bytes → pyarrow | deliberate |
+  | reading `data/_quantlab_cache/*.parquet` with `ParquetFile` | deliberate |
+  | a `subprocess` running `load_bars` | deliberate |
+- **Robustness bug:** `importlib.reload(quantlab.data)` inside `signals()` makes the auditor crash, which is safe. But the sandbox's `finally` runs `AUDIT_IN_PROGRESS.reset(token)` first, and that raises `ValueError` before the readers are restored. **`pl.scan_parquet`, `pl.read_parquet` and `pq.read_table` then stay patched for the rest of the process**, so every later `load_bars` fails (`r2_p20` last block).
+- **Related:** the reader patch is process-global. Running an audit in one thread while backtests run in another makes their legitimate reads fail.
+- **Fix:**
+  1. Make `factory=` mandatory, or reject instances whose `__dict__` holds DataFrames or arrays.
+  2. Restore the readers *before* `reset`, each in its own `try`.
+  3. Add a static lint over strategy source files, run by the red team or the research-cycle skill. It should forbid module-level I/O, `polars`/`pyarrow`/`pandas` I/O imports, `open(`, `subprocess`, `importlib` and `quantlab.data`/`quantlab.config` imports in strategy modules.
+
+  No runtime sandbox can be complete. The lint closes the deliberate escapes; the innocent ones need items 1 and 2.
+
+**R2-2 — MAJOR (regression introduced by the N6 fix). Capping forced cut points at 200 hides sparse leaks in dense strategies.**
+- `p21`: a 1-bar-momentum strategy (about 3 200 signal changes per year) that peeks one bar ahead on a sparse subset of rows.
+
+  | leak rows | passes the auditor |
+  |---|---|
+  | 124 | 0/10 seeds (caught) |
+  | **31** | **9/10 seeds** |
+  | **10** | **10/10 seeds** |
+
+- The 200 forced cuts, evenly spaced over the change points, plus 25 random cuts rarely land on a leak row.
+- Before N6, every active row was forced (quadratic cost, but this leak was caught).
+- **Fix:** keep the cap for routine use, but add `exhaustive=True`, required for the gate/validation run. It truncates at every row: O(n) `signals()` calls. For vectorised polars strategies that is minutes on a 10-year H1 frame. Alternatively, scale the cap to a time budget rather than a fixed 200.
+
+**R2-3 — MINOR.** `swap_every_day` is hard-coded from the symbol name (`_is_crypto`) and is not read from the export. The same is true of the "no Wednesday triple on every-day symbols" rule. If FBS's crypto CFDs actually use a weekday-plus-triple schedule, the export cannot override it. Suggest exporting MT5's per-weekday swap multipliers (`SYMBOL_SWAP_SUNDAY` … `SYMBOL_SWAP_SATURDAY`) and using them.
+
+**R2-4 — MINOR.** The consistency check rejects M1 frames that start or end mid-HTF-bar (`p22`). This is correct, but it is a new constraint for walk-forward code (slice M1 on HTF bar boundaries), and it is not mentioned in `run_backtest`'s docstring.
+
+**minor 9 — MINOR (still open).** See the table above.
+
+**M4 — open by design.** There is no broker export yet, so every spec is uncalibrated: zero swap, zero commission, guessed contract sizes.
+
+### Checks that found nothing new in round 2
+- **Holdout guard:** `r2_p04` shows 0 leaks.
+- **Resample/`ts_utc` correctness for FX:** unchanged code path; round-1 `p03` still holds (cache schema v3 re-checked through `p22`'s consistency passes).
+- **Sizing and equity invariants:** `r2_p11` shows money and points modes equal (−2 622.14), risk error ≤ 0, and the daily-equity truncation test unchanged.
+- **Flash-crash and weekend-gap behaviour:** unchanged (`r2_p12`); `stop_fill="bar_extreme"` is available for stress.
+- **Crypto nights:** 7/week with no triple; FX 5 nights / 7 weighted.
+- **Engine causality:** `assert_engine_causal` with M1 passes.
+
+### Round-2 verdict
+
+The exit test:
+1. **Known-answer backtests: PASS** (198 tests).
+2. **Hand-checked trades: PASS** (7/7 exact).
+3. **Look-ahead truncation test:** PASS at engine level (`assert_engine_causal`). At strategy level, pass for leaks that come through `bars`, `quantlab.data` or plain polars/pandas reads, but not a clean pass: R2-2 (sparse leak in a dense strategy) and R2-1 (import-time caches, pre-built instances, direct pyarrow/`open` reads) still get through.
+
+**Phase 0 passes its exit test *conditionally*, for the FX/metals scope.** The engine, data, timezone, conversion and sizing layers are correct under every probe I could build. The remaining risk is concentrated in the look-ahead *auditor*. Both MAJOR items have cheap fixes: `factory=` mandatory + restore-order fix + a static strategy lint (R2-1), and an `exhaustive=True` gate mode (R2-2). I recommend doing those before any Phase 1 gate run relies on `assert_no_lookahead` as evidence.
+
+**Still open:**
+
+| item | severity |
+|---|---|
+| R2-1 sandbox escapes + reader-restore bug | MAJOR |
+| R2-2 forced-cut cap regression | MAJOR |
+| M4 broker export (swap/commission/contract terms uncalibrated) | MAJOR, open by design; blocks swap-sensitive systems |
+| minor 9 unlock not enforced (no permission deny rule) | MINOR |
+| R2-3 `swap_every_day` / triple rule not export-driven | MINOR |
+| R2-4 M1 must be sliced on HTF bar boundaries, undocumented | MINOR |
+| minor 1 intra-minute liquidity gaps (mitigated by `stop_fill` in stress; not modelled in base costs) | MINOR |

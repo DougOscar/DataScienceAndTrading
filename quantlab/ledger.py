@@ -182,10 +182,22 @@ def is_holdout_unlocked(book: str, system: str, ledger_dir: Path | None = None) 
     return any(r["book"] == b and r["system"] == system for r in holdout_unlocks(ledger_dir))
 
 
+def unlock_phrase(book: str, system: str) -> str:
+    return f"UNLOCK HOLDOUT {config.get_book(book).name}/{system}"
+
+
 def record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: dict[str, Any],
-                          ledger_dir: Path | None = None) -> dict[str, Any]:
-    """One-shot unlock (DESIGN §4.4).  Only ``/unlock-holdout`` should call this."""
+                          user_confirmation: str, ledger_dir: Path | None = None) -> dict[str, Any]:
+    """One-shot unlock (DESIGN §4.4).  Only ``/unlock-holdout`` should call this.
+
+    ``user_confirmation`` must be the exact :func:`unlock_phrase` **typed by the user** in the
+    conversation; the skill passes it through verbatim and it is stored in the chained log.
+    Code cannot tell a human from an agent, so this makes every unlock explicit and auditable
+    rather than impossible to fake — agents must never compose the phrase themselves.
+    """
     b = config.get_book(book).name
+    if user_confirmation != unlock_phrase(b, system):
+        raise LedgerError(f"unlock requires the user to type exactly: {unlock_phrase(b, system)!r}")
     if is_holdout_unlocked(b, system, ledger_dir):
         raise LedgerError(f"holdout already used for {b}/{system}; it cannot be unlocked twice")
     if study_id not in studies(ledger_dir):
@@ -197,7 +209,7 @@ def record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: d
         raise LedgerError("commit the system's code before unlocking (tree is dirty)")
     return _append(_ledger_dir(ledger_dir) / HOLDOUT_FILE, {
         "event": "holdout_unlock", "book": b, "system": system, "study_id": study_id,
-        "git_commit": commit, "pass_band": pass_band,
+        "git_commit": commit, "pass_band": pass_band, "user_confirmation": user_confirmation,
     })
 
 

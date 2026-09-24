@@ -14,8 +14,10 @@ The user invoked this; that is the authorisation. Do **not** run it for any othe
    - The validation report contains a **pre-registered holdout pass band** (DESIGN §4.4).
    - `research/ledger/holdout_access.jsonl` has **no** prior unlock for this system.
    - Working tree clean for the system's code; record `git_commit`.
-   Show the user the frozen spec (params / re-optimisation procedure, commit, band) and confirm once more.
-2. Write the unlock row (system, commit, study_id, timestamp, band) via `quantlab.ledger`; this is
+   Show the user the frozen spec (params / re-optimisation procedure, commit, band) and ask them to
+   **type the exact phrase** `UNLOCK HOLDOUT <BOOK>/<system>` (`quantlab.ledger.unlock_phrase`).
+   Never type, suggest-and-accept, or compose the phrase yourself; if the user doesn't type it, stop.
+2. Write the unlock row via `quantlab.ledger.record_holdout_unlock(..., user_confirmation=<the user's text verbatim>)`; this is
    what makes `quantlab.data` serve holdout data for this system.
 3. Delegate to **optimization-architect** only to *execute* the frozen procedure over the holdout
    (scheduled re-fits included, DESIGN §4.6) — no design changes, no reruns.

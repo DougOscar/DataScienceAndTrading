@@ -56,8 +56,8 @@ def _run_pipeline(symbol: str, htf: str):
     m1 = data.load_bars(symbol, "M1", start=DEV_START, end=DEV_END)
     sig = sma_cross_atr_signals(bars)
     spec = costs.load_instrument(symbol, book="FBS")
-    cost = costs.CostModel(version="fbs-v0-uncalibrated")
-    result = run_backtest(bars, sig, spec, cost, m1=m1)
+    cost = costs.CostModel(version_tag="fbs-v0-uncalibrated")
+    result = run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf)
     # account_ccy=spec.quote_ccy sidesteps conversion_rate() (a separate,
     # not-in-scope-here data.py cost) for symbols quoted in something other
     # than USD (e.g. USDJPY) -- this budget is about the engine/sizing
@@ -180,15 +180,15 @@ def test_single_process_throughput_floor():
     bars = data.load_bars(symbol, htf, start=DEV_START, end=DEV_END)
     m1 = data.load_bars(symbol, "M1", start=DEV_START, end=DEV_END)
     spec = costs.load_instrument(symbol, book="FBS")
-    cost = costs.CostModel(version="fbs-v0-uncalibrated")
+    cost = costs.CostModel(version_tag="fbs-v0-uncalibrated")
 
     grid = _param_grid(40)
-    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1)  # warm-up
+    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1, timeframe=htf)  # warm-up
 
     t0 = time.perf_counter()
     for params in grid:
         sig = sma_cross_atr_signals(bars, **params)
-        run_backtest(bars, sig, spec, cost, m1=m1)
+        run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf)
     elapsed = time.perf_counter() - t0
     per_sec = len(grid) / elapsed
 
@@ -212,7 +212,7 @@ def test_process_pool_throughput_beats_single_process():
     bars = data.load_bars(symbol, htf, start=DEV_START, end=DEV_END)
     m1 = data.load_bars(symbol, "M1", start=DEV_START, end=DEV_END)
     spec = costs.load_instrument(symbol, book="FBS")
-    cost = costs.CostModel(version="fbs-v0-uncalibrated")
+    cost = costs.CostModel(version_tag="fbs-v0-uncalibrated")
     # Needs enough trials that per-worker fixed start-up (shared-memory
     # attach + one numba warm-up call per worker, ~tens-to-hundreds of ms
     # each) amortises away -- at grid sizes as small as ~40 that fixed cost
@@ -221,12 +221,12 @@ def test_process_pool_throughput_beats_single_process():
     grid = _param_grid(150)
 
     # single-process reference (also proves the pool's answers are correct)
-    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1)
+    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1, timeframe=htf)
     t0 = time.perf_counter()
     reference = []
     for params in grid:
         sig = sma_cross_atr_signals(bars, **params)
-        reference.append(run_backtest(bars, sig, spec, cost, m1=m1).trades.height)
+        reference.append(run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf).trades.height)
     single_elapsed = time.perf_counter() - t0
     single_per_sec = len(grid) / single_elapsed
 

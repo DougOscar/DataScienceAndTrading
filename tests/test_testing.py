@@ -8,16 +8,24 @@ running it against one clean strategy and two differently-leaky ones.
 from __future__ import annotations
 
 import dataclasses
+import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import ClassVar
 
 import polars as pl
 import pytest
 
-from quantlab import contracts, testing
+from quantlab import contracts, data, testing
 from quantlab.contracts import Params, RiskType
 from quantlab.costs import InstrumentSpec
+
+# Bound at import time, before any audit runs -- the M2 residual escape (red team,
+# 2026-09-24 re-verification): a reference to `load_bars` taken before the sandbox even
+# exists is untouched by rebinding `quantlab.data.load_bars`, but not by a guard checked
+# inside the function body itself, which this same object still runs (see ImportBoundLoadBars).
+from quantlab.data import load_bars as _import_bound_load_bars
 
 POINT = 0.0001
 
@@ -148,6 +156,90 @@ class LoadsItsOwnDataStrategy:
         return pl.DataFrame({"signal": sig, **_null_extra_columns(bars.height)})
 
 
+class ImportBoundLoadBarsStrategy:
+    """M2 residual escape: calls the `load_bars` object bound at *import time* (before the
+    sandbox existed), not via `quantlab.data.load_bars` attribute access. This is exactly
+    what let it pass the pre-fix auditor 20/20 seeds (rebinding the module attribute never
+    touches an already-imported reference); the fix checks a flag inside the function body
+    itself, which this is still the same object as."""
+
+    name: ClassVar[str] = "import_bound_load_bars"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params = NoParams()
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        _extra = _import_bound_load_bars("EURUSD", "D1")     # forbidden, imported at module load
+        raw = (bars["close"] > bars["close"].shift(1)).cast(pl.Int8) * 2 - 1
+        sig = pl.select(pl.when(bars["close"].shift(1).is_null()).then(None).otherwise(raw).cast(pl.Int8)).to_series()
+        return pl.DataFrame({"signal": sig, **_null_extra_columns(bars.height)})
+
+
+class PrivateHelperStrategy:
+    """M2 residual escape: calls the private, unguarded-by-the-old-sandbox
+    `data._load_resampled` directly instead of the public `load_bars`."""
+
+    name: ClassVar[str] = "private_helper"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params = NoParams()
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        row = data._resolve_source(data.catalog(), "EURUSD", None)
+        _extra = data._load_resampled(Path(row["file"]), "M1", "D1").collect()
+        raw = (bars["close"] > bars["close"].shift(1)).cast(pl.Int8) * 2 - 1
+        sig = pl.select(pl.when(bars["close"].shift(1).is_null()).then(None).otherwise(raw).cast(pl.Int8)).to_series()
+        return pl.DataFrame({"signal": sig, **_null_extra_columns(bars.height)})
+
+
+class RawParquetStrategy:
+    """M2 residual escape: reads the catalog's raw Parquet file directly with polars,
+    bypassing `quantlab.data` entirely."""
+
+    name: ClassVar[str] = "raw_parquet"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params = NoParams()
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        row = data._resolve_source(data.catalog(), "EURUSD", None)
+        _extra = pl.scan_parquet(row["file"]).limit(10).collect()      # forbidden raw read
+        raw = (bars["close"] > bars["close"].shift(1)).cast(pl.Int8) * 2 - 1
+        sig = pl.select(pl.when(bars["close"].shift(1).is_null()).then(None).otherwise(raw).cast(pl.Int8)).to_series()
+        return pl.DataFrame({"signal": sig, **_null_extra_columns(bars.height)})
+
+
+class ClosureCacheStrategy:
+    """M2 residual escape: fetches data once in `__init__` and closes over it -- invisible
+    to any amount of sandboxing `signals()` alone, since the data is already sitting on the
+    instance by the time `assert_no_lookahead` ever sees it. Only constructing the strategy
+    *inside* the sandbox (the `factory=` argument) can catch this."""
+
+    name: ClassVar[str] = "closure_cache"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params = NoParams()
+
+    def __init__(self) -> None:
+        self.extra = data.load_bars("EURUSD", "D1")     # forbidden only when built via factory=
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        raw = (bars["close"] > bars["close"].shift(1)).cast(pl.Int8) * 2 - 1
+        sig = pl.select(pl.when(bars["close"].shift(1).is_null()).then(None).otherwise(raw).cast(pl.Int8)).to_series()
+        return pl.DataFrame({"signal": sig, **_null_extra_columns(bars.height)})
+
+
+class HoldEveryRowStrategy:
+    """Always in the market (±1, never null/flat) -- the N6 adversarial case: the pre-fix
+    `_forced_cut_points` forced a cut at *every* row for a strategy like this (every row is
+    "active": non-null and non-zero), making the audit's cost quadratic in the bar count."""
+
+    name: ClassVar[str] = "hold_every_row"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params = NoParams()
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        mean = bars["close"].rolling_mean(50, min_samples=1)      # causal: no backward-fill
+        sig = (bars["close"] > mean).cast(pl.Int8) * 2 - 1
+        return pl.DataFrame({"signal": sig, **_null_extra_columns(bars.height)})
+
+
 class WrongShapeStrategy:
     name: ClassVar[str] = "wrong_shape"
     risk_type: ClassVar[RiskType] = RiskType.C
@@ -189,31 +281,31 @@ def test_synthetic_bars_rejects_unknown_timeframe():
 # --------------------------------------------------------------------------- assert_no_lookahead
 def test_clean_strategy_passes_the_lookahead_audit():
     bars = testing.synthetic_bars(600, seed=1, timeframe="H1")
-    testing.assert_no_lookahead(CleanSmaCross(), bars, n_checks=15, seed=2, min_history=60)
+    testing.assert_no_lookahead(CleanSmaCross, bars, n_checks=15, seed=2, min_history=60)
 
 
 def test_leaky_shift_strategy_fails_the_audit():
     bars = testing.synthetic_bars(600, seed=1, timeframe="H1")
     with pytest.raises(AssertionError, match="look-ahead detected"):
-        testing.assert_no_lookahead(LeakyShiftStrategy(), bars, n_checks=15, seed=2, min_history=60)
+        testing.assert_no_lookahead(LeakyShiftStrategy, bars, n_checks=15, seed=2, min_history=60)
 
 
 def test_leaky_full_sample_normalisation_fails_the_audit():
     bars = testing.synthetic_bars(600, seed=1, timeframe="H1")
     with pytest.raises(AssertionError, match="truncation"):
-        testing.assert_no_lookahead(LeakyFullSampleNormStrategy(), bars, n_checks=15, seed=2, min_history=60)
+        testing.assert_no_lookahead(LeakyFullSampleNormStrategy, bars, n_checks=15, seed=2, min_history=60)
 
 
 def test_wrong_shape_strategy_fails_fast():
     bars = testing.synthetic_bars(300, seed=1, timeframe="H1")
     with pytest.raises(AssertionError, match="rows"):
-        testing.assert_no_lookahead(WrongShapeStrategy(), bars, n_checks=5, seed=0, min_history=60)
+        testing.assert_no_lookahead(WrongShapeStrategy, bars, n_checks=5, seed=0, min_history=60)
 
 
 def test_bars_too_short_raises_value_error():
     bars = testing.synthetic_bars(50, seed=0, timeframe="H1")
     with pytest.raises(ValueError):
-        testing.assert_no_lookahead(CleanSmaCross(), bars, min_history=200)
+        testing.assert_no_lookahead(CleanSmaCross, bars, min_history=200)
 
 
 # --------------------------------------------------------------------------- M2: stronger checks
@@ -224,15 +316,97 @@ def test_sparse_one_bar_peek_now_always_fails_the_audit():
     for seed in range(10):
         bars = testing.synthetic_bars(600, seed=seed, timeframe="H1")
         with pytest.raises(AssertionError, match="look-ahead detected"):
-            testing.assert_no_lookahead(SparsePeekStrategy(), bars, n_checks=5, seed=seed, min_history=60)
+            testing.assert_no_lookahead(SparsePeekStrategy, bars, n_checks=5, seed=seed, min_history=60)
 
 
 def test_strategy_that_loads_its_own_data_now_fails_the_audit():
     """Red-team M2: this strategy called quantlab.data.load_bars() itself and passed the
     audit 20/20 seeds, because only the `bars` argument was ever truncated/perturbed."""
     bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
-    with pytest.raises(AssertionError, match="must not load data themselves"):
-        testing.assert_no_lookahead(LoadsItsOwnDataStrategy(), bars, n_checks=5, seed=0, min_history=60)
+    with pytest.raises(AssertionError, match="must not fetch their own data"):
+        testing.assert_no_lookahead(LoadsItsOwnDataStrategy, bars, n_checks=5, seed=0, min_history=60)
+
+
+# --------------------------------------------------------------------------- M2 residual: sandbox escapes
+def test_import_bound_load_bars_now_fails_the_audit():
+    """Red-team M2 residual (2026-09-24 re-verification): `from quantlab.data import
+    load_bars` bound before the sandbox exists passed 1/1 -- rebinding the module attribute
+    `data.load_bars` never touches an already-imported reference. The fix checks a flag
+    inside `load_bars` itself, which this is still the same function object as."""
+    bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
+    with pytest.raises(AssertionError, match="look-ahead detected"):
+        testing.assert_no_lookahead(ImportBoundLoadBarsStrategy, bars, n_checks=5, seed=0, min_history=60)
+
+
+def test_private_helper_now_fails_the_audit():
+    """Red-team M2 residual: `quantlab.data._load_resampled` (private, called directly
+    instead of through `load_bars`) passed the pre-fix auditor."""
+    bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
+    with pytest.raises(AssertionError, match="look-ahead detected"):
+        testing.assert_no_lookahead(PrivateHelperStrategy, bars, n_checks=5, seed=0, min_history=60)
+
+
+def test_raw_parquet_scan_now_fails_the_audit():
+    """Red-team M2 residual: `pl.scan_parquet(<catalog file>)`, bypassing quantlab.data
+    entirely, passed the pre-fix auditor."""
+    bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
+    with pytest.raises(AssertionError, match="look-ahead detected"):
+        testing.assert_no_lookahead(RawParquetStrategy, bars, n_checks=5, seed=0, min_history=60)
+
+
+def test_closure_cache_in_init_is_caught_because_factory_is_mandatory():
+    """Red-team M2/R2-1: data fetched once in `__init__` and closed over is caught because
+    the audit always constructs the strategy inside the sandbox."""
+    bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
+    with pytest.raises(AssertionError, match="look-ahead detected"):
+        testing.assert_no_lookahead(ClosureCacheStrategy, bars, n_checks=5, seed=0, min_history=60)
+
+
+def test_assert_no_lookahead_rejects_missing_factory_and_prebuilt_instances():
+    bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
+    with pytest.raises(ValueError, match="factory"):
+        testing.assert_no_lookahead(bars=bars)
+    with pytest.raises(TypeError, match="pre-built instance"):
+        testing.assert_no_lookahead(CleanSmaCross(), bars)
+
+
+def test_assert_no_lookahead_factory_builds_a_working_clean_strategy():
+    """A clean strategy audited via `factory=` (the form /research-cycle should use) must
+    still pass, and behave identically to passing an already-built instance."""
+    bars = testing.synthetic_bars(600, seed=1, timeframe="H1")
+    testing.assert_no_lookahead(factory=CleanSmaCross, bars=bars, n_checks=15, seed=2, min_history=60)
+
+
+# --------------------------------------------------------------------------- N6: auditor performance
+def test_dense_always_in_market_strategy_audits_768_bars_quickly():
+    """N6: `_forced_cut_points` used to force a cut at every "active" (non-null, non-zero)
+    row, so a strategy that is always in the market (like this one) forced a cut at nearly
+    every row -- O(n) `signals()` calls, each O(n). Forcing cuts only where the signal
+    *changes* (plus a 200-cut cap) must keep this fast even on a strategy that is never
+    flat and never null."""
+    bars = testing.synthetic_bars(768, seed=1, timeframe="H1")
+    t0 = time.time()
+    testing.assert_no_lookahead(HoldEveryRowStrategy, bars, n_checks=25, seed=0, min_history=60)
+    elapsed = time.time() - t0
+    assert elapsed < 3.0, f"audit took {elapsed:.1f}s (budget: 3s, N6)"
+
+
+def test_forced_cut_points_uses_changes_not_every_active_row():
+    bars = testing.synthetic_bars(768, seed=1, timeframe="H1")
+    full = HoldEveryRowStrategy().signals(bars)
+    forced = testing._forced_cut_points(full, bars.height)
+    active = int(((full["signal"].is_not_null()) & (full["signal"] != 0)).sum())
+    assert active > 700                                    # this strategy is "active" almost everywhere
+    assert 0 < len(forced) < active                         # but far fewer rows are actual *changes*
+
+
+def test_forced_cut_points_exhaustive_by_default_capped_only_on_request():
+    """R2-2: gate runs must test every change point; a cap is an explicit quick-mode opt-in."""
+    n = 5000
+    sig = pl.Series([1 if i % 2 == 0 else -1 for i in range(n)], dtype=pl.Int8)
+    full = pl.DataFrame({"signal": sig})
+    assert len(testing._forced_cut_points(full, n)) > 4000          # exhaustive by default (R2-2)
+    assert len(testing._forced_cut_points(full, n, cap=testing.QUICK_MAX_FORCED_CUTS)) <= 200
 
 
 # --------------------------------------------------------------------------- align_higher_timeframe
@@ -281,6 +455,17 @@ def test_assert_engine_causal_passes_for_a_clean_strategy_without_m1():
     testing.assert_engine_causal(CleanSmaCross(), bars, _spec(), n_checks=8, seed=1, min_history=60)
 
 
+def test_assert_engine_causal_with_m1_on_real_data_requires_and_forwards_timeframe():
+    """Walk-forward shape: HTF slices + one full M1 frame (red-team M1).  Real EURUSD, small window."""
+    h1 = data.load_bars("EURUSD", "H1", start=datetime(2019, 3, 4), end=datetime(2019, 4, 6))
+    m1 = data.load_bars("EURUSD", "M1", start=datetime(2019, 3, 4), end=datetime(2019, 4, 6))
+    spec = _spec(point=1e-5)
+    with pytest.raises(ValueError, match="timeframe"):
+        testing.assert_engine_causal(CleanSmaCross(), h1, spec, m1=m1, min_history=60)
+    testing.assert_engine_causal(CleanSmaCross(), h1, spec, m1=m1, timeframe="H1",
+                                 n_checks=6, seed=3, min_history=60)
+
+
 def test_assert_engine_causal_detects_a_manufactured_violation(monkeypatch):
     """Decoupled from engine.py's own current state (it may be mid-fix concurrently):
     monkeypatches run_backtest itself so this exercises the *checker's* comparison logic,
@@ -305,3 +490,101 @@ def test_assert_engine_causal_detects_a_manufactured_violation(monkeypatch):
     monkeypatch.setattr(engine_module, "run_backtest", _corrupting_run_backtest)
     with pytest.raises(AssertionError, match="engine causality violated"):
         testing.assert_engine_causal(CleanSmaCross(), bars, _spec(), n_checks=8, seed=1, min_history=60)
+
+
+# --------------------------------------------------------------------------- R2-2: exhaustive cuts
+@dataclass(frozen=True)
+class ChoppyPeekStrategy:
+    """Signal flips often (many change points) and peeks one bar ahead on a handful of rows."""
+
+    name: ClassVar[str] = "choppy_peek"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params: Params = NoParams()
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        n = bars.height
+        sig = [1 if (i // 3) % 2 == 0 else -1 for i in range(n)]
+        closes = bars["close"].to_list()
+        for i in range(700, n - 1, 400):                     # ~a few leaky rows
+            sig[i] = 1 if closes[i + 1] > closes[i] else -1   # peeks at bar i+1
+        return pl.DataFrame({"signal": pl.Series(sig, dtype=pl.Int8), **_null_extra_columns(n)})
+
+
+def test_sparse_peek_in_a_choppy_strategy_is_caught_by_the_exhaustive_audit():
+    bars = testing.synthetic_bars(2500, seed=11, timeframe="H1")
+    with pytest.raises(AssertionError):
+        testing.assert_no_lookahead(ChoppyPeekStrategy, bars, n_checks=0, seed=0, min_history=60)
+
+
+# --------------------------------------------------------------------------- R2-1: sandbox robustness
+@dataclass(frozen=True)
+class ReloadsDataStrategy:
+    name: ClassVar[str] = "reloads_data"
+    risk_type: ClassVar[RiskType] = RiskType.C
+    params: Params = NoParams()
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        import importlib
+        importlib.reload(data)
+        return pl.DataFrame({"signal": pl.Series([0] * bars.height, dtype=pl.Int8),
+                             **_null_extra_columns(bars.height)})
+
+
+def test_readers_are_restored_even_if_the_strategy_reloads_quantlab_data():
+    import pyarrow.parquet as pq
+
+    originals = (pl.read_parquet, pl.scan_parquet, pl.read_csv, pl.scan_csv, pq.read_table)
+    bars = testing.synthetic_bars(300, seed=4, timeframe="H1")
+    try:
+        testing.assert_no_lookahead(ReloadsDataStrategy, bars, n_checks=1, seed=0, min_history=60)
+    except Exception:
+        pass
+    assert (pl.read_parquet, pl.scan_parquet, pl.read_csv, pl.scan_csv, pq.read_table) == originals
+    assert data.AUDIT_IN_PROGRESS.get() is False
+    data.load_bars("EURUSD", "H1", start=datetime(2019, 3, 4), end=datetime(2019, 3, 6))
+
+
+# --------------------------------------------------------------------------- static lint
+def test_lint_accepts_a_clean_strategy_module():
+    src = Path(__file__).with_name("_lint_fixture_clean.py")
+    src.write_text("""\"\"\"clean\"\"\"
+from dataclasses import dataclass
+import polars as pl
+from quantlab.contracts import Params
+N = 20
+
+
+@dataclass(frozen=True)
+class P(Params):
+    n: int = 20
+
+
+class S:
+    def signals(self, bars):
+        return bars.select(pl.col("close").rolling_mean(N))
+""")
+    try:
+        assert testing.lint_strategy_source(src) == []
+        testing.assert_strategy_source_clean(src)
+    finally:
+        src.unlink()
+
+
+@pytest.mark.parametrize("snippet", [
+    "from quantlab.data import load_bars",
+    "from quantlab import data",
+    "from . import data",
+    "import pyarrow.parquet as pq",
+    "import pyarrow.dataset as ds",
+    "from polars import scan_parquet",
+    "import subprocess",
+    "import importlib",
+    "import pandas as pd",
+    "import polars as pl\nCACHE = pl.read_parquet('x.parquet')",
+    "import numpy as np\nclass S:\n    def signals(self, b):\n        return np.load('a.npy')",
+    "class S:\n    def signals(self, b):\n        return open('x').read()",
+    "import polars as pl\nclass S:\n    def signals(self, b):\n        return getattr(pl, 'scan_' + 'parquet')",
+    "print('import-time side effect')",
+])
+def test_lint_flags_each_bypass_pattern(snippet):
+    assert testing.lint_strategy_source(snippet + "\n"), snippet

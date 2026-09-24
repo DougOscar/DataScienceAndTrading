@@ -14,9 +14,12 @@ Two things live here:
   slippage).
 
 Versioning: every ``CostModel`` carries a ``version`` string that studies record
-in the ledger (DESIGN §8).  Never mutate the meaning of an existing version in
-place — bump the string instead (``fbs-v1`` -> ``fbs-v2``) so old studies keep
-their recorded numbers meaningful.
+in the ledger (DESIGN §8).  ``version`` is computed from a human-chosen
+``version_tag`` (e.g. ``"fbs-v1"``) plus a deterministic encoding of every
+calibratable knob that isn't at its class default (red-team N5) — see
+``CostModel.version``.  Never mutate the meaning of an existing ``version_tag``
+in place — bump the string instead (``fbs-v1`` -> ``fbs-v2``) so old studies
+keep their recorded numbers meaningful.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ __all__ = [
     "CostModel",
     "load_instrument",
     "normalize_swap_mode",
+    "swap_currency_for",
 ]
 
 # --------------------------------------------------------------------------- InstrumentSpec
@@ -63,7 +67,31 @@ class InstrumentSpec:
     default, ``False``). Crypto CFDs at FBS-like brokers are commonly charged
     every night of the week, so :func:`load_instrument`'s fallback defaults
     this to ``True`` for crypto symbols; a real broker export should confirm
-    it per-symbol when available. See ``engine._nights_weighted``.
+    it per-symbol when available. See ``engine._nights_weighted`` (which also
+    does *not* triple the ``swap_3day`` weekday when ``swap_every_day`` is set
+    -- that x3 exists specifically to compensate FX/metals for the two nights
+    it skips, so applying it on top of an *every-day* charge would double
+    count the weekend: 9 weighted nights across a week instead of the correct
+    7 -- red-team minor-4 follow-up).
+
+    ``margin_ccy`` (red-team N1) is the symbol's margin currency
+    (``SYMBOL_CURRENCY_MARGIN``); ``None`` (the default, used by every code
+    path that doesn't have a real broker export yet) resolves to ``base_ccy``
+    in :meth:`__post_init__`, the common case for plain FX.
+
+    ``swap_ccy`` (red-team N1, MAJOR) is the currency ``swap_money_per_lot``
+    (``swap_mode="money"``) or the interest-mode swap amount is denominated
+    in. MT5's three "money" modes are NOT interchangeable -- see
+    :func:`swap_currency_for`, which is how :func:`load_instrument` derives
+    this from the raw ``ENUM_SYMBOL_SWAP_MODE`` string. ``None`` (the default)
+    resolves to ``quote_ccy`` in :meth:`__post_init__`: a documented
+    best-effort guess (matching this module's pre-N1 behaviour) for any spec
+    built without going through the real MT5 enum -- e.g. every uncalibrated
+    fallback spec, and any test/spec built directly. The one real currency
+    code that is never a plain ISO code is the sentinel ``"ACCOUNT"``
+    (``SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT``): the amount is already in
+    whatever currency the account itself uses, so ``apply_sizing`` must never
+    try to convert it again.
 
     ``commission_per_lot_rt`` is a round-trip commission already expressed in
     **account currency** (as exported by ``ExportBrokerSpecs.mq5``'s deal-history
@@ -85,6 +113,8 @@ class InstrumentSpec:
     swap_short: float
     swap_3day: int = 2
     swap_every_day: bool = False
+    margin_ccy: Optional[str] = None
+    swap_ccy: Optional[str] = None
     commission_per_lot_rt: float = 0.0
     stops_level: float = 0.0
     calibrated: bool = False
@@ -98,6 +128,10 @@ class InstrumentSpec:
             raise ValueError(f"point must be > 0, got {self.point!r}")
         if self.volume_step <= 0 or self.volume_min <= 0:
             raise ValueError("volume_min and volume_step must be > 0")
+        if self.margin_ccy is None:
+            object.__setattr__(self, "margin_ccy", self.base_ccy)
+        if self.swap_ccy is None:
+            object.__setattr__(self, "swap_ccy", self.quote_ccy)
 
     @property
     def value_per_point_per_lot(self) -> float:
@@ -114,8 +148,23 @@ _VALID_STOP_FILL = ("level", "bar_extreme")
 class CostModel:
     """Calibratable execution-cost knobs layered on top of an :class:`InstrumentSpec`.
 
-    ``version`` is the identifier studies record in the ledger (e.g.
-    ``"fbs-v1"``). Effective spread for a bar (in points, DESIGN §4.3) is
+    ``version_tag`` is the human-chosen identifier for this book/calibration
+    (e.g. ``"fbs-v1"``); ``version`` (a computed property, red-team N5) is
+    what studies actually record in the ledger (DESIGN §8) -- ``version_tag``
+    plus a deterministic suffix for every knob below that is not at its class
+    default (fixed order: ``spread_multiplier``, ``extra_spread_points``,
+    ``slippage_points``, ``swap_multiplier``, ``stop_fill``). Two
+    ``CostModel``s can therefore only ever share a ``version`` string if every
+    one of these fields is identical -- e.g.
+    ``CostModel(stop_fill="bar_extreme").version`` is
+    ``"fbs-v0-uncalibrated+stop_fill=bar_extreme"``, never the plain
+    ``"fbs-v0-uncalibrated"`` a stress-agnostic reader might mistake it for.
+    Because it is computed fresh from the model's own current field values
+    (never string-concatenated across ``replace()`` calls), stacking
+    modifications -- e.g. ``.stressed()`` on top of an already non-default
+    model -- can never accumulate duplicate or stale suffixes.
+
+    Effective spread for a bar (in points, DESIGN §4.3) is
     ``spread * spread_multiplier + extra_spread_points`` — see
     :meth:`effective_spread`.
 
@@ -127,12 +176,16 @@ class CostModel:
     (+ ``slippage_points``) -- optimistic, and the right default for the base
     cost model. ``"bar_extreme"`` instead fills at the worst of that M1 (or,
     without M1, that whole HTF) bar's own high/low -- a pessimistic stand-in
-    meant for the validation stress test. Targets are never affected (a
-    resting limit order never fills worse than its own price). See
-    ``engine._chk_long`` / ``engine._chk_short``.
+    meant for the validation stress test (:meth:`stressed` turns it on by
+    default -- see there). Targets are never affected (a resting limit order
+    never fills worse than its own price). See ``engine._chk_long`` /
+    ``engine._chk_short``. Note: without M1, ``"bar_extreme"`` fills at the
+    *whole HTF bar's* own extreme -- for D1 that is the day's high or low,
+    a very pessimistic stand-in worth keeping in mind when reading a D1
+    stress-test result.
     """
 
-    version: str = "fbs-v0-uncalibrated"
+    version_tag: str = "fbs-v0-uncalibrated"
     spread_multiplier: float = 1.0
     extra_spread_points: float = 0.0
     slippage_points: float = 0.0
@@ -143,24 +196,61 @@ class CostModel:
         if self.stop_fill not in _VALID_STOP_FILL:
             raise ValueError(f"stop_fill must be one of {_VALID_STOP_FILL}, got {self.stop_fill!r}")
 
+    @property
+    def version(self) -> str:
+        """``version_tag`` + a deterministic suffix for every non-default knob (red-team N5).
+
+        Computed fresh from the model's current fields every time it is read
+        -- never stored/mutated -- so it is impossible for two ``CostModel``s
+        with different ``(spread_multiplier, extra_spread_points,
+        slippage_points, swap_multiplier, stop_fill)`` to log the same
+        ``version`` while sharing a ``version_tag``, and impossible for
+        repeated ``replace()``/``.stressed()`` calls to accumulate stale or
+        duplicate suffixes.
+        """
+        parts = [self.version_tag]
+        if self.spread_multiplier != 1.0:
+            parts.append(f"spread_mult{self.spread_multiplier:g}")
+        if self.extra_spread_points != 0.0:
+            parts.append(f"extra_spread{self.extra_spread_points:g}")
+        if self.slippage_points != 0.0:
+            parts.append(f"slippage{self.slippage_points:g}")
+        if self.swap_multiplier != 1.0:
+            parts.append(f"swap_mult{self.swap_multiplier:g}")
+        if self.stop_fill != "level":
+            parts.append(f"stop_fill={self.stop_fill}")
+        return "+".join(parts)
+
     def effective_spread(self, spread_points):
         """Effective spread in points; works elementwise on scalars, numpy arrays or Series."""
         return spread_points * self.spread_multiplier + self.extra_spread_points
 
-    def stressed(self, spread_mult: float = 1.5, extra_slippage: float = 1.0) -> "CostModel":
+    def stressed(self, spread_mult: float = 1.5, extra_slippage: float = 1.0,
+                 stop_fill: str = "bar_extreme") -> "CostModel":
         """DESIGN §4.2 cost-stress gate: 1.5x spread + 1pt extra slippage by default.
 
         ``spread_mult`` multiplies the *current* spread_multiplier (relative
         stress on top of whatever calibration is already applied);
-        ``extra_slippage`` is *added* to the current slippage_points. Returns a
-        new model whose version records the stress applied — it never mutates
-        ``self`` or silently reuses the base version string.
+        ``extra_slippage`` is *added* to the current slippage_points.
+
+        ``stop_fill`` (red-team N5) defaults to ``"bar_extreme"``: the §4.2
+        stress gate should assume the pessimistic intra-minute-liquidity-gap
+        fill (see the class docstring), not silently inherit the base
+        model's optimistic ``"level"`` default just because the caller didn't
+        think to stress it too. Pass ``stop_fill=self.stop_fill`` explicitly
+        to keep the base model's own choice through the stress instead.
+
+        Returns a new model; ``self`` is never mutated, and (since
+        ``version`` is computed from the model's own fields, not
+        string-concatenated) the returned model's ``.version`` reflects
+        exactly this stressed field combination -- no double-suffixing even
+        if ``self`` was itself already non-default.
         """
         return replace(
             self,
             spread_multiplier=self.spread_multiplier * spread_mult,
             slippage_points=self.slippage_points + extra_slippage,
-            version=f"{self.version}+stress(x{spread_mult:g}spread,+{extra_slippage:g}slip)",
+            stop_fill=stop_fill,
         )
 
 
@@ -193,6 +283,53 @@ def normalize_swap_mode(raw: str) -> str:
         warnings.warn(f"unknown swap_mode {raw!r}; assuming 'points'", stacklevel=2)
         return "points"
     return mode
+
+
+_MONEY_SWAP_CCY_SOURCE = {
+    "SYMBOL_SWAP_MODE_CURRENCY_SYMBOL": "base",
+    "SYMBOL_SWAP_MODE_CURRENCY_MARGIN": "margin",
+    "SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT": "account",
+}
+
+
+def swap_currency_for(raw: str, base_ccy: str, margin_ccy: str, quote_ccy: str) -> str:
+    """Currency an MT5 swap mode's amount is denominated in (red-team N1, MAJOR).
+
+    MT5's three "money" swap modes collapse to the same canonical
+    ``swap_mode="money"`` in :func:`normalize_swap_mode`, but they are **not**
+    interchangeable currencies:
+
+    * ``SYMBOL_SWAP_MODE_CURRENCY_SYMBOL`` prices the swap in the instrument's
+      own **base** currency (``SYMBOL_CURRENCY_BASE``).
+    * ``SYMBOL_SWAP_MODE_CURRENCY_MARGIN`` prices it in the instrument's
+      **margin** currency (``SYMBOL_CURRENCY_MARGIN``) -- usually equal to the
+      base currency for plain FX, but can differ for CFDs.
+    * ``SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT`` means the amount is already in the
+      **account's own deposit currency** -- returned here as the sentinel
+      ``"ACCOUNT"`` so ``apply_sizing`` knows never to convert it again,
+      regardless of what ``account_ccy`` it is actually running with.
+
+    Every other mode (``POINTS``, the two ``INTEREST_*`` modes, and the two
+    ``REOPEN_*`` modes) prices its swap off the instrument's own
+    quote-currency price, so this falls back to ``quote_ccy``.
+
+    Real-world failure this fixes (``p17`` d): a USDJPY spec with
+    ``swap_mode="money"`` at -5/lot/night, previously always assumed to be
+    JPY (quote currency) and converted via the JPY->USD rate (~1/110) to
+    -1.91 USD/lot/night; if the export actually says
+    ``SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT`` on a USD account, the correct
+    booked amount is the full -5.00 USD/lot/night (a ~150x error at typical
+    USDJPY rates).
+    """
+    key = raw.strip().upper()
+    source = _MONEY_SWAP_CCY_SOURCE.get(key)
+    if source == "base":
+        return base_ccy
+    if source == "margin":
+        return margin_ccy
+    if source == "account":
+        return "ACCOUNT"
+    return quote_ccy
 
 
 def _parse_weekday(raw: str) -> int:
@@ -245,6 +382,11 @@ def _load_from_tsv(symbol: str, book: config.Book) -> Optional[InstrumentSpec]:
     else:
         warnings.warn(f"{comm_path.name} not found; commission assumed 0.0 for {symbol!r}", stacklevel=2)
 
+    raw_swap_mode = str(r["swap_mode"])
+    base_ccy = str(r["currency_base"])
+    quote_ccy = str(r["currency_profit"])
+    margin_ccy = str(r["currency_margin"])
+
     return InstrumentSpec(
         symbol=symbol,
         digits=int(r["digits"]),
@@ -254,13 +396,17 @@ def _load_from_tsv(symbol: str, book: config.Book) -> Optional[InstrumentSpec]:
         volume_min=float(r["volume_min"]),
         volume_step=float(r["volume_step"]),
         volume_max=float(r["volume_max"]),
-        base_ccy=str(r["currency_base"]),
-        quote_ccy=str(r["currency_profit"]),
-        swap_mode=normalize_swap_mode(str(r["swap_mode"])),
+        base_ccy=base_ccy,
+        quote_ccy=quote_ccy,
+        margin_ccy=margin_ccy,
+        swap_mode=normalize_swap_mode(raw_swap_mode),
         swap_long=float(r["swap_long"]),
         swap_short=float(r["swap_short"]),
         swap_3day=_parse_weekday(str(r["swap_3day"])),
         swap_every_day=_is_crypto(symbol),
+        # red-team N1: derived from the RAW enum string (before normalize_swap_mode collapses
+        # the 3 "money" variants into one canonical mode) -- see swap_currency_for.
+        swap_ccy=swap_currency_for(raw_swap_mode, base_ccy, margin_ccy, quote_ccy),
         commission_per_lot_rt=commission,
         stops_level=float(r["stops_level"]),
         calibrated=True,

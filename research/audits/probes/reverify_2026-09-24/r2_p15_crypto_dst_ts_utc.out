@@ -1,0 +1,11 @@
+BTCUSD M1 rows 4574864 | duplicated ts_utc 0 | backward steps 0
+shape: (0, 3)
+┌──────────────┬───────────────────┬─────┐
+│ ts           ┆ ts_utc            ┆ dm  │
+│ ---          ┆ ---               ┆ --- │
+│ datetime[ms] ┆ datetime[ms, UTC] ┆ i64 │
+╞══════════════╪═══════════════════╪═════╡
+└──────────────┴───────────────────┴─────┘
+2019-03-31 rows at non-existent server hour 03:xx: 0
+2020-03-29 rows at non-existent server hour 03:xx: 0
+2021-03-28 rows at non-existent server hour 03:xx: 0

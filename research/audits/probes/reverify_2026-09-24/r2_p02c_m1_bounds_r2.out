@@ -1,0 +1,8 @@
+B) last-bar long, H1 + M1 to July, timeframe='H1': ran -> ('eod', 1.1165)
+B') same, timeframe omitted: REJECTED (run_backtest: timeframe=... is required whenever m1= is given (red-team N3/N4, re-verify 2026-09-24) -- inferr)
+D) one-bar-per-day frame, timeframe='H1': ran -> ('eod', 1.11276)
+D') one-bar-per-day frame, timeframe='D1' (overstated): REJECTED (run_backtest: bars row 0 (ts=2019-05-01 08:00:00) is inconsistent with its own M1 window under timeframe='D1' )
+E) D1 bars declared H1: REJECTED (run_backtest: bars row 0 (ts=2019-01-02 00:00:00) is inconsistent with its own M1 window under timeframe='H1' )
+E') D1 bars declared D1: ran -> ('eod', 1.13702)
+G) H1 slice declared D1 with M1 running past the slice: REJECTED (run_backtest: bars row 324 (ts=2019-05-20 12:00:00) is inconsistent with its own M1 window under timeframe='D1)
+F) assert_engine_causal(timeframe='H1', full-year M1, 40 cuts): PASSED

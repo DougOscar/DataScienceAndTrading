@@ -173,6 +173,77 @@ def test_points_and_money_mode_swap_both_contribute():
     assert out["pnl_ccy"] == pytest.approx(-42.5)
 
 
+# --------------------------------------------------------------------------- swap currency (red-team N1)
+
+def test_swap_money_account_deposit_sentinel_is_never_converted():
+    """Regression (red-team N1, MAJOR, p17 d): swap_ccy="ACCOUNT" (MT5's
+    SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT) means the amount is ALREADY in the
+    account's own currency -- apply_sizing must book it directly, never route
+    it through the quote-currency rate, no matter how far quote_ccy is from
+    account_ccy. Pre-fix, a USDJPY money-mode swap of -5/lot/night (-20 over
+    4 nights) was divided by ~110 (the JPY->USD rate) to -0.18; the correct
+    booked amount is the full -20.00."""
+    spec = _spec(quote_ccy="JPY", swap_ccy="ACCOUNT")
+    trades = _trade(entry_price=110.00, stop_price=109.50, pnl_points=0.0,
+                     swap_points=0.0, swap_money_per_lot=-20.0, commission_per_lot=0.0)
+    bars = _ts_utc_bars([datetime(2024, 1, 2, tzinfo=timezone.utc), datetime(2024, 1, 2, 1, tzinfo=timezone.utc)])
+
+    def rate_fn(quote_ccy, account_ccy, ts_series):
+        # the swap leg must never reach here with "JPY" -- if it does, the bug is back
+        assert quote_ccy == "JPY"
+        return np.full(ts_series.len(), 1.0 / 110.0)
+
+    out = apply_sizing(trades, spec, mode="fixed_lots", lots=1.0, account_ccy="USD",
+                        rate_fn=rate_fn, bars=bars).row(0, named=True)
+    # swap_ccy=="ACCOUNT" -> identity rate: -20.0 * 1.0 * 1 lot = -20.0 (not -20/110 = -0.18)
+    assert out["pnl_ccy"] == pytest.approx(-20.0)
+
+
+def test_swap_money_uses_its_own_currency_not_quote_ccy():
+    """Regression (red-team N1): swap_ccy can differ from BOTH quote_ccy and
+    account_ccy at once (e.g. SYMBOL_SWAP_MODE_CURRENCY_SYMBOL on a JPY-quoted
+    pair, EUR account) -- the swap leg must be converted with its OWN
+    rate_fn(spec.swap_ccy, ...) call, not reuse the quote-currency rate."""
+    spec = _spec(quote_ccy="JPY", swap_ccy="USD")
+    trades = _trade(entry_price=110.00, stop_price=109.50, pnl_points=0.0,
+                     swap_points=0.0, swap_money_per_lot=-5.0, commission_per_lot=0.0)
+    bars = _ts_utc_bars([datetime(2024, 1, 2, tzinfo=timezone.utc), datetime(2024, 1, 2, 1, tzinfo=timezone.utc)])
+    seen_ccys = []
+
+    def rate_fn(quote_ccy, account_ccy, ts_series):
+        seen_ccys.append(quote_ccy)
+        return np.full(ts_series.len(), 0.5 if quote_ccy == "USD" else 0.01)
+
+    out = apply_sizing(trades, spec, mode="fixed_lots", lots=2.0, account_ccy="EUR",
+                        rate_fn=rate_fn, bars=bars).row(0, named=True)
+    assert "USD" in seen_ccys  # the swap leg requested its OWN currency's rate
+    assert "JPY" in seen_ccys  # the price leg still uses quote_ccy, unaffected
+    # swap_ccy = -5.0 * rate(USD->EUR = 0.5) * 2 lots = -5.0 ; price pnl is 0 (pnl_points=0)
+    assert out["pnl_ccy"] == pytest.approx(-5.0)
+
+
+def test_swap_money_reuses_the_quote_rate_when_swap_ccy_equals_quote_ccy():
+    """When spec.swap_ccy == spec.quote_ccy (the common case, and every spec
+    built without a real broker export), the already-computed quote-currency
+    exit rate is reused instead of a second rate_fn call."""
+    spec = _spec(quote_ccy="EUR")  # swap_ccy defaults to quote_ccy ("EUR")
+    assert spec.swap_ccy == "EUR"
+    trades = _trade(entry_price=1.1000, stop_price=1.0950, pnl_points=0.0,
+                     swap_points=0.0, swap_money_per_lot=-3.0, commission_per_lot=0.0)
+    bars = _ts_utc_bars([datetime(2024, 1, 2, tzinfo=timezone.utc), datetime(2024, 1, 2, 1, tzinfo=timezone.utc)])
+    calls = []
+
+    def rate_fn(quote_ccy, account_ccy, ts_series):
+        calls.append(quote_ccy)
+        return np.full(ts_series.len(), 1.10)
+
+    out = apply_sizing(trades, spec, mode="fixed_lots", lots=1.0, account_ccy="USD",
+                        rate_fn=rate_fn, bars=bars).row(0, named=True)
+    assert calls == ["EUR", "EUR"]  # exactly 2 calls (entry + exit for the price leg) -- no 3rd for swap
+    # swap_ccy = -3.0 * rate(EUR->USD = 1.10) * 1 lot = -3.3
+    assert out["pnl_ccy"] == pytest.approx(-3.3)
+
+
 # --------------------------------------------------------------------------- currency conversion
 
 def test_currency_mismatch_without_rate_fn_raises():

@@ -92,14 +92,28 @@ def apply_sizing(
     ``value_per_point_acct_exit`` (the exit-time conversion actually used for
     the realised price P&L, for transparency/debugging).
 
-    **Swap (red-team M4)**: ``swap_points`` (price-unit swap, any symbol whose
-    ``swap_mode`` is ``"points"``) is converted like the trade's own P&L,
-    at the exit-time rate. ``swap_money_per_lot`` (``swap_mode="money"``) is
-    already a money amount per lot -- assumed to be in the instrument's quote
-    currency (the MT5 export's "money" modes collapse 3 different currency
-    choices into one, see ``costs.normalize_swap_mode``; this is documented,
-    not silently guessed) -- so it needs the plain FX rate, not the
-    price-value conversion, again at the exit-time rate.
+    **Swap (red-team M4, N1)**: ``swap_points`` (price-unit swap, any symbol
+    whose ``swap_mode`` is ``"points"``) is converted like the trade's own
+    P&L, at the exit-time rate (``spec.quote_ccy`` -> ``account_ccy``).
+    ``swap_money_per_lot`` (``swap_mode`` ``"money"`` or ``"interest"``) is
+    already a money amount per lot, denominated in **``spec.swap_ccy``**, not
+    necessarily ``spec.quote_ccy`` (red-team N1, MAJOR: MT5's three "money"
+    modes are the instrument's base currency, its margin currency, or the
+    *account's own deposit currency* -- three different things that a prior
+    version of this function collapsed into a single "assume quote currency"
+    guess, which silently mis-converted e.g. a USDJPY money-mode swap by the
+    JPY->USD rate even when the real amount was already in USD). It is
+    converted at the exit-time rate for ``spec.swap_ccy`` -> ``account_ccy``,
+    with two shortcuts that avoid an unnecessary/impossible ``rate_fn`` call:
+    ``spec.swap_ccy == "ACCOUNT"`` (``SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT`` --
+    already in whatever currency the account uses, so never converted again)
+    and ``spec.swap_ccy == account_ccy`` both use the identity rate; only a
+    genuine mismatch calls ``rate_fn(spec.swap_ccy, account_ccy, ...)`` (which
+    then requires ``bars``, same as the quote-currency conversion above). When
+    ``spec.swap_ccy == spec.quote_ccy`` (the common case, and every spec built
+    without a real broker export -- see ``InstrumentSpec.swap_ccy``), the
+    already-computed quote-currency exit rate is reused instead of a second
+    ``rate_fn`` call.
     """
     if mode not in ("fixed_fraction", "fixed_lots"):
         raise ValueError(f"mode must be 'fixed_fraction' or 'fixed_lots', got {mode!r}")
@@ -116,30 +130,44 @@ def apply_sizing(
     trades = trades.sort("entry_idx")
     n = trades.height
 
-    if spec.quote_ccy == account_ccy:
-        rate_entry = np.ones(n, dtype=np.float64)
-        rate_exit = np.ones(n, dtype=np.float64)
-    elif rate_fn is not None:
+    def _rate(ccy: str, which: str, kind: str) -> np.ndarray:
+        """Conversion rate ``ccy`` -> ``account_ccy`` at the entry/exit fill time
+        (red-team M3, N1). ``"ACCOUNT"`` (``InstrumentSpec.swap_ccy``'s sentinel
+        for ``SYMBOL_SWAP_MODE_CURRENCY_DEPOSIT``) and an outright match with
+        ``account_ccy`` both short-circuit to the identity rate without ever
+        calling ``rate_fn`` or needing ``bars``. ``kind`` only affects wording
+        in the two error messages below (kept close to the pre-N1 text so
+        existing ``pytest.raises(match=...)`` callers -- "rate_fn" / "bars" --
+        still match)."""
+        if ccy == "ACCOUNT" or ccy == account_ccy:
+            return np.ones(n, dtype=np.float64)
+        if rate_fn is None:
+            raise ValueError(
+                f"apply_sizing: instrument {kind} currency {ccy!r} != account_ccy "
+                f"{account_ccy!r}; pass rate_fn=<callable(quote_ccy, account_ccy, ts_utc_series) -> "
+                "rates> and bars=<the bar frame run_backtest used>."
+            )
         if bars is None or "ts_utc" not in bars.columns:
             raise ValueError(
                 "apply_sizing: rate_fn requires bars=<the same bar frame run_backtest used>, so the "
                 "entry/exit fill times can be looked up as tz-aware UTC via bars['ts_utc'] "
                 "(entry_idx/exit_idx index into it) -- DESIGN §4.3 / red-team M3."
             )
-        entry_ts_utc = bars["ts_utc"].gather(trades["entry_idx"])
-        exit_ts_utc = bars["ts_utc"].gather(trades["exit_idx"])
-        rate_entry = np.asarray(rate_fn(spec.quote_ccy, account_ccy, entry_ts_utc), dtype=np.float64)
-        rate_exit = np.asarray(rate_fn(spec.quote_ccy, account_ccy, exit_ts_utc), dtype=np.float64)
-        if rate_entry.shape[0] != n:
-            raise ValueError(f"rate_fn returned {rate_entry.shape[0]} entry rates for {n} trades")
-        if rate_exit.shape[0] != n:
-            raise ValueError(f"rate_fn returned {rate_exit.shape[0]} exit rates for {n} trades")
-    else:
-        raise ValueError(
-            f"apply_sizing: instrument quote currency {spec.quote_ccy!r} != account_ccy "
-            f"{account_ccy!r}; pass rate_fn=<callable(quote_ccy, account_ccy, ts_utc_series) -> rates> "
-            "and bars=<the bar frame run_backtest used>."
-        )
+        idx_col = trades["entry_idx"] if which == "entry" else trades["exit_idx"]
+        ts_series = bars["ts_utc"].gather(idx_col)
+        rates = np.asarray(rate_fn(ccy, account_ccy, ts_series), dtype=np.float64)
+        if rates.shape[0] != n:
+            raise ValueError(f"rate_fn returned {rates.shape[0]} {which} rates for {n} trades")
+        return rates
+
+    rate_entry = _rate(spec.quote_ccy, "entry", "quote")
+    rate_exit = _rate(spec.quote_ccy, "exit", "quote")
+    # Swap-money conversion (red-team N1): reuse the quote-currency exit rate when
+    # spec.swap_ccy == spec.quote_ccy (the common case -- avoids a second rate_fn call
+    # and matches the pre-N1 behaviour exactly for every spec built without a real
+    # broker export, see InstrumentSpec.swap_ccy's default); otherwise resolve the
+    # swap currency's own rate (which may be the identity rate via "ACCOUNT" above).
+    rate_swap = rate_exit if spec.swap_ccy == spec.quote_ccy else _rate(spec.swap_ccy, "exit", "swap")
     value_per_point_entry = spec.value_per_point_per_lot * rate_entry
     value_per_point_exit = spec.value_per_point_per_lot * rate_exit
 
@@ -196,7 +224,9 @@ def apply_sizing(
             lots_final = lots_i
 
         swap_points_ccy = swap_points[i] * vpp_x * lots_final
-        swap_money_ccy = swap_money_per_lot[i] * rate_exit[i] * lots_final
+        # red-team N1: swap_money_per_lot is in spec.swap_ccy, not necessarily spec.quote_ccy --
+        # rate_swap[i], not rate_exit[i].
+        swap_money_ccy = swap_money_per_lot[i] * rate_swap[i] * lots_final
         swap_ccy = swap_points_ccy + swap_money_ccy
         commission_ccy = commission_per_lot[i] * lots_final
         pnl_ccy = pnl_points[i] * vpp_x * lots_final + swap_ccy - commission_ccy
