@@ -140,3 +140,32 @@ def test_system_effective_trials_sums_prior_attempts(tmp_path, clean_tree):
     assert ledger.system_effective_trials("FBS", "donchian", ledger_dir=tmp_path) == 81.5
     assert ledger.system_effective_trials("FBS", "donchian", exclude_study="fbs-0007-a2",
                                           ledger_dir=tmp_path) == 31.5
+
+
+def test_system_prior_trials_uses_own_counts_and_skips_later_attempts(tmp_path, clean_tree):
+    ledger.create_study(ledger_dir=tmp_path, **_study())
+    ledger.log_event("fbs-0007-a1", "trials", ledger_dir=tmp_path, n_trials=400)
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0007-a2", attempt=2))
+    ledger.log_event("fbs-0007-a2", "trials", ledger_dir=tmp_path, n_trials=50)
+    # m1: a gates row carries the study's own count; cumulative fields are never summed
+    ledger.log_event("fbs-0007-a2", "gates", ledger_dir=tmp_path, n_trials_study=50, n_trials_dsr=450,
+                     effective_trials_study=12.0, effective_trials=40.0)
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0007-a3", attempt=3))
+    tot, used = ledger.system_prior_trials("FBS", "donchian", exclude_study="fbs-0007-a3", max_attempt=3,
+                                           ledger_dir=tmp_path)
+    assert tot == 450 and used == ["fbs-0007-a1", "fbs-0007-a2"]
+    tot, used = ledger.system_prior_trials("FBS", "donchian", exclude_study="fbs-0007-a1", max_attempt=1,
+                                           ledger_dir=tmp_path)
+    assert tot == 0 and used == []
+    assert ledger.system_effective_trials("FBS", "donchian", exclude_study="fbs-0007-a3",
+                                          ledger_dir=tmp_path) == 400 + 12.0
+
+
+def test_study_events_filters_by_study_and_event(tmp_path, clean_tree):
+    ledger.create_study(ledger_dir=tmp_path, **_study())
+    ledger.log_event("fbs-0007-a1", "gates", ledger_dir=tmp_path, verdict="FAIL", gate_run=1)
+    ledger.log_event("fbs-0007-a1", "note", ledger_dir=tmp_path, text="x")
+    ledger.log_event("fbs-0007-a1", "gates", ledger_dir=tmp_path, verdict="PASS", gate_run=2)
+    ev = ledger.study_events("fbs-0007-a1", "gates", ledger_dir=tmp_path)
+    assert [e["verdict"] for e in ev] == ["FAIL", "PASS"]
+    assert len(ledger.study_events("fbs-0007-a1", ledger_dir=tmp_path)) == 4

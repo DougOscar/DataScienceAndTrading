@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -136,7 +137,10 @@ def test_requires_refit_and_grid_budget(tmp_path):
         _study(ML(bounds={"a": (0, 1)}), opt.SearchSpace([opt.IntParam("a", 0, 1)]), tmp_path, "s-ml")
     big = opt.SearchSpace([opt.IntParam(n, 0, 1) for n in "abcd"])
     with pytest.raises(ValueError, match="<= 3"):
-        _study(SyntheticEvaluator(bounds={"a": (0, 1)}), big, tmp_path, "s-big")
+        _study(SyntheticEvaluator(bounds={"a": (0, 1)}), big, tmp_path, "s-big", method="grid")
+    # B3: the default ("auto") for > 3 params is Sobol, which needs a trial budget
+    with pytest.raises(ValueError, match="'sobol' needs n_trials"):
+        _study(SyntheticEvaluator(bounds={"a": (0, 1)}), big, tmp_path, "s-big2")
     with pytest.raises(ValueError, match="book"):
         _study(SyntheticEvaluator(bounds={"a": (0, 1)}, book="B3"), opt.SearchSpace([opt.IntParam("a", 0, 1)]),
                tmp_path, "s-book")
@@ -374,3 +378,207 @@ def test_benchmark_200_trial_grid_eurusd_h1(tmp_path):
     assert res.meta["n_trials"] == 200 and res.meta["n_error"] == 0
     assert res.cpcv_paths["path_id"].n_unique() == 9
     assert wall < 600
+
+
+# --------------------------------------------------------------------------- B3: candidate sets
+class _SmoothNull:
+    """Zero-edge world with parameter-smooth noise (red-team probe p07): returns are a smooth
+    random field over (x, y) in [0, 1]^2 plus a common factor.  Every configuration has true
+    Sharpe 0, but neighbouring configurations share their luck, so a candidate set chosen with
+    the full-sample objective (TPE) concentrates on the region that was lucky out-of-sample too."""
+
+    book, periods_per_year, requires_refit, cost_version = "FBS", 260.0, False, "probe"
+    T = 2340
+
+    def __init__(self, seed, L=0.15, rho=0.3, vol=0.005):
+        rng = np.random.default_rng(seed)
+        g = np.linspace(0, 1, 8)
+        self.C = np.array([(x, y) for x in g for y in g])
+        self.Z = rng.standard_normal((self.T, len(self.C)))
+        self.zc = rng.standard_normal(self.T)
+        self.L, self.rho, self.vol = L, rho, vol
+        self.dates = np.busday_offset(np.datetime64("2016-05-02"), np.arange(self.T), roll="forward")
+        self.dev_window = (str(self.dates[0]), str(self.dates[-1]))
+
+    def __call__(self, params, *, cost=None):
+        p = np.array([params["x"], params["y"]])
+        w = np.exp(-((self.C - p) ** 2).sum(1) / (2 * self.L ** 2))
+        r = self.vol * (math.sqrt(self.rho) * self.zc + math.sqrt(1 - self.rho) * (self.Z @ w / np.linalg.norm(w)))
+        daily = pl.DataFrame({"date": self.dates.astype("datetime64[D]"), "ret": r}).with_columns(pl.col("date").cast(pl.Date))
+        tr = pl.DataFrame({"entry_ts": [], "exit_ts": []}, schema={"entry_ts": pl.Datetime("ms"), "exit_ts": pl.Datetime("ms")})
+        return Outcome(daily=daily, trades=tr, metrics={"n_trades": 900.0, "hold_days_max": 3.0})
+
+
+def _cpcv_median_sharpe(res):
+    s = [g.sort("date")["ret"].to_numpy() for _, g in res.cpcv_paths.group_by("path_id")]
+    return float(np.median([x.mean() / x.std(ddof=1) * math.sqrt(260) for x in s]))
+
+
+_B3_BIAS = 0.08    # paired mean (candidate set − full grid) CPCV path-median OOS Sharpe, 12 seeds
+
+
+def _null_bias(tmp_path, methods, n_seeds, step=0.1, n_sobol=40):
+    space = opt.SearchSpace([opt.FloatParam("x", 0.0, 1.0, step), opt.FloatParam("y", 0.0, 1.0, step)])
+    out = {m: [] for m in methods}
+    for s in range(n_seeds):
+        ev = _SmoothNull(seed=s)
+        for m in methods:
+            res = _study(ev, space, tmp_path, f"b3-{m}-{s}", method=m, seed=s, wfo=None,
+                         n_trials=None if m == "grid" else n_sobol, cv=opt.CPCVConfig(6, 2))
+            out[m].append(_cpcv_median_sharpe(res))
+    return {m: np.asarray(v) for m, v in out.items()}
+
+
+def test_sobol_candidate_set_has_no_oos_bias_under_smooth_null(tmp_path):
+    """B3 fix: a Sobol candidate set is fixed before any evaluation, so its CPCV OOS Sharpe
+    under a zero-edge smooth field is centred like the full grid's (TPE: +0.17, probe p07)."""
+    r = _null_bias(tmp_path, ("grid", "sobol"), n_seeds=12)
+    d = r["sobol"] - r["grid"]
+    assert d.mean() < _B3_BIAS, d.mean()            # measured +0.03 (se 0.06); TPE: +0.18
+    assert abs(r["sobol"].mean()) < 0.15
+
+
+@pytest.mark.slow
+def test_tpe_candidate_set_bias_is_detected_by_the_same_check(tmp_path):
+    """Power of the check above: the same null with TPE shows the p07 leak."""
+    r = _null_bias(tmp_path, ("grid", "tpe"), n_seeds=12)
+    d = r["tpe"] - r["grid"]
+    assert d.mean() > _B3_BIAS, d.mean()
+
+
+def test_candidate_set_sobol_mapping_distinct_and_prefix_stable():
+    sp = opt.SearchSpace([opt.IntParam("n", 5, 50, 5), opt.IntParam("k", 2, 200, log=True),
+                          opt.FloatParam("x", 0.1, 10.0, log=True), opt.FloatParam("z", -1.0, 1.0),
+                          opt.FloatParam("s", 0.0, 1.0, 0.25), opt.CategoricalParam("m", ["a", "b", "c"])])
+    a = opt.candidate_set(sp, 200, method="sobol", seed=3)
+    assert len(a) == 200 and len({opt._pjson(p) for p in a}) == 200
+    assert a == opt.candidate_set(sp, 200, method="sobol", seed=3)              # seeded
+    assert a != opt.candidate_set(sp, 200, method="sobol", seed=4)
+    assert opt.candidate_set(sp, 64, method="sobol", seed=3) == a[:64]         # prefix-stable (resume)
+    for p in a:
+        assert p["n"] in range(5, 51, 5) and isinstance(p["n"], int)
+        assert 2 <= p["k"] <= 200 and isinstance(p["k"], int)
+        assert 0.1 <= p["x"] <= 10.0 and -1.0 <= p["z"] <= 1.0
+        assert p["s"] in (0.0, 0.25, 0.5, 0.75, 1.0) and p["m"] in ("a", "b", "c")
+    # every level of the discrete params is visited; log params are log-uniform (median ~ geometric mean)
+    assert {p["n"] for p in a} == set(range(5, 51, 5)) and {p["m"] for p in a} == {"a", "b", "c"}
+    assert 0.5 < float(np.median([p["x"] for p in a])) < 2.0
+    # a discrete space smaller than n: every configuration once, with a warning
+    small = opt.SearchSpace([opt.IntParam("a", 0, 3), opt.CategoricalParam("b", ["u", "v"])])
+    with pytest.warns(UserWarning, match="only 8 distinct"):
+        c = opt.candidate_set(small, 20, method="sobol", seed=0, max_draws=4096)
+    assert len(c) == 8
+    r = opt.candidate_set(sp, 50, method="random", seed=1)
+    assert len(r) == 50 and r == opt.candidate_set(sp, 50, method="random", seed=1)
+
+
+def _space4(constraint=None):
+    return opt.SearchSpace([opt.IntParam("a", 0, 10), opt.IntParam("b", 0, 10), opt.FloatParam("x", 0.0, 1.0),
+                            opt.CategoricalParam("m", ["p", "q"])], constraint=constraint)
+
+
+def _bad_a9(p):
+    return not (p["a"] == 9 and p["m"] == "q")
+
+
+def test_auto_method_is_sobol_for_4_params_and_meta_for_gates(tmp_path):
+    ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10), "x": (0.0, 1.0)}, rho=0.8,
+                            bumps=({"center": {"a": 3, "b": 6, "x": 0.4}, "height": 1.5, "width": 0.3},))
+    res = _study(ev, _space4(_bad_a9), tmp_path, "s4", n_trials=64, seed=5)
+    m = res.meta
+    assert m["method"] == m["candidate_set"] == "sobol" and m["method_requested"] == "auto"
+    assert m["candidate_set_data_dependent"] is False
+    assert (m["book"], m["system"], m["issue"], m["attempt"]) == ("FBS", "synthetic", 1, 1)
+    assert m["space"] == _space4(_bad_a9).to_json()
+    assert m["embargo_capped"] is False and m["embargo_days_uncapped"] == 3
+    # every candidate is a logged trial (invalid ones too), in candidate-set order
+    assert res.trials.height == 64 == m["n_trials"]
+    cands = opt.candidate_set(_space4(), 64, method="sobol", seed=5)
+    assert [json.loads(p) for p in res.trials["params"]] == [opt._py(c) for c in cands]
+    n_bad = sum(not _bad_a9(c) for c in cands)
+    assert n_bad > 0 and m["n_invalid"] == n_bad
+    assert res.selection["neighbourhood"]["neighbourhood"] == "knn"
+    s = ledger.studies(tmp_path / "ledger")["s4"]
+    assert s["candidate_set"] == "sobol" and s["candidate_set_data_dependent"] is False
+    assert s["embargo_capped"] is False and s["n_trials"] == 64
+    # grid: data-independent too; TPE: flagged data-dependent (B3)
+    g = _study(ev, _space2(), tmp_path, "s2g")
+    assert g.meta["candidate_set"] == "grid" and g.meta["candidate_set_data_dependent"] is False
+    t = _study(ev, _space4(), tmp_path, "s4t", method="tpe", n_trials=20, wfo=None)
+    assert t.meta["candidate_set"] == "tpe" and t.meta["candidate_set_data_dependent"] is True
+    assert ledger.studies(tmp_path / "ledger")["s4t"]["candidate_set_data_dependent"] is True
+
+
+def test_sobol_resume_extends_the_same_candidate_set(tmp_path):
+    ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10), "x": (0.0, 1.0)}, rho=0.8)
+    r1 = _study(ev, _space4(), tmp_path, "sr", n_trials=30, seed=2, wfo=None)
+    r2 = _study(ev, _space4(), tmp_path, "sr", n_trials=50, seed=2, wfo=None, resume=True)
+    full = _study(ev, _space4(), tmp_path, "sr-full", n_trials=50, seed=2, wfo=None)
+    assert r2.trials.head(30).select("trial_id", "params").equals(r1.trials.select("trial_id", "params"))
+    assert r2.trials.select("trial_id", "params").equals(full.trials.select("trial_id", "params"))
+    assert r2.selected_params == full.selected_params
+
+
+def test_embargo_cap_is_recorded(tmp_path):
+    ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.8, hold_days=80, trades_per_year=20)
+    with pytest.warns(UserWarning, match="capped"):
+        res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "cap", wfo=None)
+    cap = (ev.n_days // 10) // 4
+    assert res.meta["embargo_capped"] is True and res.meta["embargo_days_uncapped"] == 80
+    assert res.meta["cpcv"]["embargo_days"] == cap and res.meta["cpcv"]["embargo_cap"] == cap
+    assert ledger.studies(tmp_path / "ledger")["cap"]["embargo_capped"] is True
+    res2 = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "nocap", wfo=None,
+                  cv=opt.CPCVConfig(n_groups=4, k_test=1))
+    assert res2.meta["embargo_capped"] is False and res2.meta["cpcv"]["embargo_days"] == 80
+
+
+class _NoEntryTs(SyntheticEvaluator):
+    def __call__(self, params, *, cost=None):
+        o = super().__call__(params, cost=cost)
+        return Outcome(daily=o.daily, trades=o.trades.select(pl.col("exit_ts")), metrics=o.metrics)
+
+
+def test_wfo_oos_n_trades_are_the_active_configs_entries(tmp_path):
+    ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.9, hold_days=4, trades_per_year=60,
+                            bumps=({"center": {"a": 2}, "height": 2.0, "width": 0.1},),
+                            regimes=({"from": 0.6, "bumps": ({"center": {"a": 8}, "height": 2.0, "width": 0.1},)},))
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "wn",
+                 wfo=opt.WFOConfig(window="rolling", window_length="1y", min_train="1y"))
+    w = res.wfo_oos
+    assert w["n_trades"].dtype == pl.Int64 and w["n_trades"].null_count() == 0
+    expected = []
+    for row in res.wfo_params.iter_rows(named=True):
+        tr = ev({"a": row["param_a"]}).trades
+        d = tr["entry_ts"].dt.date()
+        expected.append(int(((d >= row["refit_date"]) & (d <= row["test_end"])).sum()))
+    got = w.group_by("refit_id").agg(pl.col("n_trades").sum()).sort("refit_id")["n_trades"].to_list()
+    assert got == expected and sum(got) > 0
+    assert res.wfo_params["param_a"].n_unique() > 1                 # the active config really switches
+    # no entry timestamps in the evaluator's trades -> null, not a made-up zero
+    res2 = _study(_NoEntryTs(bounds={"a": (0, 10)}, rho=0.9), opt.SearchSpace([opt.IntParam("a", 0, 10)]),
+                  tmp_path, "wn2")
+    assert res2.wfo_oos.height and res2.wfo_oos["n_trades"].null_count() == res2.wfo_oos.height
+    # resume restores the entry counts from the opt_aux sidecar
+    res3 = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "wn", resume=True,
+                  wfo=opt.WFOConfig(window="rolling", window_length="1y", min_train="1y"))
+    assert res3.wfo_oos.equals(res.wfo_oos)
+
+
+def test_worker_processes_start_with_thread_caps(tmp_path):
+    """F1: the Polars pool inside a worker really has 1 thread (the old initializer-time
+    setdefault had no effect: the child had already initialised Polars), and the parent's
+    environment is left untouched."""
+    pl.DataFrame({"a": [1, 2]}).sum()                               # parent pool initialised
+    before = {k: os.environ.get(k) for k in opt.WORKER_THREAD_ENV}
+    r = opt._Runner(SyntheticEvaluator(bounds={"a": (0, 1)}), None, 2)
+    try:
+        assert r.start_method == "spawn"
+        infos = [r.pool.submit(opt._worker_threads).result() for _ in range(4)]
+    finally:
+        r.close()
+    assert {i["polars_threads"] for i in infos} == {1}
+    assert all(i["POLARS_MAX_THREADS"] == "1" and i["NUMBA_NUM_THREADS"] == "1" for i in infos)
+    assert {k: os.environ.get(k) for k in opt.WORKER_THREAD_ENV} == before
+    res = _study(SyntheticEvaluator(bounds={"a": (0, 10)}), opt.SearchSpace([opt.IntParam("a", 0, 10)]),
+                 tmp_path, "thr", n_jobs=2, wfo=None)
+    assert res.meta["mp_start_method"] == "spawn" and res.meta["worker_threads"]["polars_threads"] == 1

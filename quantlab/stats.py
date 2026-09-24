@@ -59,7 +59,7 @@ __all__ = [
     "return_at_dd_budget", "BudgetResult", "classify_monthly_return",
     "spa_test", "white_reality_check", "bh_fdr", "time_stability", "regime_split",
     "volatility_regimes", "trend_regimes", "cusum_threshold", "cusum_decay",
-    "sequential_sharpe_test", "holdout_band", "HoldoutBand", "holdout_check",
+    "sequential_sharpe_test", "holdout_band", "HoldoutBand", "holdout_check", "joint_tail_level",
     "random_selectivity_null", "random_entry_null", "empirical_pvalue", "ablation_compare",
 ]
 
@@ -182,7 +182,8 @@ def dsr(selected_returns=None, *, trial_sharpes: Sequence[float] | None = None,
     Either give ``selected_returns`` (daily returns; SR/n/skew/kurt are estimated from it), or
     the moments directly (``sr`` per-period, ``n``, ``skew``, raw ``kurt``).  The Sharpe
     variance comes from ``var_sr`` (per-period units) or is computed from ``trial_sharpes``
-    (per-period, ddof=1)."""
+    (per-period, ddof=1).  Raises ``ValueError`` if |sr| > 1 (an annualised Sharpe passed by
+    mistake; a daily Sharpe of 1 is ≈ 16 annualised)."""
     if selected_returns is not None:
         a = _ret_array(selected_returns)
         sr = sharpe_per_period(a) if sr is None else sr
@@ -192,6 +193,9 @@ def dsr(selected_returns=None, *, trial_sharpes: Sequence[float] | None = None,
         kurt = ku if kurt is None else kurt
     if sr is None or n is None:
         raise ValueError("dsr needs selected_returns or (sr, n)")
+    if np.isfinite(sr) and abs(sr) > 1.0:
+        raise ValueError(f"dsr: |per-period Sharpe| = {abs(sr):.3g} > 1 — looks annualised; pass the "
+                         "per-period (daily) Sharpe (annual / sqrt(periods_per_year))")
     if var_sr is None:
         if trial_sharpes is None:
             raise ValueError("dsr needs var_sr or trial_sharpes")
@@ -263,58 +267,98 @@ def effective_n_trials(returns_matrix, method: str = "eigen", *, corr_threshold:
 
 @dataclass
 class DSRResult:
-    dsr: float                 # probability, deflated with n_eff
-    dsr_raw_n: float           # same, deflated with the raw trial count (reported alongside)
+    """DSR gate calculation (DESIGN §4.2 v1.2, R1) plus the effective-N diagnostics.
+
+    Gate: SR0 = √V0 · E[max of N iid N(0,1)], V0 = 1/(T − 1) (null sampling variance of a
+    per-period Sharpe estimate, normal-moment approximation), N = raw trials of this study +
+    raw trials of earlier attempts.  DSR = PSR(SR | SR0) with the selected series' skew/kurt.
+
+    Why raw N with V0 (red-team B1): under a common factor ρ the max of N correlated null
+    Sharpes is √ρ·Z0 + √(1−ρ)·max_N(iid); V0·E[max_N] upper-bounds its mean, whereas an
+    effective-N estimate (≈1/ρ² or 1 cluster) *and* the cross-sectional variance both shrink
+    with ρ and double-count the correlation.  Using the cross-sectional variance also lets
+    genuine Sharpe differences across the grid inflate the hurdle (calibration F2).  The
+    eigen / cluster / Li–Ji N_eff and V_cross are therefore reported as diagnostics only."""
+
+    dsr: float                 # gate value (probability): hurdle from V0 and raw N
+    sr0: float                 # per-period hurdle √V0 · E[max of N]
+    sr0_annual: float
+    v0: float                  # 1/(T − 1)
+    n_trials: float            # N used = n_trials_study + n_trials_prior
+    n_trials_study: float
+    n_trials_prior: float
     psr0: float                # PSR against SR* = 0 (no deflation)
     sr: float                  # per-period Sharpe of the selected trial
     sr_annual: float
-    sr0: float                 # expected max Sharpe (per-period) at n_eff
-    sr0_annual: float
-    var_sr: float              # cross-sectional per-period Sharpe variance
-    n_eff: float
-    n_eff_by_method: dict[str, float]
-    n_trials_raw: int
     n_obs: int
     skew: float
     kurt: float
+    # ---- diagnostics (not the gate)
+    var_sr: float              # cross-sectional per-period Sharpe variance of the usable trials
+    n_eff: float               # max of eigen/cluster N_eff of this study's matrix (no prior)
+    n_eff_by_method: dict[str, float]
+    dsr_neff_cross: float      # old v1.1 gate: N_eff + prior raw trials, with V_cross
+    dsr_raw_cross: float       # raw N with V_cross
+    sr0_neff_cross_annual: float
+    n_columns: int             # trial return columns in the matrix
+
+    @property
+    def dsr_raw_n(self) -> float:   # backward-compatible alias: the gate now uses raw N
+        return self.dsr
+
+    @property
+    def n_trials_raw(self) -> float:
+        return self.n_trials
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["dsr_raw_n"] = self.dsr
+        d["n_trials_raw"] = self.n_trials
+        return d
 
 
 def dsr_from_matrix(returns_matrix, selected: str | int, *, periods_per_year: float = 260.0,
-                    methods: Sequence[str] = ("eigen", "cluster"), n_eff: float | None = None,
-                    extra_trials: float = 0.0, corr_threshold: float = 0.5) -> DSRResult:
-    """Everything-in-one DSR from a wide trial return matrix.
+                    n_trials: float | None = None, extra_trials: float = 0.0,
+                    methods: Sequence[str] = ("eigen", "cluster", "liji"),
+                    corr_threshold: float = 0.5) -> DSRResult:
+    """Everything-in-one DSR from a wide trial return matrix (DESIGN §4.2 v1.2, R1).
 
     * ``selected``: column name (e.g. ``"t17"``) or column index of the selected trial.
-    * ``var_sr`` = cross-sectional variance (ddof=1) of the per-period Sharpe of all usable
-      trials.
-    * ``n_eff`` = **max** over ``methods`` (the conservative choice: a larger N gives a larger
-      expected-max hurdle), plus ``extra_trials`` (effective trials from earlier attempts of the
-      same system, from the ledger).  Pass ``n_eff`` to override."""
+    * ``n_trials``: raw trials of *this* study (default: number of trial columns); pass the
+      study's evaluated-trial count when some trials have no return column (errors).
+    * ``extra_trials``: raw trials of earlier attempts of the same system (from the ledger).
+    * Gate hurdle SR0 = √(1/(T−1)) · E[max of ``n_trials + extra_trials``] (see
+      :class:`DSRResult`).  The eigen/cluster/Li–Ji effective N and the cross-sectional Sharpe
+      variance are computed for the diagnostics only."""
     m, cols = _matrix(returns_matrix)
     j = cols.index(selected) if isinstance(selected, str) else int(selected)
     sel = m[:, j]
     use = _usable(m)
     srs = sharpe_per_period(m[:, use], axis=0)
+    srs = np.atleast_1d(srs)
     var_sr = float(np.var(srs, ddof=1)) if srs.size > 1 else 0.0
     by = {meth: effective_n_trials(m, meth, corr_threshold=corr_threshold) for meth in methods}
-    ne = (max(by.values()) if by else float(use.sum())) if n_eff is None else float(n_eff)
-    ne += float(extra_trials)
-    sr = sharpe_per_period(sel)
+    n_study = float(m.shape[1] if n_trials is None else n_trials)
+    n_prior = float(extra_trials)
+    n_tot = n_study + n_prior
+    sr = float(sharpe_per_period(sel))
     sk, ku = metrics.skew_kurt(sel)
-    sk = 0.0 if not np.isfinite(sk) else sk
-    ku = 3.0 if not np.isfinite(ku) else ku
-    sr0 = expected_max_sharpe(ne, var_sr)
-    raw_n = int(m.shape[1] + extra_trials)
+    sk = 0.0 if not np.isfinite(sk) else float(sk)
+    ku = 3.0 if not np.isfinite(ku) else float(ku)
+    t = int(sel.size)
+    v0 = 1.0 / (t - 1) if t > 1 else float("nan")
+    sr0 = expected_max_sharpe(n_tot, v0)
     ann = math.sqrt(periods_per_year)
+    lenient = [by[k] for k in ("eigen", "cluster") if k in by]
+    ne = max(lenient) if lenient else float(use.sum())
+    sr0_nc = expected_max_sharpe(ne + n_prior, var_sr)
     return DSRResult(
-        dsr=psr(sr, sr0, sel.size, sk, ku),
-        dsr_raw_n=psr(sr, expected_max_sharpe(raw_n, var_sr), sel.size, sk, ku),
-        psr0=psr(sr, 0.0, sel.size, sk, ku), sr=float(sr), sr_annual=float(sr) * ann,
-        sr0=sr0, sr0_annual=sr0 * ann, var_sr=var_sr, n_eff=ne, n_eff_by_method=by,
-        n_trials_raw=raw_n, n_obs=int(sel.size), skew=float(sk), kurt=float(ku))
+        dsr=psr(sr, sr0, t, sk, ku), sr0=sr0, sr0_annual=sr0 * ann, v0=v0, n_trials=n_tot,
+        n_trials_study=n_study, n_trials_prior=n_prior, psr0=psr(sr, 0.0, t, sk, ku), sr=sr,
+        sr_annual=sr * ann, n_obs=t, skew=sk, kurt=ku, var_sr=var_sr, n_eff=ne, n_eff_by_method=by,
+        dsr_neff_cross=psr(sr, sr0_nc, t, sk, ku),
+        dsr_raw_cross=psr(sr, expected_max_sharpe(n_tot, var_sr), t, sk, ku),
+        sr0_neff_cross_annual=sr0_nc * ann, n_columns=int(m.shape[1]))
 
 
 def min_trl(sr: float, target_sr: float = 0.0, skew: float = 0.0, kurt: float = 3.0,
@@ -874,26 +918,45 @@ def sequential_sharpe_test(daily_new, expected_sr_annual: float, expected_sd: fl
 # =========================================================================== holdout band (§4.4)
 @dataclass
 class HoldoutBand:
-    """Pre-registered holdout pass band (DESIGN §4.4), frozen before checkpoint B.
+    """Pre-registered holdout pass band (DESIGN §4.4 v1.2), frozen before checkpoint B.
 
-    Holdout passes iff sharpe_annual ≥ sharpe_p10, monthly return at the fixed leverage ≥
-    ret_at_budget_p10, |max DD| ≤ max_dd_mag_p95, trades within [trades_lo, trades_hi]."""
+    Holdout passes iff sharpe_annual ≥ sharpe_lo, mean monthly return at the fixed leverage ≥
+    ret_at_budget_lo, |max DD| ≤ max_dd_mag_hi, trades within [trades_lo, trades_hi].
 
-    sharpe_p10: float              # annualised
-    ret_at_budget_p10: float       # mean monthly return of leverage·r
-    max_dd_mag_p95: float          # positive magnitude, UNlevered returns
+    The four limits share **one** tail level α (``tail_level``): the one-sided limits are the
+    α / (1 − α) quantiles and the trade range the α/2 … 1 − α/2 quantiles of the bootstrap
+    draws; α is the largest level at which ``joint_coverage`` ≥ ``target_coverage`` (≈ 90 %)
+    of the *joint* draws pass all four at once (red-team M3 / calibration R4).
+
+    ``p_pass_zero_edge``: probability that a zero-edge holdout (the same series de-meaned,
+    bootstrapped, run through :func:`holdout_check`) passes — the band's false-pass rate.
+    ``decisive`` is False when it exceeds ``max_zero_edge_pass`` (0.30)."""
+
+    sharpe_lo: float               # annualised
+    ret_at_budget_lo: float        # mean monthly return of leverage·r
+    max_dd_mag_hi: float           # positive magnitude, UNlevered returns
     trades_lo: float
     trades_hi: float
-    leverage: float                # k fixed from the dev CPCV paths (DESIGN §4.5 budget)
+    leverage: float                # k fixed from the source series (DESIGN §4.5 budget)
     horizon_days: int
     n_boot: int
     mean_block: float
     source: str
     sharpe_median: float
     seed: int
+    tail_level: float = float("nan")
+    target_coverage: float = 0.90
+    joint_coverage: float = float("nan")
+    trades_source: str = "none"
+    trades_joint: bool = False     # trade sums drawn with the same bootstrap indices as returns
+    p_pass_zero_edge: float = float("nan")
+    n_power: int = 0
+    max_zero_edge_pass: float = 0.30
+    decisive: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {k: (float(v) if isinstance(v, (np.floating,)) else v) for k, v in asdict(self).items()}
+        out = {k: (float(v) if isinstance(v, (np.floating,)) else v) for k, v in asdict(self).items()}
+        return {k: (bool(v) if isinstance(v, np.bool_) else v) for k, v in out.items()}
 
 
 def _selection_series(study) -> tuple[list[np.ndarray], str]:
@@ -908,23 +971,65 @@ def _selection_series(study) -> tuple[list[np.ndarray], str]:
     return [], "none"
 
 
+def _band_pass(sh, rab, ddm, tsum, lim) -> np.ndarray:
+    """Vectorised holdout_check over bootstrap draws (NaN statistics fail, like holdout_check)."""
+    ok = (sh >= lim["sharpe_lo"]) & (ddm <= lim["max_dd_mag_hi"])
+    if np.isfinite(lim["ret_at_budget_lo"]):
+        ok &= rab >= lim["ret_at_budget_lo"]
+    if tsum is not None:
+        ok &= (tsum >= lim["trades_lo"]) & (tsum <= lim["trades_hi"])
+    return ok
+
+
+def _band_limits(sh, rab, ddm, tsum, a: float) -> dict[str, float]:
+    return {"sharpe_lo": float(np.nanquantile(sh, a)) if np.isfinite(sh).any() else float("nan"),
+            "ret_at_budget_lo": float(np.nanquantile(rab, a)) if np.isfinite(rab).any() else float("nan"),
+            "max_dd_mag_hi": float(np.quantile(ddm, 1.0 - a)),
+            "trades_lo": float(np.quantile(tsum, a / 2.0)) if tsum is not None else float("nan"),
+            "trades_hi": float(np.quantile(tsum, 1.0 - a / 2.0)) if tsum is not None else float("nan")}
+
+
+def joint_tail_level(sh, rab, ddm, tsum=None, target: float = 0.90, iters: int = 40) -> tuple[float, float]:
+    """Largest common tail level α ∈ [0, 0.5] whose limits (see :class:`HoldoutBand`) let at
+    least ``target`` of the joint draws pass every criterion.  Returns (α, joint coverage).
+    Coverage is non-increasing in α, so bisection applies."""
+    def cov(a):
+        return float(np.mean(_band_pass(sh, rab, ddm, tsum, _band_limits(sh, rab, ddm, tsum, a))))
+    lo, hi = 0.0, 0.5
+    if cov(hi) >= target:
+        return hi, cov(hi)
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        if cov(mid) >= target:
+            lo = mid
+        else:
+            hi = mid
+    return lo, cov(lo)
+
+
 def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_boot: int = 4000, *,
                  trades_per_day=None, dd_budget: float = 0.10, seed: int = 12345,
-                 extra_series: np.ndarray | None = None, source: str = "wfo") -> HoldoutBand:
-    """Predictive distribution for a holdout of ``horizon_days`` (DESIGN §4.4).
+                 extra_series: np.ndarray | None = None, source: str = "wfo",
+                 target_coverage: float = 0.90, trades_source: str | None = None,
+                 n_power: int = 1000, max_zero_edge_pass: float = 0.30) -> HoldoutBand:
+    """Predictive distribution for a holdout of ``horizon_days`` (DESIGN §4.4 v1.2).
 
-    Each CPCV path contributes an equal share of ``n_boot`` stationary-bootstrap samples of
-    length ``horizon_days`` (so both between-path and within-path uncertainty enter).
-    The budget leverage k is solved on full-length bootstrap samples of the pooled paths
-    (§4.5) and then held fixed.  Trade-count range: 2.5–97.5 % of bootstrapped sums of the
-    daily trade-count series ``trades_per_day`` (array aligned with a dev day grid), or, given
-    a scalar rate, a Poisson 95 % interval.  ``extra_series`` overrides the path source.
+    Each source path contributes an equal share of ``n_boot`` stationary-bootstrap samples of
+    length ``horizon_days``.  The budget leverage k is solved on full-length bootstrap samples
+    of the pooled paths (§4.5) and then held fixed.  The four limits share one tail level set
+    on the joint draws (:func:`joint_tail_level`, ``target_coverage`` ≈ 0.90).
 
-    ``source="wfo"`` (default, decided 2026-09-24): the holdout exam runs the frozen
-    re-optimisation *procedure* with its scheduled re-fits (DESIGN §4.4 + §4.6.2), so the band
-    is built from the walk-forward OOS series that simulates exactly that procedure; CPCV paths
-    are the fallback when no WFO series exists.  ``source="cpcv"`` inverts the preference
-    (for systems validated with fixed parameters)."""
+    ``trades_per_day``: daily trade counts.  When it is aligned with a single source path (same
+    length — e.g. the WFO procedure's own daily counts, F4), the trade sums use the **same**
+    bootstrap indices as the returns (joint draws); otherwise they are bootstrapped separately
+    (a scalar gives a Poisson rate).  ``extra_series`` overrides the path source.
+
+    ``source="wfo"`` (default): the holdout exam runs the frozen re-optimisation *procedure*
+    (DESIGN §4.4 + §4.6.2), so the band is built from the walk-forward OOS series; CPCV paths
+    are the fallback when no WFO series exists.  ``source="cpcv"`` inverts the preference.
+
+    Power: ``n_power`` de-meaned (zero-edge) bootstrap draws of the same paths are run through
+    :func:`holdout_check`; ``p_pass_zero_edge`` is their pass rate."""
     rng = np.random.default_rng(seed)
     if extra_series is not None:
         paths, src = [np.asarray(extra_series, float)], "extra_series"
@@ -940,10 +1045,14 @@ def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_bo
         raise ValueError("study has no CPCV paths or WFO OOS returns")
     pooled = np.concatenate(paths)
     b = optimal_block_length(pooled)
+    tp = None if trades_per_day is None or np.ndim(trades_per_day) == 0 else np.asarray(trades_per_day, float)
+    aligned = tp is not None and len(paths) == 1 and tp.size == paths[0].size
     per = max(1, n_boot // len(paths))
-    hs, full = [], []
+    hs, idxs, full = [], [], []
     for p in paths:
-        hs.append(p[stationary_bootstrap_indices(p.size, b, per, rng, horizon_days)])
+        ix = stationary_bootstrap_indices(p.size, b, per, rng, horizon_days)
+        idxs.append(ix)
+        hs.append(p[ix])
         full.append(p[stationary_bootstrap_indices(p.size, b, max(1, min(n_boot, 2000) // len(paths)), rng)])
     hs_m = np.vstack(hs)
     full_len = min(len(f[0]) for f in full)
@@ -954,34 +1063,66 @@ def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_bo
     rab = _rows_mean_monthly(k * hs_m, dpm) if np.isfinite(k) else np.full(hs_m.shape[0], np.nan)
     ddm = -_rows_maxdd(hs_m)
     if trades_per_day is None:
-        lo_t, hi_t = float("nan"), float("nan")
+        tsum, tsrc = None, "none"
     elif np.ndim(trades_per_day) == 0:
         lam = float(trades_per_day) * horizon_days
-        lo_t, hi_t = float(sps.poisson.ppf(0.025, lam)), float(sps.poisson.ppf(0.975, lam))
+        tsum, tsrc = rng.poisson(lam, hs_m.shape[0]).astype(float), "poisson rate"
+    elif aligned:
+        tsum, tsrc = tp[idxs[0]].sum(axis=1), "aligned daily counts (joint)"
     else:
-        tp = np.asarray(trades_per_day, float)
-        bt = optimal_block_length(tp)
-        sums = tp[stationary_bootstrap_indices(tp.size, bt, n_boot, rng, horizon_days)].sum(axis=1)
-        lo_t, hi_t = (float(v) for v in np.quantile(sums, [0.025, 0.975]))
-    return HoldoutBand(
-        sharpe_p10=float(np.nanquantile(sh, 0.10)), ret_at_budget_p10=float(np.nanquantile(rab, 0.10)),
-        max_dd_mag_p95=float(np.quantile(ddm, 0.95)), trades_lo=lo_t, trades_hi=hi_t, leverage=float(k),
+        bt = optimal_block_length(tp) if tp.std() > 0 else 1.0
+        tsum = tp[stationary_bootstrap_indices(tp.size, bt, hs_m.shape[0], rng, horizon_days)].sum(axis=1)
+        tsrc = "daily counts (independent draws)"
+    alpha, cov = joint_tail_level(sh, rab, ddm, tsum, target_coverage)
+    lim = _band_limits(sh, rab, ddm, tsum, alpha)
+    band = HoldoutBand(
+        sharpe_lo=lim["sharpe_lo"], ret_at_budget_lo=lim["ret_at_budget_lo"], max_dd_mag_hi=lim["max_dd_mag_hi"],
+        trades_lo=lim["trades_lo"], trades_hi=lim["trades_hi"], leverage=float(k),
         horizon_days=int(horizon_days), n_boot=int(hs_m.shape[0]), mean_block=float(b), source=src,
-        sharpe_median=float(np.nanmedian(sh)), seed=seed)
+        sharpe_median=float(np.nanmedian(sh)), seed=seed, tail_level=float(alpha),
+        target_coverage=float(target_coverage), joint_coverage=float(cov),
+        trades_source=trades_source or tsrc, trades_joint=bool(aligned),
+        max_zero_edge_pass=float(max_zero_edge_pass))
+    # ---- power against a zero-edge holdout (de-meaned series through holdout_check)
+    if n_power > 0:
+        npw = max(1, n_power // len(paths))
+        passes, tot = 0, 0
+        for pi, p in enumerate(paths):
+            z = p - p.mean()
+            ix = stationary_bootstrap_indices(z.size, b, npw, rng, horizon_days)
+            ts_pw = (tp[ix].sum(axis=1) if aligned else
+                     (tsum[rng.integers(0, tsum.size, npw)] if tsum is not None else np.full(npw, np.nan)))
+            for r in range(npw):
+                passes += holdout_check(band, z[ix[r]], float(ts_pw[r]), periods_per_year)["pass"]
+                tot += 1
+        band.p_pass_zero_edge = passes / tot
+        band.n_power = tot
+        band.decisive = bool(band.p_pass_zero_edge <= max_zero_edge_pass)
+    return band
+
+
+_BAND_KEYS = {"sharpe_lo": "sharpe_p10", "ret_at_budget_lo": "ret_at_budget_p10", "max_dd_mag_hi": "max_dd_mag_p95"}
 
 
 def holdout_check(band: HoldoutBand | Mapping[str, Any], holdout_daily, n_trades: float,
                   periods_per_year: float = 260.0) -> dict[str, Any]:
-    """Apply a pre-registered band to realised holdout returns (only after checkpoint B)."""
+    """Apply a pre-registered band to realised holdout returns (only after checkpoint B).
+    Accepts v1.2 bands and v1.1 dicts (``sharpe_p10`` / ``ret_at_budget_p10`` / ``max_dd_mag_p95``)."""
     bd = band.as_dict() if isinstance(band, HoldoutBand) else dict(band)
+    for new, old in _BAND_KEYS.items():
+        if new not in bd and old in bd:
+            bd[new] = bd[old]
     a = _ret_array(holdout_daily)
     sh = metrics.sharpe(a, periods_per_year)
     dpm = max(1, int(round(periods_per_year / 12.0)))
     rab = float(_rows_mean_monthly((bd["leverage"] * a)[None, :], dpm)[0])
     dd = -metrics.max_drawdown(a)
-    checks = {"sharpe": sh >= bd["sharpe_p10"], "ret_at_budget": rab >= bd["ret_at_budget_p10"],
-              "max_dd": dd <= bd["max_dd_mag_p95"],
-              "trades": (not np.isfinite(bd["trades_lo"])) or bd["trades_lo"] <= n_trades <= bd["trades_hi"]}
+    tl, th = bd.get("trades_lo", float("nan")), bd.get("trades_hi", float("nan"))
+    tl = float("nan") if tl is None else tl
+    checks = {"sharpe": sh >= bd["sharpe_lo"],
+              "ret_at_budget": (not np.isfinite(bd["ret_at_budget_lo"])) or rab >= bd["ret_at_budget_lo"],
+              "max_dd": dd <= bd["max_dd_mag_hi"],
+              "trades": (not np.isfinite(tl)) or bool(tl <= n_trades <= th)}
     return {"pass": bool(all(checks.values())), "checks": checks,
             "values": {"sharpe": sh, "ret_at_budget": rab, "max_dd_mag": dd, "trades": n_trades}}
 

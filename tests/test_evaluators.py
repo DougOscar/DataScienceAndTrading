@@ -177,6 +177,22 @@ def test_rule_evaluator_sizing_by_risk_type():
         RuleEvaluator(SmaCrossD, symbol="EURUSD", timeframe="H1")
 
 
+@real
+@pytest.mark.parametrize("symbol,start", [("EURJPY", "2023-01-02"), ("EURJPY", None), ("GBPAUD", "2020-06-01")])
+def test_rule_evaluator_cross_at_week_open_and_data_start(symbol, start):
+    """m2 (Phase 1 red team, p08b): a non-USD-quoted cross whose first evaluation bar follows a
+    weekend gap (Monday start) or is the data start used to raise in the conversion lookup."""
+    warnings.filterwarnings("ignore")
+    evaluators.clear_cache()
+    try:
+        e = RuleEvaluator(SmaCross, symbol=symbol, timeframe="D1", start=start, end="2024-07-01", use_m1=False)
+        out = e({"fast": 20, "slow": 50})
+        assert out.daily.height > 300 and np.isfinite(out.daily["ret"].to_numpy()).all()
+        assert out.metrics["n_trades"] > 0
+    finally:
+        evaluators.clear_cache()
+
+
 # --------------------------------------------------------------------------- SyntheticEvaluator
 def test_synthetic_evaluator_ground_truth():
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, bumps=({"center": {"a": 5}, "height": 2.0, "width": 0.1},),

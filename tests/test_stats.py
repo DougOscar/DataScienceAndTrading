@@ -102,11 +102,42 @@ def test_dsr_from_matrix_reports_both():
     m[:, 7] += 0.001
     frame = pl.DataFrame({f"t{i}": m[:, i] for i in range(30)})
     res = S.dsr_from_matrix(frame, "t7")
-    assert res.n_eff == max(res.n_eff_by_method.values())
-    assert res.dsr_raw_n <= res.psr0 and res.dsr <= res.psr0
+    # R1 gate: V0 = 1/(T−1), N = raw column count
+    assert res.n_trials == 30 and res.v0 == pytest.approx(1 / 1999)
+    assert res.sr0 == pytest.approx(S.expected_max_sharpe(30, 1 / 1999))
+    assert res.dsr == res.dsr_raw_n and res.dsr <= res.psr0
+    # diagnostics
+    assert res.n_eff == max(res.n_eff_by_method["eigen"], res.n_eff_by_method["cluster"])
+    assert set(res.n_eff_by_method) == {"eigen", "cluster", "liji"}
     assert res.sr_annual == pytest.approx(metrics.sharpe(m[:, 7]))
     more = S.dsr_from_matrix(frame, "t7", extra_trials=500)
-    assert more.dsr < res.dsr
+    assert more.dsr < res.dsr and more.n_trials == 530 and more.n_trials_prior == 500
+    explicit = S.dsr_from_matrix(frame, "t7", n_trials=45)
+    assert explicit.n_trials_study == 45 and explicit.dsr < res.dsr
+
+
+def test_dsr_hurdle_ignores_correlation_structure_and_grid_heterogeneity():
+    """R1 / F2: the hurdle depends only on T and raw N — not on how correlated the trials are,
+    nor on genuine Sharpe differences across the grid (which inflated V_cross)."""
+    rng = np.random.default_rng(41)
+    T = 2340
+    common = rng.normal(0, 0.006, (T, 1))
+    corr = common + rng.normal(0, 0.003, (T, 40))
+    hetero = rng.normal(0, 0.006, (T, 40)) + np.linspace(0, 0.0006, 40)
+    a = S.dsr_from_matrix(corr, 0)
+    b = S.dsr_from_matrix(hetero, 39)
+    assert a.sr0 == pytest.approx(b.sr0) == pytest.approx(S.expected_max_sharpe(40, 1 / (T - 1)))
+    assert b.var_sr > 1 / (T - 1)            # V_cross inflated by the planted gradient …
+    assert b.dsr > b.dsr_raw_cross           # … which used to deflate a real edge (F2)
+
+
+def test_dsr_rejects_annualised_sharpe():
+    """m4 regression: an annualised Sharpe passed as per-period must raise."""
+    with pytest.raises(ValueError, match="annualised"):
+        S.dsr(sr=2.0, n=2340, var_sr=1e-3, n_eff=10)
+    with pytest.raises(ValueError):
+        S.dsr(sr=-1.5, n=2340, var_sr=1e-3, n_eff=10)
+    assert 0.0 <= S.dsr(sr=0.1, n=2340, var_sr=1e-3, n_eff=10) <= 1.0
 
 
 # ------------------------------------------------------------------ PBO
@@ -360,16 +391,41 @@ class _MiniStudy:
         self.wfo_oos = pl.DataFrame()
 
 
-def test_holdout_band_is_calibrated():
+def test_holdout_band_is_jointly_calibrated():
+    """M3 / R4: one common tail level so that ≈ 90 % of holdouts from the same process pass
+    all four criteria at once (the v1.1 marginal p10/p10/p95/95 % band passed ≈ 78 %)."""
     rng = np.random.default_rng(22)
-    mu, sd = 0.0008, 0.008
+    mu, sd, rate = 0.0008, 0.008, 0.4
     study = _MiniStudy([rng.normal(mu, sd, 2000) for _ in range(5)])
-    band = S.holdout_band(study, 260, 260.0, n_boot=2000, trades_per_day=0.4)
-    assert band.sharpe_p10 < band.sharpe_median
-    assert band.trades_lo < 0.4 * 260 < band.trades_hi
-    assert band.max_dd_mag_p95 > 0 and band.leverage > 0
-    passes = [S.holdout_check(band, rng.normal(mu, sd, 260), 104)["checks"]["sharpe"] for _ in range(300)]
-    assert 0.83 < np.mean(passes) < 0.96        # ≈ 90 % by construction of p10
+    band = S.holdout_band(study, 260, 260.0, n_boot=2000, trades_per_day=rate, n_power=300)
+    assert band.sharpe_lo < band.sharpe_median
+    assert band.trades_lo < rate * 260 < band.trades_hi
+    assert band.max_dd_mag_hi > 0 and band.leverage > 0
+    assert 0.0 < band.tail_level < 0.10 and band.joint_coverage == pytest.approx(0.90, abs=0.01)
+    passes = [S.holdout_check(band, rng.normal(mu, sd, 260), rng.poisson(rate * 260))["pass"] for _ in range(400)]
+    assert 0.84 < np.mean(passes) < 0.96
+    assert 0.0 <= band.p_pass_zero_edge <= 1.0 and band.n_power == 300
+
+
+def test_joint_tail_level_is_stricter_than_marginals():
+    rng = np.random.default_rng(5)
+    sh, rab, dd = rng.normal(size=(3, 5000))
+    t = rng.normal(100, 10, 5000)
+    a, cov = S.joint_tail_level(sh, rab, dd, t, 0.90)
+    assert a < 0.10 and cov == pytest.approx(0.90, abs=0.005)
+    a1, _ = S.joint_tail_level(sh, rab, dd, None, 0.90)
+    assert a1 > a                                 # fewer criteria → wider tail per criterion
+
+
+def test_holdout_band_power_against_zero_edge():
+    """M3: power is computed by running de-meaned bootstrap draws through holdout_check."""
+    rng = np.random.default_rng(24)
+    strong = _MiniStudy([rng.normal(0.0025, 0.008, 2000)])      # SR ≈ 5
+    weak = _MiniStudy([rng.normal(0.0002, 0.008, 2000)])        # SR ≈ 0.4
+    bs = S.holdout_band(strong, 260, n_boot=1000, n_power=400)
+    bw = S.holdout_band(weak, 260, n_boot=1000, n_power=400)
+    assert bs.p_pass_zero_edge < 0.05 and bs.decisive is True
+    assert bw.p_pass_zero_edge > 0.30 and bw.decisive is False
 
 
 def test_holdout_band_trade_series():
@@ -378,8 +434,17 @@ def test_holdout_band_trade_series():
     tpd = rng.poisson(0.5, 1000).astype(float)
     band = S.holdout_band(study, 260, n_boot=500, trades_per_day=tpd)
     assert band.trades_lo < 130 < band.trades_hi
+    assert band.trades_joint is True              # one path, same length → same bootstrap indices
+    two = _MiniStudy([rng.normal(0.0005, 0.01, 1000), rng.normal(0.0005, 0.01, 1000)])
+    assert S.holdout_band(two, 260, n_boot=500, trades_per_day=tpd, n_power=0).trades_joint is False
 
 
+def test_holdout_check_accepts_v11_band_keys():
+    old = {"sharpe_p10": 0.0, "ret_at_budget_p10": -1.0, "max_dd_mag_p95": 0.5, "trades_lo": 10,
+           "trades_hi": 20, "leverage": 1.0}
+    rng = np.random.default_rng(1)
+    out = S.holdout_check(old, rng.normal(0.001, 0.005, 260), 15)
+    assert out["pass"] is True
 # ------------------------------------------------------------------ component nulls
 def test_random_selectivity_null_draws_exact_selectivity():
     rng = np.random.default_rng(24)

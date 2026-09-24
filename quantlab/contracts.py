@@ -116,6 +116,7 @@ class StudyResult:
     selected_params: dict[str, Any]
     selection: dict[str, Any]   # method, plateau_score, neighbourhood, objective values
     cpcv_paths: pl.DataFrame    # date, path_id, ret — OOS returns of the *selection procedure*
-    wfo_oos: pl.DataFrame       # date, ret, refit_id — simulated re-optimisation schedule
+    wfo_oos: pl.DataFrame       # date, ret, refit_id, n_trades (entries; null = unavailable) — re-optimisation schedule
     wfo_params: pl.DataFrame    # refit_id, refit_date, train_start, train_end, param_<name>...
-    meta: dict[str, Any]        # cv scheme, schedule, n_trials, seeds, runtime, cost version
+    meta: dict[str, Any]        # cv scheme, schedule, n_trials, seeds, runtime, cost version, book/system/
+                                # issue/attempt, space, candidate_set(_data_dependent), embargo_capped

@@ -17,7 +17,7 @@ Phase 1 and raise ``NotImplementedError``.
 
 Trials and the ledger
 ---------------------
-Every configuration the search touches is a trial and is recorded with
+Every configuration the search (see "Search methods" below) touches is a trial and is recorded with
 ``ledger.TrialRecorder`` — status one of:
 
 * ``ok``          evaluated; passes the minimum-trade constraint on the full window;
@@ -105,19 +105,61 @@ Walk-forward re-optimisation (``WFOConfig``, DESIGN §4.6)
 Refit dates start at ``first date + min_train`` and repeat every ``refit_every``.  At
 refit date *d* the selection procedure sees only rows with date < *d* (anchored: from
 the first date; rolling: from *d* − ``window_length``) and its pick trades rows
-[*d*, next refit).  The switch is modelled as adopting the new configuration's book at
-*d* (its return on *d* includes positions it opened earlier — a documented
-simplification; the rule-based columns are evaluated continuously).  Drift diagnostics:
-normalised Euclidean distance (unit coordinates / √d) between consecutive selections.
+[*d*, next refit).  **This holds only if the candidate set (the columns of the matrix)
+does not itself depend on the data** — ``grid``, ``sobol`` and ``random`` candidate sets
+are fixed before any evaluation; a ``tpe`` candidate set is chosen with the full-dev
+objective, so it already encodes the test folds / the future (red-team B3, probe p07:
++0.17 Sharpe of spurious "OOS" under a zero-edge null).  ``meta["candidate_set_data_
+dependent"]`` flags this and the gates SKIP the OOS gates for such studies.  The switch
+is modelled as adopting the new configuration's book at *d* (its return on *d* includes
+positions it opened earlier — a documented simplification; the rule-based columns are
+evaluated continuously).  ``wfo_oos.n_trades`` = entries of the active configuration on
+each OOS day (the procedure's own trade counts, input to the holdout band).  Drift
+diagnostics: normalised Euclidean distance (unit coordinates / √d) between consecutive
+selections.
+
+Search methods (candidate sets)
+-------------------------------
+* ``grid``   every grid point (≤ 3 params unless ``allow_large_grid``);
+* ``sobol``  ``n_trials`` distinct configurations from a scrambled Sobol sequence
+             (``scipy.stats.qmc``, seeded), mapped onto the space: numeric grids /
+             categoricals get equal-width cells per level, continuous floats linear or
+             log-uniform, log-ints log-uniform then floored.  Data-independent;
+* ``random`` same mapping with iid uniforms (seeded).  Data-independent;
+* ``tpe``    Optuna TPE on the full-dev objective — exploration only (data-dependent);
+* ``auto``   (default) ``grid`` for ≤ 3 all-discrete params, else ``sobol``.
+
+For sobol/random, duplicate configurations (discrete spaces) are dropped and the
+sequence continues until ``n_trials`` distinct configurations exist; invalid ones
+(``space.constraint``) are logged as ``invalid`` trials and count toward ``n_trials``
+(same convention as grid and TPE).
+
+Worker processes (F1)
+---------------------
+``n_jobs > 1`` uses a **spawn** process pool whose children start with
+``POLARS_MAX_THREADS=1`` (and Numba/OpenMP/BLAS/Rayon caps) in their environment, set
+in the parent only for the instant each child is launched — a forked child inherits the
+parent's already-initialised all-core Polars pool, which oversubscribed the box 8×16.
+Consequence of spawn: a script that calls :func:`run_study` with ``n_jobs > 1`` needs an
+``if __name__ == "__main__":`` guard, and the evaluator must be importable by reference.
+An evaluator defined in an interactive ``__main__`` (notebook / REPL) cannot be
+unpickled by a spawned child; for those the pool falls back to ``fork`` with a warning
+(``QUANTLAB_MP_START=fork|spawn`` forces a method).
 """
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import logging
 import math
+import multiprocessing
+import multiprocessing.context
 import os
+import pickle
+import sys
+import threading
 import time
 import traceback
 import warnings
@@ -137,7 +179,8 @@ __all__ = [
     "Param", "IntParam", "FloatParam", "CategoricalParam", "SearchSpace",
     "Objective", "PlateauConfig", "CPCVConfig", "WFOConfig", "CPCVSplit",
     "neighbourhoods", "plateau_select", "cpcv_splits", "cpcv_path_map", "cpcv_paths",
-    "walk_forward", "run_study", "StudyError",
+    "walk_forward", "run_study", "StudyError", "candidate_set", "METHODS", "DATA_INDEPENDENT_METHODS",
+    "WORKER_THREAD_ENV",
 ]
 
 log = logging.getLogger("quantlab.opt")
@@ -205,6 +248,26 @@ class Param:
         if self.log:
             return (math.log(x) - math.log(lo)) / (math.log(hi) - math.log(lo))
         return (x - lo) / (hi - lo)
+
+    def from_unit(self, u: float) -> Any:
+        """Map a uniform ``u`` in [0, 1) onto this parameter (Sobol / random candidate sets).
+
+        Discrete levels (categoricals, ints, stepped floats) get equal-width cells; continuous
+        floats are linear or log-uniform; log-ints are log-uniform on [low, high + 1) floored.
+        """
+        u = min(max(float(u), 0.0), 1.0 - 1e-12)
+        if self.kind == "categorical":
+            return self.choices[int(u * len(self.choices))]
+        if self.log:
+            lo, hi = float(self.low), float(self.high)
+            if self.kind == "int":
+                v = math.exp(math.log(lo) + u * (math.log(hi + 1.0) - math.log(lo)))
+                return int(min(max(math.floor(v), int(lo)), int(hi)))
+            return float(math.exp(math.log(lo) + u * (math.log(hi) - math.log(lo))))
+        if self.discrete:
+            vals = self.grid_values()
+            return vals[int(u * len(vals))]
+        return float(self.low + u * (self.high - self.low))
 
     def suggest(self, trial: Any) -> Any:
         if self.kind == "categorical":
@@ -297,6 +360,10 @@ class SearchSpace:
     def distributions(self) -> dict[str, Any]:
         return {p.name: p.distribution() for p in self.params}
 
+    def from_unit(self, u: Sequence[float]) -> dict[str, Any]:
+        """A configuration from one point of the unit hypercube (one coordinate per param)."""
+        return {p.name: p.from_unit(x) for p, x in zip(self.params, u)}
+
     def unit_coords(self, params_list: Sequence[dict[str, Any]]) -> np.ndarray:
         return np.array([[p.unit(pp[p.name]) for p in self.params] for pp in params_list], dtype=float
                         ).reshape(len(params_list), len(self.params))
@@ -305,6 +372,73 @@ class SearchSpace:
         c = self.constraint
         return {"params": [p.to_json() for p in self.params],
                 "constraint": None if c is None else getattr(c, "__name__", repr(c))}
+
+
+DATA_INDEPENDENT_METHODS = ("grid", "sobol", "random")
+METHODS = DATA_INDEPENDENT_METHODS + ("tpe",)
+
+
+def candidate_set(space: SearchSpace, n: int, *, method: str = "sobol", seed: int = 0,
+                  max_draws: Optional[int] = None) -> list[dict[str, Any]]:
+    """``n`` distinct configurations of ``space`` fixed before any evaluation (B3).
+
+    ``method="sobol"``: scrambled Sobol points (``scipy.stats.qmc.Sobol``, seeded by ``seed``),
+    drawn in power-of-two blocks (the sequence's balance property holds for every prefix of
+    size 2^m); ``"random"``: iid uniforms from ``numpy.random.default_rng(seed)``.  Each point
+    is mapped by :meth:`SearchSpace.from_unit`; duplicates (discrete spaces) are dropped and
+    drawing continues until ``n`` distinct configurations exist or ``max_draws`` points were
+    drawn (default ``max(64·n, 65536)``; a warning reports a short set, e.g. a discrete space
+    smaller than ``n``).  Validity is *not* checked here (invalid configurations are part of
+    the searched space and are logged as ``invalid`` trials).  The first *k* configurations do
+    not depend on ``n`` (the sequence is the same), so a resumed study with a larger ``n``
+    extends the same candidate set.
+    """
+    if method not in ("sobol", "random"):
+        raise ValueError("candidate_set method must be 'sobol' or 'random'")
+    n = int(n)
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    d = len(space.params)
+    if method == "sobol":
+        from scipy.stats import qmc
+        eng = qmc.Sobol(d, scramble=True, rng=np.random.default_rng(seed))
+        draw = eng.random
+    else:
+        rng = np.random.default_rng(seed)
+        draw = lambda m: rng.random((m, d))   # noqa: E731
+    block = 1 << max(0, (n - 1).bit_length())
+    cap = int(max_draws) if max_draws is not None else max(64 * n, 1 << 16)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    drawn = 0
+    while len(out) < n and drawn < cap:
+        m = min(block, cap - drawn)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")          # qmc balance warning when the cap truncates
+            U = draw(m)
+        drawn += m
+        for u in U:
+            p = space.from_unit(u)
+            k = _pjson(p)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(p)
+            if len(out) == n:
+                break
+        block = drawn                                # doubling: every total drawn is 2^m
+    if len(out) < n:
+        warnings.warn(f"{method} candidate set: only {len(out)} distinct configurations after {drawn} draws "
+                      f"(requested {n}); the space may be smaller than n_trials", stacklevel=2)
+    return out
+
+
+def _resolve_method(method: Optional[str], space: SearchSpace) -> str:
+    if method in (None, "auto"):
+        return "grid" if len(space.params) <= 3 and space.is_discrete else "sobol"
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {METHODS + ('auto',)}, got {method!r}")
+    return method
 
 
 # =========================================================================== configs
@@ -532,6 +666,8 @@ class _Surface:
     dates: np.ndarray               # (T,) datetime64[D]
     R: np.ndarray                   # (T, M) returns (0 where the trial has none / failed)
     C: Optional[np.ndarray]         # (T, M) trades closed per day, or None
+    E: Optional[np.ndarray]         # (T, M) trades entered per day, or None
+    has_E: np.ndarray               # (M,) bool: the trial has an entry-count column
     has_ret: np.ndarray             # (M,) bool
     full_ok: np.ndarray             # (M,) bool: status == "ok"
     mode: str
@@ -567,7 +703,7 @@ def _wide_to_np(df: Optional[pl.DataFrame], ids: np.ndarray, dates: Optional[np.
 
 def _build_surface(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace,
                    selection: PlateauConfig, trade_counts: Optional[pl.DataFrame] = None,
-                   method: Optional[str] = None) -> _Surface:
+                   method: Optional[str] = None, entry_counts: Optional[pl.DataFrame] = None) -> _Surface:
     tr = trials.filter(pl.col("status") != "invalid").sort("trial_id")
     ids = tr["trial_id"].to_numpy()
     status = tr["status"].to_numpy().astype(str)
@@ -576,12 +712,15 @@ def _build_surface(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpa
     C = None
     if trade_counts is not None and trade_counts.height:
         _, C, _ = _wide_to_np(trade_counts, ids, dates)
+    E, has_E = None, np.zeros(ids.size, dtype=bool)
+    if entry_counts is not None and entry_counts.height:
+        _, E, has_E = _wide_to_np(entry_counts, ids, dates)
     ok = status == "ok"
     R[:, ~ok & ~np.isin(status, ["low_trades"])] = 0.0
     mode = _resolve_mode(selection, space, params, method)
     nbr = neighbourhoods(space, params, PlateauConfig(**{**asdict(selection), "neighbourhood": mode}))
     return _Surface(trial_ids=ids, status=status, params=params, U=space.unit_coords(params), nbr=nbr,
-                    dates=dates, R=R, C=C, has_ret=has, full_ok=ok, mode=mode)
+                    dates=dates, R=R, C=C, E=E, has_E=has_E, has_ret=has, full_ok=ok, mode=mode)
 
 
 def _select_rows(S: _Surface, rows: np.ndarray, objective: Objective, cfg: PlateauConfig,
@@ -649,21 +788,26 @@ def cpcv_path_map(n_groups: int, k_test: int) -> np.ndarray:
     return out
 
 
-def _resolve_embargo(cv: CPCVConfig, trials: pl.DataFrame, T: int) -> tuple[int, int]:
+def _resolve_embargo(cv: CPCVConfig, trials: pl.DataFrame, T: int) -> tuple[int, int, dict[str, Any]]:
+    """``(embargo, purge, info)``; ``info`` = ``embargo_capped`` (the auto embargo — max holding
+    period of the ok trials — exceeded a quarter of a CPCV group and was cut: long-hold
+    systems are then under-purged, red-team m3), ``embargo_days_uncapped``, ``embargo_cap``."""
     cap = max(1, (T // cv.n_groups) // 4)
+    capped = False
     if cv.embargo_days is not None:
-        emb = int(cv.embargo_days)
+        emb = uncapped = int(cv.embargo_days)
     else:
         hold = 0.0
         if "m_hold_days_max" in trials.columns:
             h = trials.filter(pl.col("status") == "ok")["m_hold_days_max"].drop_nulls().drop_nans()
             hold = float(h.max()) if h.len() else 0.0
-        emb = max(1, int(math.ceil(hold)))
+        emb = uncapped = max(1, int(math.ceil(hold)))
         if emb > cap:
-            warnings.warn(f"auto embargo {emb}d capped at {cap}d (a quarter of a CPCV group)", stacklevel=3)
-            emb = cap
+            warnings.warn(f"auto embargo {emb}d capped at {cap}d (a quarter of a CPCV group); the OOS "
+                          f"gates will be SKIPPED — use fewer CPCV groups", stacklevel=3)
+            emb, capped = cap, True
     purge = emb if cv.purge_days is None else int(cv.purge_days)
-    return emb, purge
+    return emb, purge, {"embargo_capped": capped, "embargo_days_uncapped": uncapped, "embargo_cap": cap}
 
 
 def cpcv_paths(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace,
@@ -681,7 +825,7 @@ def cpcv_paths(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace,
     S = _surface or _build_surface(returns, trials, space, selection, trade_counts, method)
     cfg = PlateauConfig(**{**asdict(selection), "neighbourhood": S.mode})
     T = S.R.shape[0]
-    emb, purge = _resolve_embargo(cv, trials, T)
+    emb, purge, emb_info = _resolve_embargo(cv, trials, T)
     splits, groups = cpcv_splits(T, cv.n_groups, cv.k_test, embargo_days=emb, purge_days=purge)
     pmap = cpcv_path_map(cv.n_groups, cv.k_test)
     picks: list[Optional[int]] = []
@@ -717,7 +861,7 @@ def cpcv_paths(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace,
         parts.append(pl.DataFrame({"date": S.dates, "path_id": np.full(T, p, dtype=np.int32), "ret": ret}))
     paths = pl.concat(parts).with_columns(pl.col("date").cast(pl.Date)) if parts else pl.DataFrame()
     meta = {"n_groups": cv.n_groups, "k_test": cv.k_test, "n_splits": len(splits), "n_paths": int(pmap.shape[0]),
-            "embargo_days": emb, "purge_days": purge, "scheme": cv.describe(emb, purge),
+            "embargo_days": emb, "purge_days": purge, "scheme": cv.describe(emb, purge), **emb_info,
             "n_no_selection": int(sum(p is None for p in picks))}
     split_df = pl.DataFrame(rows, schema={
         "split_id": pl.Int64, "test_groups": pl.Utf8, "selected_trial": pl.Int64, "train_objective": pl.Float64,
@@ -735,15 +879,20 @@ def walk_forward(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace
                  schedule: WFOConfig = WFOConfig(), *, objective: Objective = Objective(),
                  selection: PlateauConfig = PlateauConfig(), trade_counts: Optional[pl.DataFrame] = None,
                  periods_per_year: float = 260.0, method: Optional[str] = None,
+                 entry_counts: Optional[pl.DataFrame] = None,
                  _surface: Optional[_Surface] = None) -> tuple[pl.DataFrame, pl.DataFrame, dict[str, Any]]:
     """Simulate the re-optimisation schedule (DESIGN §4.6) on the returns matrix.
 
-    Returns ``(wfo_oos, wfo_params, meta)``: ``wfo_oos`` (date, ret, refit_id);
+    Returns ``(wfo_oos, wfo_params, meta)``: ``wfo_oos`` (date, ret, refit_id, n_trades) —
+    ``n_trades`` = trades the active configuration *entered* on that OOS day (from
+    ``entry_counts``, wide ``date`` + ``t<id>``; null where unavailable, e.g. no
+    ``entry_ts`` in the evaluator's trades or no counts passed);
     ``wfo_params`` (refit_id, refit_date, train_start, train_end, test_end, selected_trial,
     param_<name>…, train_objective, plateau_score); ``meta`` with drift diagnostics.
-    Every refit sees only rows with date < refit_date.
+    Every refit sees only rows with date < refit_date (and, for a data-dependent candidate set
+    such as TPE's, the columns themselves were chosen with the full sample — see module docstring).
     """
-    S = _surface or _build_surface(returns, trials, space, selection, trade_counts, method)
+    S = _surface or _build_surface(returns, trials, space, selection, trade_counts, method, entry_counts)
     cfg = PlateauConfig(**{**asdict(selection), "neighbourhood": S.mode})
     dates = S.dates
     if dates.size == 0:
@@ -772,7 +921,14 @@ def walk_forward(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace
         sel = _select_rows(S, train, objective, cfg, periods_per_year)
         w = sel["index"]
         ret = S.R[test, w] if w is not None else np.zeros(test.size)
-        oos_parts.append(pl.DataFrame({"date": dates[test], "ret": ret, "refit_id": np.full(test.size, rid, dtype=np.int32)}))
+        if w is None:
+            ntr = pl.Series("n_trades", np.zeros(test.size), dtype=pl.Float64).cast(pl.Int64)
+        elif S.E is not None and S.has_E[w]:
+            ntr = pl.Series("n_trades", S.E[test, w]).round(0).cast(pl.Int64)
+        else:
+            ntr = pl.Series("n_trades", [None] * test.size, dtype=pl.Int64)
+        oos_parts.append(pl.DataFrame({"date": dates[test], "ret": ret, "refit_id": np.full(test.size, rid, dtype=np.int32),
+                                       "n_trades": ntr}))
         row = {"refit_id": rid, "refit_date": rd.astype(object), "train_start": dates[train[0]].astype(object),
                "train_end": dates[train[-1]].astype(object), "test_end": dates[test[-1]].astype(object),
                "selected_trial": int(S.trial_ids[w]) if w is not None else None}
@@ -784,7 +940,7 @@ def walk_forward(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace
         sel_units.append(S.U[w] if w is not None else None)
         rid += 1
     wfo_oos = (pl.concat(oos_parts).with_columns(pl.col("date").cast(pl.Date)) if oos_parts
-               else pl.DataFrame(schema={"date": pl.Date, "ret": pl.Float64, "refit_id": pl.Int32}))
+               else pl.DataFrame(schema={"date": pl.Date, "ret": pl.Float64, "refit_id": pl.Int32, "n_trades": pl.Int64}))
     wfo_params = pl.DataFrame(prow) if prow else pl.DataFrame()
     meta = {"schedule": asdict(schedule), "scheme": schedule.describe(), "n_refits": rid,
             **_drift(sel_units, space, [r["selected_trial"] for r in prow])}
@@ -815,12 +971,80 @@ def _drift(units: list, space: SearchSpace, picks: list) -> dict[str, Any]:
 # =========================================================================== evaluation plumbing
 _W: dict[str, Any] = {}
 
+# F1: thread caps every worker process must start with (before Polars / Numba / BLAS
+# initialise their pools — i.e. in the environment the child is *launched* with).
+WORKER_THREAD_ENV: dict[str, str] = {
+    "POLARS_MAX_THREADS": "1", "NUMBA_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "RAYON_NUM_THREADS": "1",
+}
+_ENV_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _capped_env() -> Iterator[None]:
+    """Set :data:`WORKER_THREAD_ENV` in this process's environment, restore on exit."""
+    with _ENV_LOCK:
+        saved = {k: os.environ.get(k) for k in WORKER_THREAD_ENV}
+        os.environ.update(WORKER_THREAD_ENV)
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+class _CappedSpawnProcess(multiprocessing.context.SpawnProcess):
+    # ProcessPoolExecutor launches spawn workers on demand (at submit, and to replace dead
+    # workers), not at construction — so the caps are applied around *each* launch.
+    def start(self) -> None:
+        with _capped_env():
+            super().start()
+
+
+class _CappedSpawnContext(multiprocessing.context.SpawnContext):
+    Process = _CappedSpawnProcess
+
+
+def _references_interactive_main(obj: Any) -> bool:
+    """True if pickling ``obj`` references ``__main__`` and ``__main__`` has no file (a notebook
+    / REPL): a spawned child could not import those globals."""
+    main = sys.modules.get("__main__")
+    if main is not None and getattr(main, "__file__", None) and "ipykernel" not in sys.modules:
+        return False
+    try:
+        blob = pickle.dumps(obj)
+    except Exception:
+        return False
+    return b"__main__" in blob
+
+
+def _pool_context(payload: Any) -> tuple[Any, str]:
+    forced = os.environ.get("QUANTLAB_MP_START", "").strip().lower()
+    if forced == "fork" or (not forced and _references_interactive_main(payload)):
+        if not forced:
+            warnings.warn("run_study: the evaluator references an interactive __main__ (notebook/REPL), which a "
+                          "spawned worker cannot import — using a fork pool; worker thread caps (F1) cannot be "
+                          "applied, so Polars may oversubscribe. Move the strategy into a module to fix.",
+                          stacklevel=4)
+        return multiprocessing.get_context("fork"), "fork"
+    return _CappedSpawnContext(), "spawn"
+
+
+def _worker_threads(_: Any = None) -> dict[str, Any]:
+    """Diagnostic run inside a worker: its real Polars pool size and the cap env vars."""
+    return {"pid": os.getpid(), "polars_threads": int(pl.thread_pool_size()),
+            **{k: os.environ.get(k) for k in WORKER_THREAD_ENV}}
+
 
 def _worker_init(evaluator: Any, cost: Any) -> None:
-    # Same pattern as tests/bench/_pool_worker.py: cap the per-process Polars pool
-    # before first use (N workers × all-core Polars pools oversubscribe the box),
-    # receive the evaluator config once, load its data once per worker.
-    os.environ.setdefault("POLARS_MAX_THREADS", "1")
+    # Receive the evaluator config once, load its data once per worker.  The thread caps
+    # are already in this process's environment from launch (spawn, F1); setting them
+    # here is only a fallback for fork pools and has no effect on an initialised Polars.
+    for k, v in WORKER_THREAD_ENV.items():
+        os.environ.setdefault(k, v)
     _W["ev"], _W["cost"], _W["init_error"] = evaluator, cost, None
     try:
         prep = getattr(evaluator, "prepare", None)
@@ -836,15 +1060,18 @@ def _worker_eval(params: dict[str, Any]) -> dict[str, Any]:
     return _evaluate(_W["ev"], params, _W["cost"])
 
 
-def _trade_counts(trades: pl.DataFrame, dates: np.ndarray) -> np.ndarray:
+def _trade_counts(trades: pl.DataFrame, dates: np.ndarray, col: Optional[str] = None) -> np.ndarray:
+    """Trades per row of ``dates`` by the server date of ``col`` (default: exit, i.e. trades
+    closed per day; a date between rows maps to the next row).  Skipped trades excluded."""
     out = np.zeros(dates.size)
     if trades is None or trades.height == 0 or dates.size == 0:
         return out
     t = trades
     if "skipped" in t.columns:
         t = t.filter(~pl.col("skipped"))
-    col = "exit_ts" if "exit_ts" in t.columns else ("date" if "date" in t.columns else None)
-    if col is None or t.height == 0:
+    if col is None:
+        col = "exit_ts" if "exit_ts" in t.columns else ("date" if "date" in t.columns else None)
+    if col is None or col not in t.columns or t.height == 0:
         return out
     s = t[col]
     xd = (s.dt.date() if s.dtype != pl.Date else s).to_numpy().astype("datetime64[D]")
@@ -860,6 +1087,8 @@ def _evaluate(ev: Any, params: dict[str, Any], cost: Any) -> dict[str, Any]:
         dates = daily["date"].cast(pl.Date).to_numpy().astype("datetime64[D]")
         ret = daily["ret"].cast(pl.Float64).fill_null(0.0).to_numpy()
         counts = _trade_counts(out.trades, dates)
+        has_entry = out.trades is not None and "entry_ts" in out.trades.columns
+        entries = _trade_counts(out.trades, dates, "entry_ts") if has_entry else None
         m: dict[str, float] = {}
         for k, v in (out.metrics or {}).items():
             try:
@@ -867,7 +1096,7 @@ def _evaluate(ev: Any, params: dict[str, Any], cost: Any) -> dict[str, Any]:
             except (TypeError, ValueError):
                 pass
         m.setdefault("n_trades", float(counts.sum()))
-        return {"ok": True, "dates": dates, "ret": ret, "counts": counts, "metrics": m}
+        return {"ok": True, "dates": dates, "ret": ret, "counts": counts, "entries": entries, "metrics": m}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}",
                 "traceback": traceback.format_exc(limit=6)}
@@ -883,6 +1112,7 @@ class _Rec:
     ret: Optional[np.ndarray] = None
     counts: Optional[np.ndarray] = None
     error: Optional[str] = None
+    entries: Optional[np.ndarray] = None
 
 
 class _Runner:
@@ -891,9 +1121,17 @@ class _Runner:
     def __init__(self, evaluator: Any, cost: Any, n_jobs: int):
         self.ev, self.cost, self.n_jobs = evaluator, cost, n_jobs
         self.pool: Optional[ProcessPoolExecutor] = None
+        self.start_method: Optional[str] = None
         if n_jobs > 1:
-            self.pool = ProcessPoolExecutor(max_workers=n_jobs, initializer=_worker_init,
+            ctx, self.start_method = _pool_context((evaluator, cost))
+            self.pool = ProcessPoolExecutor(max_workers=n_jobs, mp_context=ctx, initializer=_worker_init,
                                             initargs=(evaluator, cost))
+
+    def worker_threads(self) -> Optional[dict[str, Any]]:
+        """F1 diagnostic from one worker (None in-process)."""
+        if self.pool is None:
+            return None
+        return self.pool.submit(_worker_threads).result()
 
     def map(self, plist: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
         """Results in submission order, *streamed*: the caller records each trial as soon as
@@ -982,7 +1220,8 @@ class _Book:
         elif not res["ok"]:
             r = _Rec(tid, params, "error", error=res["error"])
         else:
-            r = _Rec(tid, params, "evaluated", dict(res["metrics"]), res["dates"], res["ret"], res["counts"])
+            r = _Rec(tid, params, "evaluated", dict(res["metrics"]), res["dates"], res["ret"], res["counts"],
+                     entries=res.get("entries"))
         self._classify(r)
         self.pending.append(r)
         self.seen[_pjson(params)] = r
@@ -1022,6 +1261,15 @@ class _Book:
         if aux_c:
             pl.concat(aux_c).with_columns(pl.col("date").cast(pl.Date)).write_parquet(
                 self.dir / f"opt_aux-counts-{first:06d}.parquet")
+        # entries: one row per (trial, day with entries) + a sentinel row (n = 0 on the first
+        # date) so a trial with entry counts but zero entries is still known to have them
+        aux_e = [pl.DataFrame({"trial_id": np.full(int((r.entries > 0).sum()) + 1, r.trial_id, dtype=np.int64),
+                               "date": np.concatenate([r.dates[:1], r.dates[r.entries > 0]]),
+                               "n": np.concatenate([[0.0], r.entries[r.entries > 0]])})
+                 for r in self.pending if r.entries is not None and r.dates is not None and r.dates.size]
+        if aux_e:
+            pl.concat(aux_e).with_columns(pl.col("date").cast(pl.Date)).write_parquet(
+                self.dir / f"opt_aux-entries-{first:06d}.parquet")
         errs = [{"trial_id": r.trial_id, "error": r.error} for r in self.pending if r.error]
         if errs:
             pl.DataFrame(errs).write_parquet(self.dir / f"opt_aux-errors-{first:06d}.parquet")
@@ -1044,6 +1292,8 @@ def _load_existing(study_id: str, studies_dir: Optional[Path]) -> list[_Rec]:
     d = (Path(studies_dir) if studies_dir else config.STUDIES_DIR) / study_id
     cparts = sorted(d.glob("opt_aux-counts-*.parquet"))
     counts = pl.concat([pl.read_parquet(p) for p in cparts]) if cparts else None
+    nparts = sorted(d.glob("opt_aux-entries-*.parquet"))
+    entries = pl.concat([pl.read_parquet(p) for p in nparts]) if nparts else None
     eparts = sorted(d.glob("opt_aux-errors-*.parquet"))
     errors = dict(pl.concat([pl.read_parquet(p) for p in eparts]).iter_rows()) if eparts else {}
     mcols = [c for c in trials.columns if c.startswith("m_")]
@@ -1063,6 +1313,12 @@ def _load_existing(study_id: str, studies_dir: Optional[Path]) -> list[_Rec]:
                 if c.height:
                     pos = np.searchsorted(r.dates, c["date"].to_numpy().astype("datetime64[D]"))
                     np.add.at(r.counts, np.clip(pos, 0, r.dates.size - 1), c["n"].to_numpy())
+            if entries is not None:
+                e = entries.filter(pl.col("trial_id") == tid)
+                if e.height:
+                    r.entries = np.zeros(r.dates.size)
+                    pos = np.searchsorted(r.dates, e["date"].to_numpy().astype("datetime64[D]"))
+                    np.add.at(r.entries, np.clip(pos, 0, r.dates.size - 1), e["n"].to_numpy())
         out.append(r)
     return out
 
@@ -1083,7 +1339,7 @@ def _trials_frame(recs: Sequence[_Rec], space: SearchSpace) -> pl.DataFrame:
 
 
 def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, issue: int, attempt: int,
-              method: str = "grid", n_trials: Optional[int] = None, seed: int = 0, n_jobs: Any = "auto",
+              method: Optional[str] = "auto", n_trials: Optional[int] = None, seed: int = 0, n_jobs: Any = "auto",
               cv: CPCVConfig = CPCVConfig(), wfo: Optional[WFOConfig] = WFOConfig(),
               objective: Objective = Objective(), min_trades: Optional[float] = None,
               selection: PlateauConfig = PlateauConfig(), cost: Any = None,
@@ -1093,10 +1349,15 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
               ledger_dir: Optional[Path] = None, studies_dir: Optional[Path] = None) -> StudyResult:
     """Run a fully logged study and assemble a :class:`contracts.StudyResult`.
 
+    ``method="auto"`` (default): ``grid`` for ≤ 3 all-discrete params, else ``sobol``.
     ``method="grid"`` enumerates ``space.grid()`` (≤ 3 params unless ``allow_large_grid``);
+    ``method="sobol"`` / ``"random"`` evaluate :func:`candidate_set` (``n_trials`` distinct
+    configurations, seeded, fixed before any evaluation);
     ``method="tpe"`` runs a seeded Optuna TPE sampler for ``n_trials`` distinct
     configurations on the full-dev objective, asked/told in fixed batches of
     ``tpe_batch`` (independent of ``n_jobs`` → identical results for any ``n_jobs``).
+    TPE's candidate set is data-dependent (``meta["candidate_set_data_dependent"]``): its
+    CPCV / walk-forward "OOS" is contaminated (B3) and the gates skip the OOS gates.
     ``storage`` (Optuna RDB URL, e.g. ``sqlite:///…``) makes the sampler state durable;
     ``resume=True`` continues an existing study id from its recorded trials.
     ``min_trades`` overrides ``objective.min_trades``.  ``wfo=None`` skips the walk-forward.
@@ -1106,8 +1367,8 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         raise NotImplementedError(
             "run_study: evaluators with requires_refit=True (ML, fit per window) are not supported in "
             "Phase 1 — the rule-based path evaluates each parameter set once on the dev window.")
-    if method not in ("grid", "tpe"):
-        raise ValueError("method must be 'grid' or 'tpe'")
+    method_requested = method
+    method = _resolve_method(method, space)
     bname = config.get_book(book).name
     if config.get_book(getattr(evaluator, "book", bname)).name != bname:
         raise ValueError(f"evaluator book {evaluator.book!r} != study book {book!r}")
@@ -1116,12 +1377,15 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     grid: list[dict[str, Any]] = []
     if method == "grid":
         if len(space.params) > 3 and not allow_large_grid:
-            raise ValueError("grid search is for <= 3 free parameters; use method='tpe' (or allow_large_grid=True)")
+            raise ValueError("grid search is for <= 3 free parameters; use method='sobol' (or allow_large_grid=True)")
         grid = space.grid()
         if n_trials is not None and n_trials != len(grid):
             raise ValueError(f"grid has {len(grid)} configurations but n_trials={n_trials}")
     elif not n_trials:
-        raise ValueError("method='tpe' needs n_trials")
+        raise ValueError(f"method={method!r} needs n_trials")
+    elif method in ("sobol", "random"):
+        grid = candidate_set(space, n_trials, method=method, seed=seed)
+    data_dependent = method not in DATA_INDEPENDENT_METHODS
     jobs = _auto_jobs(n_jobs)
     ppy = float(evaluator.periods_per_year)
     sid = study_id or ledger.new_study_id(bname, issue, attempt)
@@ -1143,21 +1407,26 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
             ledger_dir=ledger_dir, study_id=sid, book=bname, system=system, issue=issue, attempt=attempt,
             parent_study=parent_study, dev_window=dev_window, cost_model_version=cost_version,
             cv_scheme=f"{cv_plan}+{wfo_desc}", search_space=space.to_json(), method=method,
-            n_trials_planned=len(grid) if method == "grid" else n_trials, seed=seed,
+            n_trials_planned=len(grid) if method != "tpe" else n_trials, seed=seed,
+            candidate_set=method, candidate_set_data_dependent=data_dependent,
             objective=objective.describe(), selection=selection.describe(), evaluator=_py(ev_desc), notes=notes)
 
     bk = _Book(sid, studies_dir, space, objective, ppy, checkpoint_every)
     if resume:
         bk.restore(_load_existing(sid, studies_dir))
     runner = _Runner(evaluator, cost, jobs)
+    worker_threads = None
     n_dupes = 0
     status = "aborted"
     try:
-        if method == "grid":
+        if runner.pool is not None:
+            worker_threads = runner.worker_threads()
+        if method != "tpe":
             todo = [p for p in grid if _pjson(p) not in bk.seen]
             valid = [p for p in todo if space.is_valid(p)]
             if valid:
-                log.info("study %s: %d grid configurations (%d valid) on %d worker(s)", sid, len(todo), len(valid), jobs)
+                log.info("study %s: %d %s configurations (%d valid) on %d worker(s)", sid, len(todo), method,
+                         len(valid), jobs)
             for i in range(0, len(todo), max(checkpoint_every, 1)):
                 chunk = todo[i:i + checkpoint_every]
                 vchunk = [p for p in chunk if space.is_valid(p)]
@@ -1182,12 +1451,13 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     trials = _trials_frame(recs, space)
     returns = _matrix(recs, "ret")
     tcounts = _matrix(recs, "counts")
+    ecounts = _matrix(recs, "entries")
     evaluated = [r for r in recs if r.ret is not None]
     if not evaluated:
         raise StudyError(f"study {sid}: no configuration could be evaluated "
                          f"(errors: {[r.error for r in recs if r.error][:3]})")
 
-    S = _build_surface(returns, trials, space, selection, tcounts, method)
+    S = _build_surface(returns, trials, space, selection, tcounts, method, ecounts)
     cfg = PlateauConfig(**{**asdict(selection), "neighbourhood": S.mode})
     full = _select_rows(S, np.arange(S.R.shape[0]), objective, cfg, ppy)
     if full["index"] is None:
@@ -1220,8 +1490,12 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     med_trades = float(ok_trades["m_n_trades"].median()) if ok_trades.height and "m_n_trades" in ok_trades.columns else float("nan")
     budget = med_trades / len(space.params) / cv.n_groups * (cv.n_groups - cv.k_test) if med_trades == med_trades else float("nan")
     meta = {
-        "study_id": sid, "cv_scheme": cv_scheme, "cpcv": cmeta, "cpcv_splits": splits_df,
-        "wfo": wmeta, "method": method, "seed": seed, "tpe_batch": tpe_batch if method == "tpe" else None,
+        "study_id": sid, "book": bname, "system": system, "issue": issue, "attempt": attempt,
+        "space": space.to_json(), "candidate_set": method, "candidate_set_data_dependent": data_dependent,
+        "embargo_capped": bool(cmeta["embargo_capped"]), "embargo_days_uncapped": int(cmeta["embargo_days_uncapped"]),
+        "cv_scheme": cv_scheme, "cpcv": cmeta, "cpcv_splits": splits_df,
+        "wfo": wmeta, "method": method, "method_requested": method_requested, "seed": seed,
+        "tpe_batch": tpe_batch if method == "tpe" else None,
         "n_trials": len(recs), "n_ok": counts["ok"], "n_low_trades": counts["low_trades"],
         "n_invalid": counts["invalid"], "n_error": counts["error"], "n_tpe_duplicates": n_dupes,
         "errors": [{"trial_id": r.trial_id, "error": r.error} for r in recs if r.error][:50],
@@ -1230,11 +1504,14 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         "dev_window": [str(S.dates[0]), str(S.dates[-1])], "evaluator": ev_desc,
         "trade_counts": tcounts, "median_trades_ok": med_trades,
         "train_trades_per_param_per_fold": budget, "resumed": resume, "storage": storage,
+        "mp_start_method": runner.start_method, "worker_threads": worker_threads,
     }
     ledger.log_event(sid, "selection", ledger_dir=ledger_dir, selected_params=selected,
                      selection=_py({k: v for k, v in sel_info.items()}), cv_scheme=cv_scheme,
                      cpcv_paths=cmeta["n_paths"], cpcv_embargo_days=cmeta["embargo_days"],
-                     cpcv_purge_days=cmeta["purge_days"], wfo_refits=wmeta.get("n_refits"),
+                     cpcv_purge_days=cmeta["purge_days"], embargo_capped=meta["embargo_capped"],
+                     embargo_days_uncapped=meta["embargo_days_uncapped"], candidate_set=method,
+                     candidate_set_data_dependent=data_dependent, wfo_refits=wmeta.get("n_refits"),
                      wfo_drift_mean=wmeta.get("drift_mean"), wfo_drift_max=wmeta.get("drift_max"),
                      dev_window_actual=meta["dev_window"], runtime_s=round(runtime, 2), n_jobs=jobs)
     return StudyResult(study_id=sid, param_names=space.names, trials=trials, returns=returns,

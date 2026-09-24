@@ -8,10 +8,14 @@ Two things live here:
   exists, a documented fallback with ``calibrated=False``.
 * :class:`CostModel` — the *calibratable* knobs applied on top of a spec's raw
   numbers: a spread multiplier + additive floor (the bar's own spread column is
-  optimistic — DESIGN §4.3), slippage on stop fills, and a swap sensitivity
-  multiplier (only *current* swap rates are ever known).  ``CostModel.stressed()``
-  implements the cost-stress gate (DESIGN §4.2: Sharpe > 0.5 at 1.5x spread + 1pt
-  slippage).
+  optimistic — DESIGN §4.3), slippage (in ``slippage_points``, the engine's own
+  unit — see ``engine._run_core``) applied adversely to **every market fill**
+  (entries, signal/time/session-flatten exits, and stop fills; targets never
+  slip — red-team M2), and a swap sensitivity multiplier (only *current* swap
+  rates are ever known).  ``CostModel.stressed()`` implements the cost-stress
+  gate (DESIGN §4.2: Sharpe > 0.5 at 1.5x spread + 1 pip adverse slippage on
+  every market fill); :func:`pip_points` converts the stress's pip count to
+  ``slippage_points`` per instrument.
 
 Versioning: every ``CostModel`` carries a ``version`` string that studies record
 in the ledger (DESIGN §8).  ``version`` is computed from a human-chosen
@@ -39,6 +43,7 @@ __all__ = [
     "load_instrument",
     "normalize_swap_mode",
     "swap_currency_for",
+    "pip_points",
 ]
 
 # --------------------------------------------------------------------------- InstrumentSpec
@@ -157,8 +162,14 @@ class CostModel:
     ``CostModel``s can therefore only ever share a ``version`` string if every
     one of these fields is identical -- e.g.
     ``CostModel(stop_fill="bar_extreme").version`` is
-    ``"fbs-v0-uncalibrated+stop_fill=bar_extreme"``, never the plain
-    ``"fbs-v0-uncalibrated"`` a stress-agnostic reader might mistake it for.
+    ``"fbs-v1-uncalibrated+stop_fill=bar_extreme"``, never the plain
+    ``"fbs-v1-uncalibrated"`` a stress-agnostic reader might mistake it for.
+    (The class default was bumped ``fbs-v0-uncalibrated`` -> ``fbs-v1-uncalibrated``
+    for red-team M2: the *engine's* interpretation of ``slippage_points`` changed
+    -- adverse slippage now applies to every market fill, not only stops -- so a
+    ledger row tagged with the old default could not otherwise be told apart from
+    one written before the fix, even though ``stressed()`` can produce the exact
+    same field values either way when called with no ``spec=``.)
     Because it is computed fresh from the model's own current field values
     (never string-concatenated across ``replace()`` calls), stacking
     modifications -- e.g. ``.stressed()`` on top of an already non-default
@@ -183,9 +194,20 @@ class CostModel:
     *whole HTF bar's* own extreme -- for D1 that is the day's high or low,
     a very pessimistic stand-in worth keeping in mind when reading a D1
     stress-test result.
+
+    ``slippage_points`` (red-team M2) is applied **adversely on every market
+    fill** by ``engine._run_core``: entries (a long entry buys, so it fills
+    *higher*; a short entry sells, so it fills *lower*), signal/time exits and
+    session-flatten (``force_exit``)/end-of-data (``eod``) exits (the mirror
+    image -- closing a long sells *lower*, closing a short buys *higher*), and
+    stop fills (unchanged from before -- fills at the stop/gap-open, ± this
+    same slippage). Target/limit fills never slip (a resting limit order never
+    fills worse than its own price). The base cost model's default,
+    ``slippage_points=0.0``, is therefore a no-op everywhere and produces
+    bit-identical fills to the pre-M2 engine.
     """
 
-    version_tag: str = "fbs-v0-uncalibrated"
+    version_tag: str = "fbs-v1-uncalibrated"
     spread_multiplier: float = 1.0
     extra_spread_points: float = 0.0
     slippage_points: float = 0.0
@@ -225,13 +247,33 @@ class CostModel:
         """Effective spread in points; works elementwise on scalars, numpy arrays or Series."""
         return spread_points * self.spread_multiplier + self.extra_spread_points
 
-    def stressed(self, spread_mult: float = 1.5, extra_slippage: float = 1.0,
-                 stop_fill: str = "bar_extreme") -> "CostModel":
-        """DESIGN §4.2 cost-stress gate: 1.5x spread + 1pt extra slippage by default.
+    def stressed(self, spread_mult: float = 1.5, extra_slippage_pips: float = 1.0,
+                 stop_fill: str = "bar_extreme", *, spec: Optional["InstrumentSpec"] = None,
+                 extra_slippage: Optional[float] = None) -> "CostModel":
+        """DESIGN §4.2 cost-stress gate: 1.5x spread + 1 pip adverse slippage by default.
 
         ``spread_mult`` multiplies the *current* spread_multiplier (relative
-        stress on top of whatever calibration is already applied);
-        ``extra_slippage`` is *added* to the current slippage_points.
+        stress on top of whatever calibration is already applied).
+
+        ``extra_slippage_pips`` (red-team M2) is a **pip** count, added to
+        ``slippage_points`` -- the field ``engine._run_core`` actually reads,
+        applied adversely on every market fill (see the class docstring), not
+        just stops. A pip is a market convention, not a fixed number of
+        points (10 points on a 5-digit FX quote, 1 on a 4-digit one, DESIGN's
+        own ``0.1`` USD for gold, ...), so converting it needs the
+        instrument's own spec: pass ``spec=`` to get the real per-symbol
+        conversion via :func:`pip_points`. Without one (``spec=None``, the
+        default -- e.g. a cost model built with no symbol in view) this
+        degrades to treating 1 pip as 1 point, i.e. exactly this method's
+        pre-M2 numeric default, so a caller that hasn't been updated to pass
+        ``spec=`` yet (the M2 fix plan's follow-up wiring) sees no change in
+        ``slippage_points`` from this fix alone -- only the engine's now-wider
+        fill-type scope.
+
+        ``extra_slippage`` (deprecated but kept working -- red-team M2) is the
+        pre-M2 kwarg: *raw points*, added to ``slippage_points`` directly,
+        bypassing the pip conversion entirely. Takes precedence over
+        ``extra_slippage_pips``/``spec`` when given (not ``None``).
 
         ``stop_fill`` (red-team N5) defaults to ``"bar_extreme"``: the §4.2
         stress gate should assume the pessimistic intra-minute-liquidity-gap
@@ -246,12 +288,55 @@ class CostModel:
         exactly this stressed field combination -- no double-suffixing even
         if ``self`` was itself already non-default.
         """
+        if extra_slippage is not None:
+            added_points = extra_slippage
+        else:
+            added_points = extra_slippage_pips * (pip_points(spec) if spec is not None else 1.0)
         return replace(
             self,
             spread_multiplier=self.spread_multiplier * spread_mult,
-            slippage_points=self.slippage_points + extra_slippage,
+            slippage_points=self.slippage_points + added_points,
             stop_fill=stop_fill,
         )
+
+
+# --------------------------------------------------------------------------- pip conventions (red-team M2)
+
+def pip_points(spec: InstrumentSpec) -> float:
+    """Points per conventional "pip" for ``spec`` -- see :meth:`CostModel.stressed`.
+
+    A pip is a retail-broker market convention, not a fixed price increment,
+    so it must be derived per instrument:
+
+    * **FX** (a plain 6-letter-alpha symbol whose ``base_ccy``/``quote_ccy``
+      are both 3-letter currency codes -- metals and crypto are excluded
+      below before this branch is reached): the standard convention prices a
+      pip at the 4th decimal place for non-JPY pairs / 2nd for JPY pairs. A
+      **3- or 5-digit** quote (this catalog's usual convention -- ``digits``
+      counts one extra fractional "pipette" decimal past the pip) prices a
+      pip at **10 points**; a legacy **2- or 4-digit** whole-pip quote has no
+      pipette, so 1 pip is already 1 point.
+    * **XAUUSD / XAGUSD / XPTUSD / XPDUSD**: no single convention exists
+      across brokers. We define 1 pip = **0.1 quote-currency unit** (USD) for
+      all four -- the task spec's own documented example for gold, applied
+      uniformly to the other three metals rather than guessing a separate
+      number for each.
+    * **Everything else** (crypto CFDs, B3 futures WIN/WDO, indices, ...):
+      1 pip = 1 point = 1 tick, unless a real broker spec says otherwise
+      (none of ours currently do).
+    """
+    sym = spec.symbol.upper()
+    if sym.startswith(("XAU", "XAG", "XPT", "XPD")):
+        return 0.1 / spec.point
+    if sym.startswith(_CRYPTO_PREFIXES):
+        return 1.0
+    if (
+        len(sym) == 6 and sym.isalpha()
+        and len(spec.base_ccy) == 3 and spec.base_ccy.isalpha()
+        and len(spec.quote_ccy) == 3 and spec.quote_ccy.isalpha()
+    ):
+        return 10.0 if spec.digits in (3, 5) else 1.0
+    return 1.0
 
 
 # --------------------------------------------------------------------------- MT5 enum parsing

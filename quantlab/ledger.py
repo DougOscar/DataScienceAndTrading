@@ -174,16 +174,55 @@ def system_trial_count(book: str, system: str, ledger_dir: Path | None = None) -
 
 def system_effective_trials(book: str, system: str, *, exclude_study: str | None = None,
                             ledger_dir: Path | None = None) -> float:
-    """Sum of ``effective_trials`` logged by the gate evaluation of every earlier attempt of a
-    system (feeds ``gates.evaluate_gates(prior_effective_trials=...)`` so DSR deflates for all
-    attempts, DESIGN §0.3 / §4.5).  Attempts without a gates event contribute their raw n_trials."""
+    """Sum of the effective trials logged by the gate evaluation of every other study of a
+    system (diagnostic since DESIGN v1.2 — the DSR gate uses raw counts, see
+    :func:`system_prior_trials`).  Uses each study's *own* ``effective_trials_study`` when
+    logged (m1: the cumulative ``effective_trials`` of older rows included the prior they were
+    given, so summing them double-counts); else ``effective_trials``; else raw ``n_trials``."""
     total = 0.0
     for sid, s in studies(ledger_dir).items():
         if sid == exclude_study or s["book"] != config.get_book(book).name or s["system"] != system:
             continue
-        eff = s.get("effective_trials")
+        eff = s.get("effective_trials_study", s.get("effective_trials"))
         total += float(eff) if eff is not None else float(s.get("n_trials", 0))
     return total
+
+
+def study_trial_count(state: dict[str, Any]) -> float:
+    """A study's own raw trial count from its folded ledger state: ``n_trials_study`` (logged by
+    the gates, m1) else ``n_trials`` (logged by the optimizer's ``trials`` event) else
+    ``n_trials_planned``; 0 if none."""
+    for k in ("n_trials_study", "n_trials", "n_trials_planned"):
+        v = state.get(k)
+        if v is not None:
+            return float(v)
+    return 0.0
+
+
+def system_prior_trials(book: str, system: str, *, exclude_study: str | None = None,
+                        max_attempt: int | None = None,
+                        ledger_dir: Path | None = None) -> tuple[float, list[str]]:
+    """Raw trials of the *other* studies of a system (DESIGN §0.3 / §4.2 v1.2 DSR: N = this
+    study's raw trials + earlier attempts').  Studies with ``attempt > max_attempt`` are
+    ignored (re-validating attempt 1 must not count attempt 2).  Returns (total, study ids)."""
+    b = config.get_book(book).name
+    total, used = 0.0, []
+    for sid, s in studies(ledger_dir).items():
+        if sid == exclude_study or s.get("book") != b or s.get("system") != system:
+            continue
+        att = s.get("attempt")
+        if max_attempt is not None and att is not None and int(att) > int(max_attempt):
+            continue
+        total += study_trial_count(s)
+        used.append(sid)
+    return total, used
+
+
+def study_events(study_id: str, event: str | None = None, *,
+                 ledger_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Raw ledger rows of one study (optionally one event type), in order."""
+    return [r for r in _read(_ledger_dir(ledger_dir) / STUDIES_FILE)
+            if r.get("study_id") == study_id and (event is None or r.get("event") == event)]
 
 
 # --------------------------------------------------------------------------- holdout

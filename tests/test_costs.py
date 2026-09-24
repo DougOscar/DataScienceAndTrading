@@ -136,11 +136,80 @@ def test_stressed_keeps_the_base_stop_fill_when_told_to():
     assert stressed.version == "fbs-v1+spread_mult1.5+slippage1"
 
 
+# --------------------------------------------------------------------------- pip_points (red-team M2)
+
+def test_pip_points_fx_5_digit_and_3_digit_jpy_price_a_pip_at_10_points():
+    eurusd = _spec(symbol="EURUSD", digits=5, point=0.00001, base_ccy="EUR", quote_ccy="USD")
+    usdjpy = _spec(symbol="USDJPY", digits=3, point=0.001, base_ccy="USD", quote_ccy="JPY")
+    assert costs.pip_points(eurusd) == pytest.approx(10.0)
+    assert costs.pip_points(usdjpy) == pytest.approx(10.0)
+
+
+def test_pip_points_fx_legacy_2_or_4_digit_whole_pip_quote_is_1_point():
+    eurusd4 = _spec(symbol="EURUSD", digits=4, point=0.0001, base_ccy="EUR", quote_ccy="USD")
+    usdjpy2 = _spec(symbol="USDJPY", digits=2, point=0.01, base_ccy="USD", quote_ccy="JPY")
+    assert costs.pip_points(eurusd4) == pytest.approx(1.0)
+    assert costs.pip_points(usdjpy2) == pytest.approx(1.0)
+
+
+def test_pip_points_metals_use_the_documented_0_1_usd_convention():
+    xau = _spec(symbol="XAUUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XAU", quote_ccy="USD")
+    xag = _spec(symbol="XAGUSD", digits=3, point=0.001, contract_size=5_000.0, tick_size=0.001,
+                base_ccy="XAG", quote_ccy="USD")
+    assert costs.pip_points(xau) == pytest.approx(10.0)    # 0.1 / 0.01
+    assert costs.pip_points(xag) == pytest.approx(100.0)   # 0.1 / 0.001
+
+
+def test_pip_points_crypto_and_b3_futures_default_to_1_tick_1_point():
+    btc = _spec(symbol="BTCUSD", digits=2, point=0.01, contract_size=1.0, tick_size=0.01,
+                base_ccy="BTC", quote_ccy="USD")
+    win = _spec(symbol="WINZ26", digits=0, point=5.0, contract_size=0.20, tick_size=5.0,
+                base_ccy="IBOV", quote_ccy="BRL", volume_min=1.0, volume_step=1.0)
+    assert costs.pip_points(btc) == pytest.approx(1.0)
+    assert costs.pip_points(win) == pytest.approx(1.0)
+
+
+def test_stressed_extra_slippage_pips_converts_via_pip_points_when_spec_given():
+    eurusd = _spec(symbol="EURUSD", digits=5, point=0.00001, base_ccy="EUR", quote_ccy="USD")
+    usdjpy = _spec(symbol="USDJPY", digits=3, point=0.001, base_ccy="USD", quote_ccy="JPY")
+    xau = _spec(symbol="XAUUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XAU", quote_ccy="USD")
+    base = costs.CostModel(version_tag="fbs-v1")
+
+    # 1 pip default -> pip_points(spec) points of slippage_points, per DESIGN M2's own examples.
+    assert base.stressed(spec=eurusd).slippage_points == pytest.approx(10.0)
+    assert base.stressed(spec=usdjpy).slippage_points == pytest.approx(10.0)
+    assert base.stressed(spec=xau).slippage_points == pytest.approx(10.0)
+    # scales with extra_slippage_pips
+    assert base.stressed(extra_slippage_pips=2.0, spec=eurusd).slippage_points == pytest.approx(20.0)
+    # compounds on an already non-zero base slippage_points, like the old extra_slippage kwarg did
+    with_prior = costs.CostModel(version_tag="fbs-v1", slippage_points=0.5)
+    assert with_prior.stressed(spec=eurusd).slippage_points == pytest.approx(10.5)
+
+
+def test_stressed_without_spec_keeps_the_legacy_1_point_fallback():
+    """No spec -> the pip size is unknown -> degrades to the pre-M2 numeric default (1 point),
+    so a caller that has not yet been updated to pass spec= (e.g. today's gates.py call site)
+    sees no change in slippage_points from this fix alone -- only the engine's wider fill-type
+    scope (which needs no spec to take effect)."""
+    base = costs.CostModel(version_tag="fbs-v1")
+    assert base.stressed().slippage_points == pytest.approx(1.0)
+
+
+def test_stressed_old_extra_slippage_kwarg_still_bypasses_pip_conversion():
+    eurusd = _spec(symbol="EURUSD", digits=5, point=0.00001, base_ccy="EUR", quote_ccy="USD")
+    base = costs.CostModel(version_tag="fbs-v1")
+    stressed = base.stressed(extra_slippage=3.0, spec=eurusd)  # old kwarg wins over pips+spec
+    assert stressed.slippage_points == pytest.approx(3.0)
+
+
 # --------------------------------------------------------------------------- version (red-team N5)
 
 def test_version_is_just_the_tag_when_every_knob_is_at_its_default():
     assert costs.CostModel(version_tag="fbs-v1").version == "fbs-v1"
-    assert costs.CostModel().version == "fbs-v0-uncalibrated"  # DESIGN §8's own default tag
+    # DESIGN §8's own default tag; bumped v0->v1 for red-team M2 (engine slippage scope).
+    assert costs.CostModel().version == "fbs-v1-uncalibrated"
 
 
 def test_version_encodes_each_non_default_knob_in_a_fixed_order():
@@ -166,7 +235,7 @@ def test_version_never_collides_across_different_knob_combinations():
     assert default.version != bar_extreme.version
     assert default.version != stressed.version
     assert bar_extreme.version != stressed.version
-    assert bar_extreme.version == "fbs-v0-uncalibrated+stop_fill=bar_extreme"
+    assert bar_extreme.version == "fbs-v1-uncalibrated+stop_fill=bar_extreme"
 
 
 def test_version_does_not_accumulate_stale_suffixes_across_repeated_stressed_calls():

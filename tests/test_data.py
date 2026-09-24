@@ -550,3 +550,27 @@ def test_conversion_rate_respects_the_holdout_guard():
     ts = pl.Series([datetime(2025, 8, 1, 10, 0, tzinfo=timezone.utc)])
     with pytest.raises(contracts.HoldoutLocked):
         data.conversion_rate("JPY", "USD", ts)
+
+
+def test_conversion_rate_at_week_open_uses_the_previous_weeks_last_close():
+    """m2 (Phase 1 red team, p08b): the first evaluation bar of a Monday-00:00 window opens
+    after a ~48h gap; the cross is now loaded from 7 days before, so Friday's close is found."""
+    # 2023-01-02 00:00 FBS server time (EET, +2) = 2023-01-01 22:00 UTC (Monday week open).
+    ts = pl.Series([datetime(2023, 1, 1, 22, 0, tzinfo=timezone.utc)])
+    rate = data.conversion_rate("JPY", "USD", ts)
+    m1 = data.load_bars("USDJPY", "M1", start="2022-12-20", end="2023-01-03")
+    last = m1.filter((pl.col("ts_utc") + timedelta(minutes=1)) <= ts[0]).tail(1)
+    assert last["ts_utc"][0] < ts[0] - timedelta(hours=24)          # really across the weekend gap
+    assert rate.to_list() == pytest.approx([1.0 / last["close"][0]])
+
+
+def test_conversion_rate_at_series_start_falls_back_to_the_first_bars_open():
+    """m2: at the cross's very first bar no M1 close exists yet; the open of the bar that
+    opened at/before ``ts`` is the latest known price (causal).  Before it: still raises."""
+    first = data.load_bars("USDJPY", "M1", end="2016-05-03").row(0, named=True)
+    rate = data.conversion_rate("JPY", "USD", pl.Series([first["ts_utc"], first["ts_utc"] + timedelta(seconds=30)]))
+    assert rate.to_list() == pytest.approx([1.0 / first["open"]] * 2)
+    later = data.conversion_rate("JPY", "USD", pl.Series([first["ts_utc"] + timedelta(minutes=1)]))
+    assert later.to_list() == pytest.approx([1.0 / first["close"]])   # the normal close path
+    with pytest.raises(ValueError, match="before the series start"):
+        data.conversion_rate("JPY", "USD", pl.Series([first["ts_utc"] - timedelta(minutes=1)]))

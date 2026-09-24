@@ -139,13 +139,18 @@ def test_stop_loss_hit_no_gap():
     result = run_backtest(bars, signals, _spec(), cost)
     t = _row(result.trades)
 
-    # entry=1.1005+0.0002=1.1007 ; SL=1.1007-0.0020=1.0987
+    # entry (red-team M2: entry now also slips 1pt adverse -- long buys higher) =
+    #   1.1005 + 2*0.0001 + 1*0.0001 = 1.1008 ; SL = 1.1008-0.0020 = 1.0988
     # bar2 opens at 1.1005 (> SL, no gap), low 1.0980 <= SL -> touch, not gap
-    # fill = SL - slippage_price = 1.0987 - 1*0.0001 = 1.0986
-    assert t["stop_price"] == pytest.approx(1.0987)
+    # fill = SL - slippage_price = 1.0988 - 1*0.0001 = 1.0987
+    assert t["entry_price"] == pytest.approx(1.1008)
+    assert t["stop_price"] == pytest.approx(1.0988)
     assert t["exit_reason"] == "stop"
-    assert t["exit_price"] == pytest.approx(1.0986)
-    # pnl_points = (1.0986-1.1007)/0.0001 = -21.0
+    assert t["exit_price"] == pytest.approx(1.0987)
+    # pnl_points = (1.0987-1.1008)/0.0001 = -21.0 -- unchanged from the pre-M2 value: the
+    # stop is a fixed *distance* from entry, so entry's own +1pt slippage shifts both the
+    # stop level and the fill by the same amount and cancels out of pnl (only the stop's
+    # own, unrelated 1pt of slippage -- present before this fix too -- still shows up).
     assert t["pnl_points"] == pytest.approx(-21.0)
 
 
@@ -185,12 +190,167 @@ def test_gap_through_stop_fills_at_open_plus_slippage():
     result = run_backtest(bars, signals, _spec(), cost)
     t = _row(result.trades)
 
-    # entry=1.1007 ; SL=1.0987 ; bar2 opens at 1.0950, already through SL -> gap
-    # fill = open - slippage_price = 1.0950 - 0.0001 = 1.0949
+    # entry (red-team M2: +1pt adverse) = 1.1005+0.0002+0.0001 = 1.1008 ; SL = 1.0988
+    # bar2 opens at 1.0950, already through SL -> gap
+    # fill = open - slippage_price = 1.0950 - 0.0001 = 1.0949 (gap fill uses the actual gap
+    # open, independent of SL/entry, so it is unaffected by entry's own slippage)
+    assert t["entry_price"] == pytest.approx(1.1008)
     assert t["exit_reason"] == "gap_stop"
     assert t["exit_price"] == pytest.approx(1.0949)
-    # pnl_points = (1.0949-1.1007)/0.0001 = -58.0
-    assert t["pnl_points"] == pytest.approx(-58.0)
+    # pnl_points = (1.0949-1.1008)/0.0001 = -59.0 (one point worse than pre-M2's -58.0,
+    # entirely from entry's own new +1pt of adverse slippage)
+    assert t["pnl_points"] == pytest.approx(-59.0)
+
+
+# --------------------------------------------------------------------------- market-fill slippage scope
+# (red-team M2): entries, signal exits, session-flatten exits and eod exits all pay adverse
+# slippage now, not just stops. Every case below uses a no-stop/no-target (risk-type-C-style)
+# signal so the *only* source of any price shift is slippage_points itself.
+
+def test_long_entry_and_signal_exit_both_pay_adverse_slippage():
+    bars = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=3),
+        dict(open=1.1005, high=1.1010, low=1.1000, close=1.1006, spread=3),  # entry bar
+        dict(open=1.1010, high=1.1015, low=1.1005, close=1.1012, spread=3),  # signal-exit bar
+        dict(open=1.1012, high=1.1020, low=1.1008, close=1.1015, spread=3),  # untouched
+    ])
+    signals = _signals([
+        dict(signal=1, stop_dist=None, target_dist=None),
+        dict(signal=0, stop_dist=None, target_dist=None),
+        dict(), dict(),
+    ])
+    cost = CostModel(slippage_points=2.0)  # slip_price = 2*0.0001 = 0.0002
+    result = run_backtest(bars, signals, _spec(), cost)
+    t = _row(result.trades)
+
+    # entry (long, BUYS -> higher): 1.1005 + 3*0.0001 + 0.0002 = 1.1010
+    assert t["entry_price"] == pytest.approx(1.1010)
+    # signal exit (long, SELLS -> lower, no spread on a long's exit): 1.1010 - 0.0002 = 1.1008
+    assert t["exit_reason"] == "signal"
+    assert t["exit_price"] == pytest.approx(1.1008)
+    # pnl_points = (1.1008-1.1010)/0.0001 = -2.0 (pure round-trip slippage, 1pt*2 legs*2pips)
+    assert t["pnl_points"] == pytest.approx(-2.0)
+
+
+def test_short_entry_and_signal_exit_both_pay_adverse_slippage():
+    bars = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=3),
+        dict(open=1.1005, high=1.1010, low=1.1000, close=1.1006, spread=3),  # entry bar
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1002, spread=3),  # signal-exit bar
+        dict(open=1.0998, high=1.1005, low=1.0994, close=1.1000, spread=3),  # untouched
+    ])
+    signals = _signals([
+        dict(signal=-1, stop_dist=None, target_dist=None),
+        dict(signal=0, stop_dist=None, target_dist=None),
+        dict(), dict(),
+    ])
+    cost = CostModel(slippage_points=2.0)  # slip_price = 0.0002
+    result = run_backtest(bars, signals, _spec(), cost)
+    t = _row(result.trades)
+
+    # entry (short, SELLS -> lower, raw Bid otherwise): 1.1005 - 0.0002 = 1.1003
+    assert t["entry_price"] == pytest.approx(1.1003)
+    # signal exit (short, BUYS BACK -> higher, plus that leg's own spread):
+    #   1.1000 + 3*0.0001 + 0.0002 = 1.1005
+    assert t["exit_reason"] == "signal"
+    assert t["exit_price"] == pytest.approx(1.1005)
+    # pnl_points = (entry-exit)/point = (1.1003-1.1005)/0.0001 = -2.0
+    assert t["pnl_points"] == pytest.approx(-2.0)
+
+
+def test_force_exit_and_eod_exit_pay_adverse_slippage_too():
+    """Session-flatten (force_exit) and end-of-data exits are market orders too (red-team M2) --
+    same adverse-slippage convention as a signal exit, for both directions."""
+    bars = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),
+        dict(open=1.1005, high=1.1010, low=1.1000, close=1.1006, spread=2),   # long entry bar
+        dict(open=1.1006, high=1.1010, low=1.1002, close=1.1030, spread=2),   # force-closed here
+        dict(open=1.1030, high=1.1040, low=1.1020, close=1.1035, spread=2),   # short entry bar
+        dict(open=1.1035, high=1.1040, low=1.1030, close=1.1038, spread=2),   # eod bar
+    ])
+    signals = _signals([
+        dict(signal=1, stop_dist=None, target_dist=None),
+        dict(),
+        dict(signal=-1, stop_dist=None, target_dist=None),  # fires at bar3's open, after the force-close
+        dict(),
+        dict(),
+    ])
+    force_exit = [False, False, True, False, False]
+    cost = CostModel(slippage_points=1.0)  # slip_price = 0.0001
+    result = run_backtest(bars, signals, _spec(), cost, force_exit=force_exit)
+
+    assert result.trades.height == 2
+    long_leg = result.trades.row(0, named=True)
+    short_leg = result.trades.row(1, named=True)
+
+    assert long_leg["exit_reason"] == "force"
+    # force exit (long, close - slippage): 1.1030 - 0.0001 = 1.1029
+    assert long_leg["exit_price"] == pytest.approx(1.1029)
+
+    assert short_leg["entry_idx"] == 3 and short_leg["exit_reason"] == "eod"
+    # short entry: 1.1030 - 0.0001 = 1.1029 (raw Bid minus slippage)
+    assert short_leg["entry_price"] == pytest.approx(1.1029)
+    # eod exit (short, buys back at close + that bar's spread + slippage):
+    #   1.1038 + 2*0.0001 + 0.0001 = 1.1041
+    assert short_leg["exit_price"] == pytest.approx(1.1041)
+
+
+def test_target_fills_never_slip_even_when_cost_has_slippage():
+    """Regression guard: slippage_points must never touch a target/limit fill (red-team M2's
+    scope is entries + non-target exits + stops -- targets are the one fill type explicitly
+    excluded, both before and after this fix)."""
+    bars = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),
+        dict(open=1.1005, high=1.1010, low=1.1000, close=1.1006, spread=2),  # fill bar
+        dict(open=1.1005, high=1.1070, low=1.1000, close=1.1050, spread=2),  # TP touched
+    ])
+    signals = _signals([
+        dict(signal=1, stop_dist=0.0500, target_dist=0.0050),
+        dict(), dict(),
+    ])
+    cost = CostModel(slippage_points=5.0)
+    result = run_backtest(bars, signals, _spec(), cost)
+    t = _row(result.trades)
+
+    # entry = 1.1005+0.0002(spread)+0.0005(slippage) = 1.1012 ; TP = 1.1012+0.0050 = 1.1062
+    # (bar2's high raised to 1.1070 so it still reaches this slippage-shifted TP)
+    assert t["entry_price"] == pytest.approx(1.1012)
+    assert t["target_price"] == pytest.approx(1.1062)
+    assert t["exit_reason"] == "target"
+    assert t["exit_price"] == pytest.approx(1.1062)  # exactly TP, no slippage
+
+
+def test_stressed_no_stop_system_no_longer_a_slippage_no_op():
+    """p09-style regression (red-team M2): pre-fix, CostModel.stressed()'s +1pt slippage only
+    ever reached stop fills, so a no-stop (risk-type-C-style) system's stressed P&L was
+    bit-identical to 'spread x1.5 only' -- the cost-stress gate's slippage term was a complete
+    no-op for exactly the systems (no stop, or signal/time-exit driven) it most needs to
+    stress. It must now differ."""
+    bars = _bars([
+        dict(open=1.1000, high=1.1005, low=1.0995, close=1.1000, spread=2),
+        dict(open=1.1005, high=1.1010, low=1.1000, close=1.1006, spread=2),  # long entry bar
+        dict(open=1.1010, high=1.1015, low=1.1005, close=1.1012, spread=2),  # signal-exit bar
+        dict(open=1.1012, high=1.1020, low=1.1008, close=1.1015, spread=2),  # untouched
+    ])
+    signals = _signals([
+        dict(signal=1, stop_dist=None, target_dist=None),   # no stop: risk-type-C style
+        dict(signal=0, stop_dist=None, target_dist=None),
+        dict(), dict(),
+    ])
+    base = CostModel()
+    spread_only = CostModel(spread_multiplier=1.5)
+    stressed = base.stressed()  # x1.5 spread + 1pt slippage (no spec -> legacy 1pt fallback)
+
+    r_spread_only = run_backtest(bars, signals, _spec(), spread_only)
+    r_stressed = run_backtest(bars, signals, _spec(), stressed)
+    assert r_spread_only.trades.height == 1 and r_stressed.trades.height == 1
+
+    pnl_spread_only = r_spread_only.trades["pnl_points"][0]
+    pnl_stressed = r_stressed.trades["pnl_points"][0]
+    # Pre-fix these were bit-identical (the whole point of the M2 bug). Now the entry (+1pt)
+    # and the signal exit (+1pt) each pay slippage on top of the spread stress.
+    assert pnl_stressed < pnl_spread_only
+    assert pnl_spread_only - pnl_stressed == pytest.approx(2.0)
 
 
 # --------------------------------------------------------------------------- same-bar SL/TP ambiguity
@@ -858,12 +1018,14 @@ def test_spread_multiplier_and_stressed_shift_entry_and_stop_fill():
     b = _row(result_b.trades)
 
     # entry_a = 1.1005 + 4*1*0.0001      = 1.1009 ; SL_a = 1.1009-0.0030 = 1.0979
-    # entry_b = 1.1005 + 4*1.5*0.0001    = 1.1011 ; SL_b = 1.1011-0.0030 = 1.0981
+    # entry_b (red-team M2: entry now also slips) = 1.1005 + 4*1.5*0.0001 + 1*0.0001 = 1.1012
+    #   SL_b = 1.1012-0.0030 = 1.0982
     assert a["entry_price"] == pytest.approx(1.1009)
-    assert b["entry_price"] == pytest.approx(1.1011)
+    assert b["entry_price"] == pytest.approx(1.1012)
     # neither gaps (open 1.1005 > either SL); fill_a = SL_a, no bar_extreme, no slippage.
     # fill_b: stop_fill="bar_extreme" now applies too (N5) -> fills at bar2's own low (0.0970)
     # instead of SL_b, minus 1pt slippage: 1.0970-0.0001 = 1.0969 (not the pre-N5 "SL_b - 1pt").
+    # This stop-fill leg is unaffected by M2 (unchanged _chk_long slippage handling).
     assert a["exit_price"] == pytest.approx(1.0979)
     assert b["exit_price"] == pytest.approx(1.0970 - 0.0001)
     # version (red-team N5): deterministic encoding of every non-default knob, fixed order.
