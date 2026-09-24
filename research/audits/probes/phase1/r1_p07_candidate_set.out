@@ -1,0 +1,6 @@
+grid        n_trials=441 data_dependent_flag=False | mean CPCV-med OOS +0.029 (se 0.078), WFO OOS -0.059 (se 0.060) | gate statuses oos/wfo/cscv: [('FAIL', 'FAIL', 'FAIL'), ('PASS', 'FAIL', 'PASS')]
+sobol       n_trials= 60 data_dependent_flag=False | mean CPCV-med OOS -0.037 (se 0.070), WFO OOS -0.064 (se 0.065) | gate statuses oos/wfo/cscv: [('FAIL', 'FAIL', 'FAIL')]
+tpe         n_trials= 60 data_dependent_flag=True  | mean CPCV-med OOS +0.216 (se 0.072), WFO OOS +0.089 (se 0.071) | gate statuses oos/wfo/cscv: [('SKIPPED', 'SKIPPED', 'SKIPPED')]
+tpe->sobol  n_trials=118 data_dependent_flag=False | mean CPCV-med OOS +0.109 (se 0.077), WFO OOS +0.040 (se 0.067) | gate statuses oos/wfo/cscv: [('FAIL', 'FAIL', 'FAIL'), ('FAIL', 'PASS', 'FAIL'), ('PASS', 'PASS', 'PASS')]
+paired sobol - grid: CPCV -0.066 (se 0.042), WFO -0.004 (se 0.042)
+paired tpe->sobol - grid: CPCV +0.080 (se 0.023), WFO +0.099 (se 0.034)

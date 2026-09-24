@@ -1,0 +1,33 @@
+== A_plain_null: 24 zero-edge worlds; verdict PASS 0.00; median PBO (diag) 0.51
+   dsr                  pass 0.00   | among 15 with IS SR>0: 0.00
+   cscv_oos_loss        pass 0.04   | among 15 with IS SR>0: 0.07
+   oos_sharpe           pass 0.00   | among 15 with IS SR>0: 0.00
+   wfo_oos              pass 0.04   | among 15 with IS SR>0: 0.07
+   cost_stress_sharpe   pass 0.00   | among 15 with IS SR>0: 0.00
+   plateau              pass 0.50   | among 15 with IS SR>0: 0.80
+   positive_years       pass 0.42   | among 15 with IS SR>0: 0.67
+   max_year_share       pass 0.12   | among 15 with IS SR>0: 0.20
+   trade_count          pass 0.04   | among 15 with IS SR>0: 0.07
+   mechanism            pass 1.00   | among 15 with IS SR>0: 1.00
+== B_padded_null: 24 zero-edge worlds; verdict PASS 0.00; median PBO (diag) 0.31
+   dsr                  pass 0.00   | among 14 with IS SR>0: 0.00
+   cscv_oos_loss        pass 0.04   | among 14 with IS SR>0: 0.07
+   oos_sharpe           pass 0.00   | among 14 with IS SR>0: 0.00
+   wfo_oos              pass 0.00   | among 14 with IS SR>0: 0.00
+   cost_stress_sharpe   pass 0.00   | among 14 with IS SR>0: 0.00
+   plateau              pass 0.50   | among 14 with IS SR>0: 0.86
+   positive_years       pass 0.42   | among 14 with IS SR>0: 0.71
+   max_year_share       pass 0.12   | among 14 with IS SR>0: 0.21
+   trade_count          pass 0.00   | among 14 with IS SR>0: 0.00
+   mechanism            pass 1.00   | among 14 with IS SR>0: 1.00
+== C_rho095_null: 24 zero-edge worlds; verdict PASS 0.00; median PBO (diag) 0.51
+   dsr                  pass 0.00   | among 12 with IS SR>0: 0.00
+   cscv_oos_loss        pass 0.08   | among 12 with IS SR>0: 0.17
+   oos_sharpe           pass 0.00   | among 12 with IS SR>0: 0.00
+   wfo_oos              pass 0.00   | among 12 with IS SR>0: 0.00
+   cost_stress_sharpe   pass 0.00   | among 12 with IS SR>0: 0.00
+   plateau              pass 0.46   | among 12 with IS SR>0: 0.92
+   positive_years       pass 0.38   | among 12 with IS SR>0: 0.75
+   max_year_share       pass 0.04   | among 12 with IS SR>0: 0.08
+   trade_count          pass 0.00   | among 12 with IS SR>0: 0.00
+   mechanism            pass 1.00   | among 12 with IS SR>0: 1.00

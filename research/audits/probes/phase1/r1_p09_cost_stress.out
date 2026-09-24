@@ -1,0 +1,21 @@
+Sma:
+   base                         sharpe -0.4912  sum pnl  -13753.39  trades 95
+   stressed() no spec (1pt)     sharpe -0.6194  sum pnl  -16857.83  trades 95
+   stressed(spec) (1 pip=10pt)  sharpe -0.7046  sum pnl  -18814.12  trades 95
+   spread x1.5 only             sharpe -0.5094  sum pnl  -14166.23  trades 95
+   slip 10pt only               sharpe -0.5757  sum pnl  -15725.60  trades 95
+SmaNoStop:
+   base                         sharpe -0.3774  sum pnl   -9135.00  trades 95
+   stressed() no spec (1pt)     sharpe -0.4217  sum pnl  -10086.00  trades 95
+   stressed(spec) (1 pip=10pt)  sharpe -0.5006  sum pnl  -11796.00  trades 95
+   spread x1.5 only             sharpe -0.4130  sum pnl   -9896.00  trades 95
+   slip 10pt only               sharpe -0.4651  sum pnl  -11035.00  trades 95
+(3) stress slippage per fill vs median D1 spread (2024-01..06)
+   EURUSD  point=1e-05 tick=1e-05 1 pip=10 pts = 0.0001 price (0.923 bp of price); median spread 30 pts -> slippage/spread = 0.333; slippage/tick = 10.000
+   USDJPY  point=0.001 tick=0.001 1 pip=10 pts = 0.01 price (0.663 bp of price); median spread 73 pts -> slippage/spread = 0.137; slippage/tick = 10.000
+   XAUUSD  point=0.01 tick=0.01 1 pip=10 pts = 0.1 price (0.461 bp of price); median spread 28 pts -> slippage/spread = 0.357; slippage/tick = 10.000
+   XAGUSD  point=0.001 tick=0.001 1 pip=100 pts = 0.1 price (40.543 bp of price); median spread 39 pts -> slippage/spread = 2.564; slippage/tick = 100.000
+   BTCUSD  point=0.01 tick=0.01 1 pip=1 pts = 0.01 price (0.002 bp of price); median spread 1942 pts -> slippage/spread = 0.001; slippage/tick = 1.000
+   ETHUSD  point=0.01 tick=0.01 1 pip=1 pts = 0.01 price (0.032 bp of price); median spread 203 pts -> slippage/spread = 0.005; slippage/tick = 1.000
+   WIN     point=1 tick=5.0 1 pip=1 pts = 1 price (0.061 bp of price); median spread 1 pts -> slippage/spread = 1.000; slippage/tick = 0.200
+   WDO     point=0.001 tick=0.5 1 pip=1 pts = 0.001 price (0.002 bp of price); median spread 1 pts -> slippage/spread = 1.000; slippage/tick = 0.002

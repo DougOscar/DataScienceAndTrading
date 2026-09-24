@@ -1,0 +1,26 @@
+(a) B4
+   default              optimizer score 0.0 -> gate 0.0 FAIL (24 nbrs)
+   peak_fraction=0.05   optimizer score 1.0 -> gate 0.0 FAIL (24 nbrs)
+   knn=2                optimizer score 0.0 -> gate 0.0 FAIL (24 nbrs)
+(b)/(c) grid resolution, narrow bump width 2% of range; a in [1,101] (relative mode) and [0,100] (range mode)
+   low=0 step  10: selected a=50; radius=None: 0.0 FAIL (4 nbrs) | radius=1e-06: 0.0 FAIL (2 nbrs)
+   low=0 step   5: selected a=50; radius=None: 0.0 FAIL (8 nbrs) | radius=1e-06: 0.0 FAIL (2 nbrs)
+   low=0 step   2: selected a=50; radius=None: 0.1 FAIL (20 nbrs) | radius=1e-06: 1.0 PASS (2 nbrs)
+   low=0 step   1: selected a=50; radius=None: 0.15 FAIL (40 nbrs) | radius=1e-06: 1.0 PASS (2 nbrs)
+   low=1 step  10: selected a=51; radius=None: 0.0 FAIL (2 nbrs) | radius=1e-06: 0.0 FAIL (2 nbrs)
+   low=1 step   5: selected a=51; radius=None: 0.0 FAIL (4 nbrs) | radius=1e-06: 0.0 FAIL (2 nbrs)
+   low=1 step   2: selected a=51; radius=None: 0.2 FAIL (10 nbrs) | radius=1e-06: 1.0 PASS (2 nbrs)
+   low=1 step   1: selected a=51; radius=None: 0.3 FAIL (20 nbrs) | radius=1e-06: 1.0 PASS (2 nbrs)
+(d) irrelevant parameters: relevant 'a' 0..10 with a bump giving a partial plateau; + k-level dummies
+   0 dummies x 0 levels: plateau 0.500 over 4 nbrs; rules {'a': '±20% of range [0, 10]'}
+   1 dummies x 21 levels: plateau 0.583 over 24 nbrs; rules {'a': '±20% of range [0, 10]', 'z0': '±20% of range [0, 20]'}
+   2 dummies x 21 levels: plateau 0.598 over 179 nbrs; rules {'a': '±20% of range [0, 10]', 'z0': '±20% of range [0, 20]', 'z1': '±20% of range [0, 20]'}
+(e) Sobol neighbour counts (planted zero surface, rho=0.8)
+   d=2 n= 64: neighbours per study [4, 5, 3, 2, 1, 0] -> zero 17%, <=2 50%; scores [0.5, 0.4, 0.0, 0.0, 0.0, nan]
+   d=2 n=256: neighbours per study [4, 11, 12, 16, 25, 13] -> zero 0%, <=2 0%; scores [0.25, 1.0, 0.08, 0.0, 0.0, 0.0]
+   d=3 n= 64: neighbours per study [1, 1, 0, 1, 0, 0] -> zero 50%, <=2 100%; scores [1.0, 0.0, nan, 0.0, nan, nan]
+   d=3 n=256: neighbours per study [1, 0, 5, 5, 4, 0] -> zero 33%, <=2 50%; scores [0.0, nan, 0.0, 0.0, 0.0, nan]
+   d=4 n= 64: neighbours per study [0, 0, 1, 0, 0, 0] -> zero 83%, <=2 100%; scores [nan, nan, 0.0, nan, nan, nan]
+   d=4 n=256: neighbours per study [6, 0, 1, 1, 4, 1] -> zero 17%, <=2 67%; scores [0.17, nan, 0.0, 0.0, 0.0, 0.0]
+   d=5 n= 64: neighbours per study [0, 0, 0, 0, 0, 0] -> zero 100%, <=2 100%; scores [nan, nan, nan, nan, nan, nan]
+   d=5 n=256: neighbours per study [0, 0, 0, 0, 0, 0] -> zero 100%, <=2 100%; scores [nan, nan, nan, nan, nan, nan]

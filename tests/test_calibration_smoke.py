@@ -4,11 +4,14 @@ Runs a handful of studies from research/calibration/phase1_validator_calibration
 the real pipeline (run_study → evaluate_gates) and asserts the headline properties:
 
 * null systems (random entries on real EURUSD H1, best of 144 data-mined configs) fail;
-* a strong planted edge (noisy oracle, true net Sharpe ≈ 2.9) passes every statistical gate;
+* a correlated-grid null (shared entry schedule, only exits vary, ρ ≈ 0.8 — red-team B1) fails,
+  and its DSR (V0, raw N) fails even though the v1.1 N_eff-based DSR would be lenient;
+* a strong planted edge (noisy oracle, true net Sharpe ≈ 2.9) passes every statistical gate
+  of DESIGN §4.2 v1.2 (``STAT_GATES``);
 * synthetic zero-edge / isolated-spike / early-regime-only surfaces fail.
 
-The full calibration (hundreds of studies) is the script itself; see
-research/calibration/2026-09-24_phase1_calibration.md.
+The full calibration (≈ 1,800 studies) is the script itself; see
+research/calibration/2026-09-24_phase1_calibration_v12.md.
 """
 
 from __future__ import annotations
@@ -67,6 +70,17 @@ def test_null_real_data_fails(cal, tmp_path):
 
 
 @pytest.mark.skipif(not _have("EURUSD"), reason="EURUSD data not available")
+def test_correlated_grid_null_fails(cal, tmp_path):
+    r = _run(cal, {"task_id": "smoke-corr-shared-0", "experiment": "corr", "family": "shared", "kind": "null",
+                   "space": "exits", "setup": "EURUSD_H1", "cost": "zero", "salt": 91500}, tmp_path)
+    assert r["mean_rho"] > 0.7                      # the grid really is highly correlated
+    assert r["n_eff_eigen"] < 5                     # … and the N_eff estimators collapse (B1)
+    assert r["n_trials_dsr"] == 126                 # the gate deflates by the raw trial count
+    assert r["gate_status"]["dsr"] == "FAIL"
+    assert r["stat_pass"] is False
+
+
+@pytest.mark.skipif(not _have("EURUSD"), reason="EURUSD data not available")
 def test_planted_strong_edge_passes(cal, tmp_path):
     for s in range(2):
         r = _run(cal, {"task_id": f"smoke-oracle-{s}", "experiment": "planted", "kind": "oracle",
@@ -85,14 +99,19 @@ def test_synthetic_surfaces(cal, tmp_path):
     sp = _run(cal, {"task_id": "smoke-syn-spike", "experiment": "synthetic", "scenario": "spike",
                     "height": 3.0, "salt": 93001}, tmp_path)
     # Rejected overall (plateau selection rarely centres on an isolated point, so the pick is
-    # noise; in the full run the plateau gate fires in 26/40 spike studies, PBO in 0/40).
+    # noise and fails DSR / OOS / trade count; see the v1.2 calibration report).
     assert sp["stat_pass"] is False
     rg = _run(cal, {"task_id": "smoke-syn-regime", "experiment": "synthetic", "scenario": "regime",
                     "height": 3.0, "salt": 93002}, tmp_path)
     # Rejected overall.  NB (calibration finding): the time-stability gates alone catch only
     # ~40% of these early-regime surfaces (an edge alive for 30% of 9 years keeps each year
-    # under the 40% PnL share); DSR / OOS Sharpe do most of the work.
+    # under the 40% PnL share); DSR / OOS Sharpe / wfo_oos do most of the work.
     assert rg["stat_pass"] is False
+
+
+def test_gate_names_match_library(cal):
+    from quantlab import gates
+    assert set(cal.STAT_GATES) == set(gates.GATE_ORDER) - {"mechanism"}
 
 
 def test_clopper_pearson(cal):

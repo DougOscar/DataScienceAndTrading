@@ -169,3 +169,104 @@ no stop (type C): base -0.3774 | slip+1pt -0.3774 | slip+10pt -0.3774 | stressed
 - **OOS gate:** the median of per-path annualised Sharpe over `cpcv_paths` (φ = C(9,1) = 9 paths for 10/2), and the paths come from the selection procedure, not from fixed params.
 - **Trial accounting:** TPE duplicates are not new columns, so leaving them uncounted is honest for n_eff (they add no information). Invalid configs are never evaluated, so they are correctly absent from n_eff and PBO. Low-trade trials are included in n_eff, var_sr and PBO.
 - **End-to-end plain null** (p06, 80 worlds including padded ones): 0 PASS verdicts. The OOS-Sharpe gate and cost-stress rejected every one.
+
+---
+
+## Re-verification round 1 (e64efcf)
+
+- Date: 2026-09-24 · Branch `feat/quantlab-phase1` @ `e64efcf` (library not modified by this audit; nothing committed)
+- Probes: `research/audits/probes/phase1/r1_*.py` + `.out` (shared harness `r1_common.py`: every study and every `evaluate_gates` call uses a fresh tmp ledger, ≤ 4 worker processes). `research/ledger/` was not touched. The only real data read was dev-window (EURUSD H4 2022–24, D1 2024-01..06, and the p08b crosses).
+
+### Verdict on the original findings
+
+| # | Status | Evidence (probe) |
+|---|---|---|
+| B1 DSR lenient on correlated grids | **CLOSED** | r1_p02: P(DSR ≥ 0.95 \| null) is 0.000 on the SMA grid and on equicorr ρ = 0.8 (the v1.1-style diagnostic on the same worlds is 0.190 / 0.213). iid N = 100 gives 0.000, t3 tails N = 20 gives 0.017, vol-clustered N = 50 gives 0.007. End to end (r1_p06), DSR passed 0 of 72 null worlds |
+| B2 dead edge passes | **PARTIAL** | r1_p05: an edge dead from 55 % of dev still gets verdict PASS in 6/12 runs (4/12 with min_train = 1y). Dead from 70 %: 6/12 (3/12). `wfo_oos` stopped only 2 of the 8 dead-from-55 % studies that passed every other gate. The recency condition (Sharpe over the last third > 0) is a coin flip once the edge is exactly dead (median recent SR −0.09) |
+| B3 TPE candidate-set leak | **PARTIAL (bypass = new BLOCKER N1)** | r1_p07: a pure TPE study is flagged and all 3 OOS gates are SKIPPED. Sobol is unbiased (CPCV-median −0.04 ± 0.07, WFO −0.06 ± 0.07; paired vs grid −0.07 ± 0.04 / −0.00 ± 0.04). But TPE followed by `resume=True, method="sobol"` clears the flag. See N1 |
+| B4 optimizer decides plateau | **CLOSED** | r1_p10(a): optimizer score 1.0 with peak_fraction = 0.05 → gate 0.0 FAIL. knn = 2 has no effect either |
+| M1 PBO padding | **CLOSED** | r1_p06: `cscv_oos_loss` passes 0.04 of plain nulls, 0.04 of padded nulls (the bleeding grid) and 0.08 of ρ = 0.95 nulls. PBO in diagnostics drops to 0.31 when padded, as before, but it is no longer a gate |
+| M2 slippage only on stops / 0.1 pip | **PARTIAL (N6)** | r1_p09: the no-stop EURUSD system now moves under slippage (base −0.377 → stressed(spec) −0.501; before the fix it was −0.413, from spread only). The gate resolves the spec through `load_instrument` (1 pip = 10 pt for FX, 0.1 USD for XAU). But 1 "pip" is a no-op for crypto and B3, and very harsh for XAGUSD. See N6 |
+| M3 holdout band has no power | **OPEN, and looser than v1.1 (N5)** | r1_p05: for gate-passing dead edges, P(zero-edge holdout year passes) is 0.32–0.61 with the v1.2 joint band. The same bootstrap at the v1.1 marginal level α = 0.10 gives 0.14–0.38. Common α ≈ 0.034–0.05. The band's own `p_pass_zero_edge` matches (0.28–0.67) and `decisive=False` is reported, but nothing is enforced |
+| M4 cross-attempt deflation opt-in | **PARTIAL (N2)** | r1_p11: honest labels work (a2 prior 49, a3 prior 98; attempt 3 against an empty ledger raises). A caller can still shrink N to 0 or 49 with a relabel and get no error. See N2 |
+| M5 plateau: resolution / weak separation | **PARTIAL (N3, N4)** | r1_p10(b): at the default radius the 2 %-wide spike FAILs at every grid step (10/5/2/1, both relative and range mode), so the resolution game is closed. Still open: (i) `plateau_radius=1e-6` brings it back (PASS 1.0 at step 2 and 1; N3); (ii) on the null the gate still passes 0.80 / 0.86 / 0.92 of worlds with IS SR > 0 (r1_p06); (iii) on Sobol studies it cannot pass or is a coin flip (N4) |
+| m1 double count | CLOSED | r1_p11: a3 prior = 98 = 49 + 49 |
+| m2 cross conversion at week open | CLOSED | r1_p08b: all four cases OK |
+| m3 embargo cap | CLOSED | r1_misc: capped → `oos_sharpe` and `cscv_oos_loss` SKIPPED, verdict INCOMPLETE |
+| m4 annualised SR into dsr | CLOSED | r1_misc: raises |
+| m9 repeated gate runs | CLOSED (only if `log_gates` is called; N10) | r1_misc: 2 prior runs listed plus a markdown warning |
+| F1 spawn pool | CLOSED | r1_f1: spawn workers have `polars_threads=1` and all caps set to 1. The parent env is restored, including a pre-existing `POLARS_MAX_THREADS=3`. n_jobs 4 vs 1 is bit-identical (returns, selection, WFO, CPCV). Sobol 16 → resume 32 on 4 workers is bit-identical to a fresh 32 |
+
+End to end (r1_p06, 72 zero-edge worlds, v1.2 gates, default WFO): 0 verdicts PASS. By gate: DSR 0.00, OOS 0.00, cost stress 0.00, `wfo_oos` 0.00–0.04, `cscv_oos_loss` 0.04–0.08, plateau 0.46–0.50.
+
+### New findings
+
+**N1 — BLOCKER. Resuming a TPE study as `method="sobol"` launders the data-dependent candidate set (B3 bypass).**
+`opt.run_study(resume=True)` restores every recorded trial (`bk.restore(_load_existing(...))`) and appends the new method's candidates. It then sets `data_dependent = method not in DATA_INDEPENDENT_METHODS` from the **current call's** `method`. Nothing checks that the ledger's creation row said `method="tpe"`. `meta["method"]`, `meta["seed"]` and `meta["candidate_set"]` are also taken from the resume call, so the study's own record no longer describes how its candidate set was built.
+r1_p07 (24 paired null seeds): with TPE 60 then resume sobol 60 (118 trials), `candidate_set_data_dependent=False` and the OOS gates run. The CPCV-median OOS is +0.109 and the WFO OOS is +0.040. Paired against the all-441 grid, the bias is **+0.080 (se 0.023) CPCV and +0.099 (se 0.034) WFO**. In some seeds all three gates PASS under a zero-edge null.
+*Failure scenario:* an agent explores with TPE ("allowed for exploration") and then "finishes the study" with Sobol under the same id. The B3 contamination returns silently and the OOS gate, `wfo_oos` and the holdout band are biased upward again.
+*Fix:* on resume, take method/seed/space from the ledger `start` row and refuse any change. Or set `data_dependent` = OR over the ledger's method history. Or make `_load_existing` tag TPE-origin trials and flag the study.
+
+**N2 — MAJOR. Prior-trial count can be shrunk without an error (M4 partial).**
+`resolve_prior_trials` trusts `study.meta` (book/system/attempt), which `run_study` fills from the **call arguments**, over the study's own ledger row. It filters other studies by `attempt ≤ this attempt` across all issues. r1_p11, where the ledger holds sma a1–a3 at 49 trials each:
+- (f) resuming `fbs-0007-a3` with `system="other", attempt=1` gives meta other/1 while the ledger row still says sma/3. The prior becomes **0**. DSR 0.982 against 0.931 honest; hurdle 0.76 against 0.96.
+- (c) the same idea under a new system name (`sma_v2`, or just `SMA`) gets prior 0. No normalisation, no warning.
+- (b) a new issue on the same system at attempt = 1 counts only the other issue's a1 (prior 49 instead of 147), because the `max_attempt` filter ignores the issue.
+- `prior_trials=0` given explicitly is accepted at any attempt (only labelled "explicit"). The deprecated `prior_effective_trials` alias turns an old-style n_eff (8.0) into the raw prior and skips the ledger, which would give 25 (r1_misc).
+
+*Fix:* read book/system/attempt from the ledger creation row; raise if `study.meta` disagrees. Count every same-system study created before this one, whatever its attempt/issue label. Require a reason string for an explicit prior below the ledger value. Drop the alias or keep the max of alias and ledger.
+
+**N3 — MAJOR. `plateau_radius` is a free, unlogged gate-time kwarg (brings back M5).**
+Any caller of `evaluate_gates` can pass a radius. It is not read from the hypothesis card, not stored in `study.meta`, and not written by `log_gates`: only the per-row interpretation text shows the rule. With `plateau_radius=1e-6` no level lies inside the radius, so every param falls back to its adjacent levels. That is exactly the v1.1 grid-step neighbourhood: the 2 %-wide spike goes from FAIL to **PASS 1.0 at steps 2 and 1** (r1_p10(b/c)). A large radius can equally be chosen after the fact when it helps.
+*Fix:* take the radius only from a pre-registered artifact (card or study `start` row, hashed in the ledger). Log it with the gates. Enforce a floor, e.g. radius ≥ 0.10, and ≥ 1 grid step so the fallback is never narrower than DESIGN's ±20 %.
+
+**N4 — MAJOR. The judge-side plateau does not work on Sobol studies (the mandated method for > 3 params).**
+In the ±20 % box the expected neighbour count is roughly n·Π(0.4·x/range). r1_p10(e), 6 studies per cell:
+- d = 3, n = 64: 0 neighbours in 50 % of studies, ≤ 2 in 100 %.
+- d = 4, n = 64: zero in 83 %.
+- d = 4, n = 256: zero in 17 %, ≤ 2 in 67 %.
+- d = 5, n = 64 or 256: zero in 100 %.
+
+Zero neighbours → SKIPPED → the verdict can never be PASS. One neighbour → the score is 0 or 1 (d = 3, n = 64 seed 0 scored 1.0 on a zero surface).
+*Failure scenario:* every ≥ 4-param system is INCOMPLETE by construction. That creates pressure to use N3 (a big radius) or to hand-wave the plateau. The 1-neighbour case is a coin flip.
+*Fix:* for continuous/Sobol studies, define the neighbourhood as the k nearest points in log/unit coordinates, capped at the ±20 % scale. Alternatively evaluate a pre-registered ±20 % perturbation set around the selected config (a few extra trials, judge-side, counted in N).
+
+**N5 — MAJOR (regression vs v1.1). The joint holdout band is more lenient than the v1.1 marginal band.**
+`joint_tail_level` makes about 90 % of joint draws pass all four criteria. That pushes each limit to α ≈ 0.034–0.05 instead of 0.10. So the Sharpe floor, return-at-budget floor and DD ceiling are all looser than v1.1's p10 / p10 / p95. On the r1_p05 dead-edge studies that pass the gates, P(zero-edge holdout passes) roughly doubles (0.14–0.38 → 0.32–0.61). For live edges it goes from 0.01–0.10 to 0.02–0.27. The power figure is reported and `decisive=False` is shown, but the holdout still ends "PASS".
+*Failure scenario:* combined with B2 partial (about 50 % of dead edges pass S5), roughly 16–30 % of dead systems clear both S5 and S8. On the same studies, a v1.1-level band would let through about 7–19 %.
+*Fix (DESIGN decision, §11 #8):* require holdout Sharpe > 0 as an extra criterion. Or keep the v1.1 marginal levels and report joint coverage as a diagnostic. Or make `decisive=False` block promotion until the renewing holdout accrues.
+
+**N6 — MAJOR. The "1 pip" stress slippage is still a no-op for crypto and B3, and is punitive for silver.**
+`pip_points` returns 1 point for anything that is not FX or a metal. r1_p09, 1 pip against the median D1 spread:
+- BTCUSD: 0.01 USD, **0.001×** spread.
+- ETHUSD: **0.005×** spread.
+- WDO (point 0.001, tick 0.5): **0.002 tick**.
+- WIN (tick 5): **0.2 tick**. The docstring's "1 pip = 1 point = 1 tick" is false for both B3 futures.
+- XAGUSD at 0.1 USD: **2.6× the spread per fill** (≈ 40 bp of price), which will kill any silver system.
+- FX and XAU are sensible: 0.33× / 0.36× spread.
+
+*Fix:* define stress slippage per asset class as a fraction of the typical spread (e.g. +0.5× median spread per fill) or as ≥ 1 `tick_size`, not as a "pip".
+
+### Minor
+
+- **N7:** `_resolve_spec` does not check that an explicit `spec=` matches `evaluator.symbol` (passing BTCUSD's spec for EURUSD turns 1 pip into 1 pt). The synthetic exemption is attribute-based (`is_synthetic=True`, or any `.inner` that is a SyntheticEvaluator).
+- **N8 (m7 still open):** irrelevant params push the plateau toward (n_pass+1)/(n_rel+1). r1_p10(d): 0.500 → 0.583 → 0.598 with 0 / 1 / 2 dummies of 21 levels. It tops out just under 0.60 here, but it flips a 4/7 = 0.571 plateau to 0.625.
+- **N9 (B2 design):** the "recent third" is > 0 against a threshold of 0. That has about 50 % power against an exactly dead edge, whatever its length. A PSR(0) > 0.5 on the last third, or a CUSUM alarm over the WFO series, would add power.
+- **N10:** `evaluate_gates` does not log itself, so look → `resume` with a larger `n_trials` or a different `seed` leaves only a `resumed` event. N is counted, so the bias is limited to optional stopping. The resumed study's `meta.seed` then no longer reproduces its candidate set.
+- **R2 note (approved):** `cscv_oos_loss` no longer catches "IS-best is overfit but still OOS-positive" (PBO did). This is intended by R2, so it is listed here only for completeness.
+
+### Checks run that found nothing wrong
+
+- **DSR:** calibrated under correlated, iid, fat-tailed and vol-clustered nulls (r1_p02). The hurdle uses raw N = study + ledger prior, and invalid trials are excluded.
+- **`cscv_oos_loss`:** not moved by padding the grid with bleeders (r1_p06).
+- **TPE:** pure TPE is flagged, and all three OOS gates are SKIPPED (r1_p07).
+- **Sobol candidate set:** data-independent and unbiased. Its prefix is invariant to n, so resuming with a larger n extends the same set (r1_f1, r1_p07).
+- **Plateau:** the optimizer's `PlateauConfig` has no effect on the gate (r1_p10(a)).
+- **Cost stress slippage:**
+  - applied on entries and on signal, force and eod exits in both directions;
+  - no slippage on targets (reading of `engine._run_core`);
+  - the gate's spec comes from `load_instrument`, and a missing spec is SKIPPED, never a silent 1 pt.
+- **Embargo cap:** blocks PASS (r1_misc).
+- **Repeated gate runs:** flagged (r1_misc).
+- **F1 spawn pool:** caps, env restore, determinism and resume all correct (r1_f1).
+- **m2 cross conversion:** fixed (r1_p08b).
