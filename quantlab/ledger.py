@@ -20,6 +20,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import re
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -225,6 +226,64 @@ def study_events(study_id: str, event: str | None = None, *,
             if r.get("study_id") == study_id and (event is None or r.get("event") == event)]
 
 
+def created_row(study_id: str, *, ledger_dir: Path | None = None) -> dict[str, Any] | None:
+    """The study's ``study_created`` row (raw, with ``seq``), or None if the study is not in the ledger."""
+    for r in _read(_ledger_dir(ledger_dir) / STUDIES_FILE):
+        if r.get("study_id") == study_id and r.get("event") == "study_created":
+            return r
+    return None
+
+
+def normalise_system(name: Any) -> str:
+    """System name for cross-study matching (N2): casefold, strip every non-alphanumeric
+    character (``"SMA-Cross"``, ``"sma_cross"`` and ``"smacross"`` are the same system)."""
+    return re.sub(r"[^0-9a-z]", "", str(name or "").casefold())
+
+
+def related_prior_trials(study_id: str, *, ledger_dir: Path | None = None
+                         ) -> tuple[float, list[str], dict[str, Any]]:
+    """Raw trials of every OTHER study created **before** ``study_id`` (ledger order) that shares
+    either the normalised system name (:func:`normalise_system`) or the issue number with it,
+    whatever its attempt label or book (red-team N2: relabelling attempt / system / issue must
+    not shrink the DSR's N).  Each study contributes its own count (:func:`study_trial_count`).
+
+    Returns ``(total, study ids used, this study's created row)``.  Raises :class:`LedgerError`
+    if ``study_id`` is not in the ledger."""
+    rows = _read(_ledger_dir(ledger_dir) / STUDIES_FILE)
+    own = next((r for r in rows if r.get("study_id") == study_id and r.get("event") == "study_created"), None)
+    if own is None:
+        raise LedgerError(f"unknown study {study_id}")
+    sysn = normalise_system(own.get("system"))
+    issue = own.get("issue")
+    state = studies(ledger_dir)
+    total, used = 0.0, []
+    for r in rows:
+        if r.get("event") != "study_created" or r["seq"] >= own["seq"] or r["study_id"] == study_id:
+            continue
+        same_sys = bool(sysn) and normalise_system(r.get("system")) == sysn
+        same_issue = issue is not None and r.get("issue") is not None and int(r["issue"]) == int(issue)
+        if same_sys or same_issue:
+            total += study_trial_count(state.get(r["study_id"], {}))
+            used.append(r["study_id"])
+    return total, used, own
+
+
+def candidate_set_data_dependent(study_id: str, *, ledger_dir: Path | None = None) -> bool:
+    """True if the study's candidate set was ever data-dependent according to the ledger (B3 /
+    N1): the created row says so or has ``method == "tpe"``, or ANY later event of the study set
+    ``candidate_set_data_dependent=True`` or recorded TPE-sourced trials (``n_by_source``).
+    Once True it can never be reset by a later event."""
+    for r in study_events(study_id, ledger_dir=ledger_dir):
+        if r.get("candidate_set_data_dependent") is True:
+            return True
+        if r.get("event") == "study_created" and r.get("method") == "tpe":
+            return True
+        src = r.get("n_by_source")
+        if isinstance(src, dict) and int(src.get("tpe", 0) or 0) > 0:
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------- holdout
 def holdout_unlocks(ledger_dir: Path | None = None) -> list[dict[str, Any]]:
     return _read(_ledger_dir(ledger_dir) / HOLDOUT_FILE)
@@ -290,14 +349,18 @@ class TrialRecorder:
         return sum(pl.scan_parquet(p).select(pl.len()).collect().item() for p in parts)
 
     def add(self, params: dict[str, Any], metrics: dict[str, Any], *,
-            status: str = "ok", returns: pl.DataFrame | None = None) -> int:
-        """Record one trial; ``returns`` = frame with ``date`` + ``ret`` (daily % equity)."""
+            status: str = "ok", returns: pl.DataFrame | None = None, source: str | None = None) -> int:
+        """Record one trial; ``returns`` = frame with ``date`` + ``ret`` (daily % equity);
+        ``source`` = how the configuration was proposed (grid / sobol / random / tpe — N1)."""
         trial_id = self.n_trials
-        self._rows.append({
+        row = {
             "trial_id": trial_id, "status": status,
             "params": json.dumps(params, sort_keys=True, default=str),
             **{f"m_{k}": (float(v) if v is not None else None) for k, v in metrics.items()},
-        })
+        }
+        if source is not None:
+            row["source"] = str(source)
+        self._rows.append(row)
         if returns is not None:
             self._returns[f"t{trial_id}"] = returns
         self.n_trials += 1

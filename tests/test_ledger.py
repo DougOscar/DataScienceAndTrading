@@ -169,3 +169,35 @@ def test_study_events_filters_by_study_and_event(tmp_path, clean_tree):
     ev = ledger.study_events("fbs-0007-a1", "gates", ledger_dir=tmp_path)
     assert [e["verdict"] for e in ev] == ["FAIL", "PASS"]
     assert len(ledger.study_events("fbs-0007-a1", ledger_dir=tmp_path)) == 4
+
+
+def test_related_prior_trials_by_name_or_issue_in_ledger_order(tmp_path, clean_tree):
+    """N2: every OTHER study created earlier that shares the normalised system name or the issue."""
+    ledger.create_study(ledger_dir=tmp_path, **_study(system="Donchian-20"))
+    ledger.log_event("fbs-0007-a1", "trials", ledger_dir=tmp_path, n_trials=400)
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0009-a1", issue=9, system="donchian_20"))
+    ledger.log_event("fbs-0009-a1", "trials", ledger_dir=tmp_path, n_trials=30)
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0010-a1", issue=10, system="rsi"))
+    ledger.log_event("fbs-0010-a1", "trials", ledger_dir=tmp_path, n_trials=999)
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0007-a1b", issue=7, system="breakout"))
+    tot, used, own = ledger.related_prior_trials("fbs-0007-a1b", ledger_dir=tmp_path)
+    assert tot == 400 and used == ["fbs-0007-a1"] and own["system"] == "breakout"
+    tot, used, _ = ledger.related_prior_trials("fbs-0009-a1", ledger_dir=tmp_path)
+    assert tot == 400 and used == ["fbs-0007-a1"]                 # the later-created one is not counted
+    assert ledger.related_prior_trials("fbs-0007-a1", ledger_dir=tmp_path)[0] == 0
+    with pytest.raises(LedgerError, match="unknown study"):
+        ledger.related_prior_trials("nope", ledger_dir=tmp_path)
+
+
+def test_data_dependence_flag_never_resets_and_trial_source_is_stored(tmp_path, clean_tree):
+    ledger.create_study(ledger_dir=tmp_path, **_study(method="sobol", candidate_set_data_dependent=False))
+    assert ledger.candidate_set_data_dependent("fbs-0007-a1", ledger_dir=tmp_path) is False
+    ledger.log_event("fbs-0007-a1", "trials", ledger_dir=tmp_path, candidate_set_data_dependent=True)
+    ledger.log_event("fbs-0007-a1", "selection", ledger_dir=tmp_path, candidate_set_data_dependent=False)
+    assert ledger.candidate_set_data_dependent("fbs-0007-a1", ledger_dir=tmp_path) is True
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0007-a2", attempt=2, method="tpe"))
+    assert ledger.candidate_set_data_dependent("fbs-0007-a2", ledger_dir=tmp_path) is True
+    with ledger.TrialRecorder("s1", tmp_path / "studies") as rec:
+        rec.add({"a": 1}, {"sharpe": 0.1}, source="tpe")
+        rec.add({"a": 2}, {"sharpe": 0.2})
+    assert ledger.load_trials("s1", tmp_path / "studies")["source"].to_list() == ["tpe", None]
