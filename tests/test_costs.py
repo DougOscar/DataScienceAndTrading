@@ -12,6 +12,7 @@ import types
 import warnings
 
 import numpy as np
+import polars as pl
 import pytest
 
 from quantlab import config, costs
@@ -152,16 +153,28 @@ def test_pip_points_fx_legacy_2_or_4_digit_whole_pip_quote_is_1_point():
     assert costs.pip_points(usdjpy2) == pytest.approx(1.0)
 
 
-def test_pip_points_metals_use_the_documented_0_1_usd_convention():
+def test_pip_points_metals_use_the_documented_per_metal_usd_convention():
+    """Red-team N6: silver is now its own 0.01 USD convention, not gold's 0.1 -- the old
+    shared 0.1 USD number priced a silver "pip" at 2.6x the median FBS D1 spread."""
     xau = _spec(symbol="XAUUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
                 base_ccy="XAU", quote_ccy="USD")
     xag = _spec(symbol="XAGUSD", digits=3, point=0.001, contract_size=5_000.0, tick_size=0.001,
                 base_ccy="XAG", quote_ccy="USD")
+    xpt = _spec(symbol="XPTUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XPT", quote_ccy="USD")
+    xpd = _spec(symbol="XPDUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XPD", quote_ccy="USD")
     assert costs.pip_points(xau) == pytest.approx(10.0)    # 0.1 / 0.01
-    assert costs.pip_points(xag) == pytest.approx(100.0)   # 0.1 / 0.001
+    assert costs.pip_points(xag) == pytest.approx(10.0)    # 0.01 / 0.001 (N6 fix, was 100.0)
+    assert costs.pip_points(xpt) == pytest.approx(10.0)    # 0.1 / 0.01 (gold's convention)
+    assert costs.pip_points(xpd) == pytest.approx(10.0)    # 0.1 / 0.01 (gold's convention)
 
 
 def test_pip_points_crypto_and_b3_futures_default_to_1_tick_1_point():
+    """``pip_points`` itself is unchanged for these classes (still a flat 1-point
+    fallback, kept for backward-compatible FX/metals-only display code, e.g.
+    gates.py's "1 pip = N points" text) -- see ``test_stress_slippage_points_*`` below
+    for what ``CostModel.stressed()`` actually uses for these classes since N6."""
     btc = _spec(symbol="BTCUSD", digits=2, point=0.01, contract_size=1.0, tick_size=0.01,
                 base_ccy="BTC", quote_ccy="USD")
     win = _spec(symbol="WINZ26", digits=0, point=5.0, contract_size=0.20, tick_size=5.0,
@@ -204,12 +217,217 @@ def test_stressed_old_extra_slippage_kwarg_still_bypasses_pip_conversion():
     assert stressed.slippage_points == pytest.approx(3.0)
 
 
+# --------------------------------------------------------------------------- stress_slippage_points (red-team N6)
+#
+# Reference median D1 bar spread (points) over the FBS/B3 dev window 2024-01..06, taken from
+# the phase-1 red-team's own probe (research/audits/probes/phase1/r1_p09_cost_stress.py/.out,
+# "Re-verification round 1 (e64efcf)", finding N6) -- used here only to hand-compute each
+# class's stress slippage as a documented multiple of what the market actually quotes. This
+# worktree has no bar data mounted (data/ is gitignored bulk data, worktree-local), so the
+# table below is evidence, not a live recomputation; the crypto/indices lookup path itself is
+# exercised separately with a monkeypatched quantlab.data below.
+_REF_MEDIAN_SPREAD_POINTS = {
+    "EURUSD": 30.0, "USDJPY": 73.0, "XAUUSD": 28.0, "XAGUSD": 39.0,
+    "BTCUSD": 1942.0, "ETHUSD": 203.0, "WINZ26": 1.0, "WDOZ26": 1.0,
+}
+
+
+@pytest.mark.parametrize("symbol,spec_kwargs,expected_points", [
+    ("EURUSD", dict(digits=5, point=0.00001, tick_size=0.00001, base_ccy="EUR", quote_ccy="USD"),
+     10.0),
+    ("USDJPY", dict(digits=3, point=0.001, tick_size=0.001, base_ccy="USD", quote_ccy="JPY"),
+     10.0),
+    ("XAUUSD", dict(digits=2, point=0.01, tick_size=0.01, contract_size=100.0,
+                     base_ccy="XAU", quote_ccy="USD"), 10.0),
+    ("XAGUSD", dict(digits=3, point=0.001, tick_size=0.001, contract_size=5_000.0,
+                     base_ccy="XAG", quote_ccy="USD"), 10.0),  # N6 fix: was 100.0 (2.6x spread)
+    ("BTCUSD", dict(digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                     base_ccy="BTC", quote_ccy="USD"), 1942.0),
+    ("ETHUSD", dict(digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                     base_ccy="ETH", quote_ccy="USD"), 203.0),
+    ("WINZ26", dict(digits=0, point=1.0, tick_size=5.0, contract_size=0.20, base_ccy="IBOV",
+                     quote_ccy="BRL", volume_min=1.0, volume_step=1.0), 5.0),
+    ("WDOZ26", dict(digits=3, point=0.001, tick_size=0.5, contract_size=10.0, base_ccy="USD",
+                     quote_ccy="BRL", volume_min=1.0, volume_step=1.0), 500.0),
+], ids=["EURUSD_fx", "USDJPY_fx", "XAUUSD_metal", "XAGUSD_metal", "BTCUSD_crypto",
+        "ETHUSD_crypto", "WIN_b3", "WDO_b3"])
+def test_stress_slippage_points_table(symbol, spec_kwargs, expected_points):
+    """Table-driven (red-team N6): each asset class's stress slippage, in points and as a
+    multiple of the reference median dev-window D1 spread. Crypto has no spec-derived
+    convention, so it needs median_spread_points= (or a data lookup, tested separately);
+    every other class is pure spec arithmetic."""
+    spec = _spec(symbol=symbol, **spec_kwargs)
+    ref_spread = _REF_MEDIAN_SPREAD_POINTS[symbol]
+    if symbol in ("BTCUSD", "ETHUSD"):
+        points = costs.stress_slippage_points(spec, median_spread_points=ref_spread)
+    else:
+        points = costs.stress_slippage_points(spec)
+    assert points == pytest.approx(expected_points)
+    ratio = points / ref_spread
+    print(f"{symbol}: {points:g} pts = {ratio:.3f}x median spread ({ref_spread:g} pts)")
+
+
+def test_stress_slippage_points_fx_matches_pip_points():
+    eurusd = _spec(symbol="EURUSD", digits=5, point=0.00001, base_ccy="EUR", quote_ccy="USD")
+    usdjpy = _spec(symbol="USDJPY", digits=3, point=0.001, base_ccy="USD", quote_ccy="JPY")
+    assert costs.stress_slippage_points(eurusd) == costs.pip_points(eurusd) == pytest.approx(10.0)
+    assert costs.stress_slippage_points(usdjpy) == costs.pip_points(usdjpy) == pytest.approx(10.0)
+
+
+def test_stress_slippage_points_silver_is_one_tenth_of_gold():
+    xau = _spec(symbol="XAUUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XAU", quote_ccy="USD")
+    xag = _spec(symbol="XAGUSD", digits=3, point=0.001, contract_size=5_000.0, tick_size=0.001,
+                base_ccy="XAG", quote_ccy="USD")
+    assert costs.stress_slippage_points(xau) == pytest.approx(10.0)   # 0.1 USD / 0.01 point
+    assert costs.stress_slippage_points(xag) == pytest.approx(10.0)   # 0.01 USD / 0.001 point
+
+
+def test_stress_slippage_points_platinum_and_palladium_documented_convention():
+    xpt = _spec(symbol="XPTUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XPT", quote_ccy="USD")
+    xpd = _spec(symbol="XPDUSD", digits=2, point=0.01, contract_size=100.0, tick_size=0.01,
+                base_ccy="XPD", quote_ccy="USD")
+    assert costs.stress_slippage_points(xpt) == pytest.approx(10.0)   # 0.1 USD, gold's convention
+    assert costs.stress_slippage_points(xpd) == pytest.approx(10.0)
+
+
+def test_stress_slippage_points_b3_futures_use_one_tick_converted_to_engine_points():
+    """Red-team N6: tick_size is a *price* increment (WIN's 5 index points, WDO's 0.5), not
+    already in the engine's points unit -- dividing by spec.point is required (DESIGN §4.3).
+    Skipping that conversion is exactly how the pre-fix code priced these at 0.2/0.002 "pip"."""
+    win = _spec(symbol="WINZ26", digits=0, point=1.0, tick_size=5.0, contract_size=0.20,
+                base_ccy="IBOV", quote_ccy="BRL", volume_min=1.0, volume_step=1.0)
+    wdo = _spec(symbol="WDOZ26", digits=3, point=0.001, tick_size=0.5, contract_size=10.0,
+                base_ccy="USD", quote_ccy="BRL", volume_min=1.0, volume_step=1.0)
+    assert costs.stress_slippage_points(win) == pytest.approx(5.0)     # 5.0 / 1.0
+    assert costs.stress_slippage_points(wdo) == pytest.approx(500.0)   # 0.5 / 0.001
+
+
+def test_stress_slippage_points_crypto_uses_given_median_override():
+    btc = _spec(symbol="BTCUSD", digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                base_ccy="BTC", quote_ccy="USD")
+    assert costs.stress_slippage_points(btc, median_spread_points=1942.0) == pytest.approx(1942.0)
+
+
+def test_stress_slippage_points_crypto_computes_median_spread_via_data_load_bars(monkeypatch):
+    """No override given -> reads the symbol's own median dev-window D1 spread via
+    quantlab.data.load_bars (spread column is already in engine points)."""
+    calls = []
+
+    def fake_load_bars(symbol, timeframe, *, book=None, **kw):
+        calls.append((symbol, timeframe, book))
+        return pl.DataFrame({"spread": [1900.0, 1942.0, 2000.0]})
+
+    fake_data = types.ModuleType("quantlab.data")
+    fake_data.load_bars = fake_load_bars
+    monkeypatch.setitem(sys.modules, "quantlab.data", fake_data)
+
+    btc = _spec(symbol="BTCUSD", digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                base_ccy="BTC", quote_ccy="USD")
+    assert costs.stress_slippage_points(btc, book="FBS") == pytest.approx(1942.0)
+    assert calls == [("BTCUSD", "D1", "FBS")]
+
+
+def test_stress_slippage_points_raises_when_no_override_and_data_unavailable(monkeypatch):
+    """Red-team N6: never falls back to a fixed 1-point default -- a crypto/indices symbol
+    with no override and no data lookup available must raise, not silently price its stress
+    slippage as a no-op."""
+    def fake_load_bars(symbol, timeframe, *, book=None, **kw):
+        raise FileNotFoundError("no manifest.json in this environment")
+
+    fake_data = types.ModuleType("quantlab.data")
+    fake_data.load_bars = fake_load_bars
+    monkeypatch.setitem(sys.modules, "quantlab.data", fake_data)
+
+    btc = _spec(symbol="BTCUSD", digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                base_ccy="BTC", quote_ccy="USD")
+    with pytest.raises(ValueError, match="no pip/tick convention"):
+        costs.stress_slippage_points(btc)
+
+
+def test_stress_slippage_points_raises_on_non_positive_median(monkeypatch):
+    fake_data = types.ModuleType("quantlab.data")
+    fake_data.load_bars = lambda symbol, timeframe, *, book=None, **kw: pl.DataFrame(
+        {"spread": [0.0, 0.0]}
+    )
+    monkeypatch.setitem(sys.modules, "quantlab.data", fake_data)
+
+    eth = _spec(symbol="ETHUSD", digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                base_ccy="ETH", quote_ccy="USD")
+    with pytest.raises(ValueError, match="non-positive or NaN"):
+        costs.stress_slippage_points(eth)
+
+
+def test_stress_slippage_points_unknown_class_raises_without_override_or_data(monkeypatch):
+    """Not FX (digits with a non-alpha symbol), not a metal, not WIN/WDO -- an index CFD
+    this catalog doesn't carry yet. With no override and no data, this must raise rather
+    than silently returning 1 point (the original N6 bug, generalised)."""
+    def fake_load_bars(symbol, timeframe, *, book=None, **kw):
+        raise KeyError(symbol)
+
+    fake_data = types.ModuleType("quantlab.data")
+    fake_data.load_bars = fake_load_bars
+    monkeypatch.setitem(sys.modules, "quantlab.data", fake_data)
+
+    spx = _spec(symbol="SPX500", digits=1, point=0.1, tick_size=0.1, contract_size=1.0,
+                base_ccy="SPX", quote_ccy="USD")
+    with pytest.raises(ValueError, match="no pip/tick convention"):
+        costs.stress_slippage_points(spx)
+
+
+def test_stressed_forwards_book_and_computes_median_spread_for_crypto(monkeypatch):
+    calls = []
+
+    def fake_load_bars(symbol, timeframe, *, book=None, **kw):
+        calls.append((symbol, timeframe, book))
+        return pl.DataFrame({"spread": [1900.0, 1942.0, 2000.0]})
+
+    fake_data = types.ModuleType("quantlab.data")
+    fake_data.load_bars = fake_load_bars
+    monkeypatch.setitem(sys.modules, "quantlab.data", fake_data)
+
+    btc = _spec(symbol="BTCUSD", digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                base_ccy="BTC", quote_ccy="USD")
+    base = costs.CostModel(version_tag="fbs-v2")
+    stressed = base.stressed(spec=btc)  # book defaults to "FBS"; no gates.py call site changes
+    assert stressed.slippage_points == pytest.approx(1942.0)
+    assert calls == [("BTCUSD", "D1", "FBS")]
+
+
+def test_stressed_median_spread_points_override_skips_data_lookup(monkeypatch):
+    def fail(*a, **kw):
+        raise AssertionError("should not call data.load_bars when median_spread_points is given")
+
+    fake_data = types.ModuleType("quantlab.data")
+    fake_data.load_bars = fail
+    monkeypatch.setitem(sys.modules, "quantlab.data", fake_data)
+
+    eth = _spec(symbol="ETHUSD", digits=2, point=0.01, tick_size=0.01, contract_size=1.0,
+                base_ccy="ETH", quote_ccy="USD")
+    base = costs.CostModel(version_tag="fbs-v2")
+    stressed = base.stressed(spec=eth, median_spread_points=203.0)
+    assert stressed.slippage_points == pytest.approx(203.0)
+
+
+def test_stressed_b3_futures_use_one_tick_no_data_lookup_needed():
+    win = _spec(symbol="WINZ26", digits=0, point=1.0, tick_size=5.0, contract_size=0.20,
+                base_ccy="IBOV", quote_ccy="BRL", volume_min=1.0, volume_step=1.0)
+    wdo = _spec(symbol="WDOZ26", digits=3, point=0.001, tick_size=0.5, contract_size=10.0,
+                base_ccy="USD", quote_ccy="BRL", volume_min=1.0, volume_step=1.0)
+    base = costs.CostModel(version_tag="fbs-v2")
+    assert base.stressed(spec=win).slippage_points == pytest.approx(5.0)
+    assert base.stressed(spec=wdo).slippage_points == pytest.approx(500.0)
+
+
 # --------------------------------------------------------------------------- version (red-team N5)
 
 def test_version_is_just_the_tag_when_every_knob_is_at_its_default():
     assert costs.CostModel(version_tag="fbs-v1").version == "fbs-v1"
-    # DESIGN §8's own default tag; bumped v0->v1 for red-team M2 (engine slippage scope).
-    assert costs.CostModel().version == "fbs-v1-uncalibrated"
+    # DESIGN §8's own default tag; bumped v0->v1 for red-team M2 (engine slippage scope),
+    # then v1->v2 for red-team N6 (per-asset-class stress slippage -- see costs.py's class
+    # docstring for exactly what "the same nominal 1 pip stress" now means differently).
+    assert costs.CostModel().version == "fbs-v2-uncalibrated"
 
 
 def test_version_encodes_each_non_default_knob_in_a_fixed_order():
@@ -235,7 +453,7 @@ def test_version_never_collides_across_different_knob_combinations():
     assert default.version != bar_extreme.version
     assert default.version != stressed.version
     assert bar_extreme.version != stressed.version
-    assert bar_extreme.version == "fbs-v1-uncalibrated+stop_fill=bar_extreme"
+    assert bar_extreme.version == "fbs-v2-uncalibrated+stop_fill=bar_extreme"
 
 
 def test_version_does_not_accumulate_stale_suffixes_across_repeated_stressed_calls():
