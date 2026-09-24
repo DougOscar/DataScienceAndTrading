@@ -1,0 +1,26 @@
+== A_plain_null: 40 zero-edge worlds
+   dsr                  pass rate 0.10
+   pbo                  pass rate 0.07
+   oos_sharpe           pass rate 0.00
+   cost_stress_sharpe   pass rate 0.00
+   plateau              pass rate 0.42
+   positive_years       pass rate 0.40
+   max_year_share       pass rate 0.10
+   trade_count          pass rate 0.03
+   mechanism            pass rate 1.00
+   verdict PASS rate 0.00
+   median n_eff used 1.55 of 100 raw; median sr0 hurdle (annual) 0.04; median PBO 0.50; median plateau 0.19
+   among 22 worlds with selected in-sample Sharpe > 0: DSR pass 0.18, PBO pass 0.09, plateau pass 0.77
+== B_padded_null: 40 zero-edge worlds
+   dsr                  pass rate 0.05
+   pbo                  pass rate 0.40
+   oos_sharpe           pass rate 0.00
+   cost_stress_sharpe   pass rate 0.00
+   plateau              pass rate 0.42
+   positive_years       pass rate 0.42
+   max_year_share       pass rate 0.12
+   trade_count          pass rate 0.00
+   mechanism            pass rate 1.00
+   verdict PASS rate 0.00
+   median n_eff used 1.55 of 100 raw; median sr0 hurdle (annual) 0.12; median PBO 0.33; median plateau 0.20
+   among 21 worlds with selected in-sample Sharpe > 0: DSR pass 0.10, PBO pass 0.43, plateau pass 0.81

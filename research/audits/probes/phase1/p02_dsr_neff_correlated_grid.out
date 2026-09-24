@@ -1,0 +1,10 @@
+== sma_grid: 300 null worlds, N raw = 90
+   n_eff eigen median 2.34  cluster median 3.00  liji median 20.0
+   P(DSR>=0.95) lib(max eigen,cluster) = 0.190   Li-Ji = 0.030   raw N = 0.007   PSR(0) (no deflation) = 0.383
+   mean selected SR (per-period) 0.0306 ; mean sr0 hurdle (lib) 0.0101 ; cross-sectional sd(SR) 0.0127 ; 1/sqrt(T) 0.0207
+   annualised: max SR mean 0.49, hurdle 0.16
+== equicorr_0.8: 300 null worlds, N raw = 100
+   n_eff eigen median 1.55  cluster median 1.00  liji median 21.0
+   P(DSR>=0.95) lib(max eigen,cluster) = 0.213   Li-Ji = 0.057   raw N = 0.043   PSR(0) (no deflation) = 0.277
+   mean selected SR (per-period) 0.0232 ; mean sr0 hurdle (lib) 0.0024 ; cross-sectional sd(SR) 0.0093 ; 1/sqrt(T) 0.0207
+   annualised: max SR mean 0.37, hurdle 0.04

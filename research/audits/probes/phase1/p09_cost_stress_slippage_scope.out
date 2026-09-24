@@ -1,0 +1,12 @@
+Sma: point=1e-05
+   base               sharpe -0.4912  sum pnl  -13753.39  trades 95
+   slip+1pt           sharpe -0.4948  sum pnl  -13840.17  trades 95
+   slip+10pt          sharpe -0.5290  sum pnl  -14655.13  trades 95
+   stressed()         sharpe -0.6145  sum pnl  -16746.15  trades 95
+   spread x1.5 only   sharpe -0.5094  sum pnl  -14166.23  trades 95
+SmaNoStop: point=1e-05
+   base               sharpe -0.3774  sum pnl   -9135.00  trades 95
+   slip+1pt           sharpe -0.3774  sum pnl   -9135.00  trades 95
+   slip+10pt          sharpe -0.3774  sum pnl   -9135.00  trades 95
+   stressed()         sharpe -0.4130  sum pnl   -9896.00  trades 95
+   spread x1.5 only   sharpe -0.4130  sum pnl   -9896.00  trades 95
