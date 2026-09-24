@@ -1,12 +1,17 @@
 """End-to-end gate tests on synthetic StudyResults with a fake evaluator (DESIGN §4.2 v1.2, §10 Phase 1).
 
 Regression tests for the Phase 1 fix round (red-team B1–B4, M1, M3–M5, m1, m3, m4, m9;
-calibration F4) are marked in their docstrings; each fails on the a741fa2 code.
+calibration F4) are marked in their docstrings; each fails on the a741fa2 code.  Fix round 2
+(re-verification N1–N4, N7, N10) tests are marked the same way and fail on e64efcf.
+
+Every study is registered in a (temporary) ledger before it is gated: the gates read the
+study's identity, prior trials, plateau radius and candidate-set flag from its ledger row (N2).
 """
 
 from __future__ import annotations
 
 import math
+import re
 import tempfile
 import warnings
 from dataclasses import replace
@@ -18,13 +23,34 @@ import polars as pl
 import pytest
 
 from quantlab import gates as G
-from quantlab import ledger
+from quantlab import ledger, opt
 from quantlab import stats as S
 from quantlab.contracts import Outcome, StudyResult
 from quantlab.costs import CostModel, load_instrument, pip_points
+from quantlab.evaluators import SyntheticEvaluator
 
 PPY = 260.0
-EMPTY_LEDGER = Path(tempfile.mkdtemp(prefix="ql_gates_empty_ledger_"))
+GRID_SPACE = opt.SearchSpace([opt.IntParam("a", 1, 5), opt.IntParam("b", 1, 5)]).to_json()
+
+
+def register(study: StudyResult, ledger_dir: Path | None = None, **over) -> Path:
+    """Create the study's ``study_created`` ledger row from its meta (identity, method, space,
+    candidate-set flag, radius) in ``ledger_dir`` (default: a fresh temporary ledger)."""
+    ld = Path(ledger_dir) if ledger_dir is not None else Path(tempfile.mkdtemp(prefix="ql_gates_ledger_"))
+    m = study.meta or {}
+    idm = re.search(r"-(\d+)-a(\d+)$", study.study_id)
+    row = dict(study_id=study.study_id, book=m.get("book", "FBS"), system=m.get("system", "toy"),
+               issue=m.get("issue", int(idm.group(1)) if idm else 99),
+               attempt=m.get("attempt", int(idm.group(2)) if idm else 1),
+               dev_window=["2016-05-02", "2025-05-14"], cost_model_version="fbs-test", cv_scheme="CPCV(n=6,k=2)")
+    for k_meta, k_led in (("method", "method"), ("space", "search_space"), ("seed", "seed"),
+                          ("plateau_radius", "plateau_radius"),
+                          ("candidate_set_data_dependent", "candidate_set_data_dependent")):
+        if m.get(k_meta) is not None:
+            row[k_led] = m[k_meta]
+    row.update(over)
+    ledger.create_study(ledger_dir=ld, **row)
+    return ld
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")          # uncalibrated fallback spec is fine for tests
     EURUSD = load_instrument("EURUSD", book="FBS")
@@ -110,7 +136,7 @@ def make_study(*, seed: int = 0, n_days: int = 2340, peak_sr: float = 2.2, slope
     study = StudyResult(
         study_id="fbs-0099-a1", param_names=("a", "b"), trials=pl.DataFrame(trows), returns=returns,
         selected_params={"a": 3, "b": 3}, selection=sel, cpcv_paths=cp, wfo_oos=wfo, wfo_params=wp,
-        meta={"n_trials": len(cols), "method": "grid", **(meta or {})})
+        meta={"n_trials": len(cols), "method": "grid", "space": GRID_SPACE, **(meta or {})})
     trades = make_trades(returns["date"], returns[f"t{sel_id}"].to_numpy(), n_trades, rng)
     return study, trades
 
@@ -127,8 +153,9 @@ def make_trades(dates: pl.Series, daily: np.ndarray, n_trades: int, rng) -> pl.D
 
 
 class FakeEvaluator:
-    """Returns the selected trial's daily series minus a cost drag that grows with the
-    stressed spread / slippage / swap knobs."""
+    """Returns the recorded trial series of the requested (a, b) minus a cost drag that grows
+    with the stressed spread / slippage / swap knobs; params not in the study raise (a failed
+    evaluation)."""
 
     book = "FBS"
     periods_per_year = PPY
@@ -143,8 +170,13 @@ class FakeEvaluator:
     def __call__(self, params, *, cost=None):
         c = cost or self.cost
         self.calls.append(c)
-        tid = self.study.selection["trial_id"]
-        base = self.study.returns[f"t{tid}"].to_numpy()
+        t = self.study.trials
+        for k, v in params.items():
+            if f"param_{k}" in t.columns:
+                t = t.filter(pl.col(f"param_{k}") == v)
+        if t.height == 0:
+            raise KeyError(f"no recorded trial for {params}")
+        base = self.study.returns[f"t{int(t['trial_id'][0])}"].to_numpy()
         units = (c.spread_multiplier - 1.0) * 2 + min(c.slippage_points, 1.0) + abs(c.swap_multiplier - 1.0)
         daily = self.study.returns.select("date").with_columns(pl.Series("ret", base - self.drag * units))
         return Outcome(daily=daily, trades=self.trades, metrics={})
@@ -158,7 +190,8 @@ def run(study, trades, evaluator="fake", **kw):
     ev = FakeEvaluator(study, trades) if evaluator == "fake" else evaluator
     kw.setdefault("mechanism_check", _mech_ok)
     kw.setdefault("n_boot", 400)
-    kw.setdefault("ledger_dir", EMPTY_LEDGER)
+    if "ledger_dir" not in kw:
+        kw["ledger_dir"] = register(study)
     return G.evaluate_gates(study, ev, periods_per_year=PPY, selected_trades=trades, **kw), ev
 
 
@@ -307,7 +340,7 @@ def test_cscv_gate_not_gamed_by_bleeder_padding():
     study = StudyResult("fbs-0098-a1", ("a",), trials, returns, {"a": j}, {"trial_id": j},
                         pl.DataFrame(schema={"date": pl.Date, "path_id": pl.Int64, "ret": pl.Float64}),
                         pl.DataFrame(), pl.DataFrame(), {"method": "grid"})
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=EMPTY_LEDGER)
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=register(study))
     assert rep.row("cscv_oos_loss").status == "FAIL"
     assert rep.diagnostics["pbo_detail"]["pbo"] < 0.30
 
@@ -372,7 +405,7 @@ def test_data_dependent_candidate_set_skips_oos_gates():
     for g in ("oos_sharpe", "wfo_oos", "cscv_oos_loss"):
         assert rep.row(g).status == "SKIPPED" and "data-dependent" in rep.row(g).interpretation
     assert rep.verdict == "INCOMPLETE"
-    study2 = replace(study, meta={**study.meta, "candidate_set_data_dependent": False})
+    study2 = replace(study, meta={**study.meta, "method": "grid"})
     assert run(study2, trades)[0].verdict == "PASS"
     study3 = replace(study, meta={**study.meta, "method": "sobol", "candidate_set_data_dependent": True})
     assert run(study3, trades)[0].row("wfo_oos").status == "SKIPPED"
@@ -441,7 +474,7 @@ def test_trade_criterion_unavailable_when_wfo_counts_missing(good):
 def test_no_evaluator_skips_cost_stress_and_blocks_pass(good):
     study, trades = good
     rep = G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades,
-                           mechanism_check=_mech_ok, n_boot=300, ledger_dir=EMPTY_LEDGER)
+                           mechanism_check=_mech_ok, n_boot=300, ledger_dir=register(study))
     assert rep.row("cost_stress_sharpe").status == "SKIPPED"
     assert rep.verdict == "INCOMPLETE"
 
@@ -500,8 +533,8 @@ def test_plateau_narrow_bump_fails_at_every_grid_resolution(step):
     study = _bump_study(step)
     info = G.plateau_score(study, PPY)
     assert info["plateau_score"] < 0.6, info
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=EMPTY_LEDGER)
-    assert rep.row("plateau").status == "FAIL"
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=register(study))
+    assert rep.row("plateau").status == "FAIL" and "Matrix-based fallback" in rep.row("plateau").interpretation
     assert rep.diagnostics["plateau_optimizer"]["score"] == 1.0
 
 
@@ -531,7 +564,7 @@ def test_plateau_2d_spike_with_generous_optimizer_config():
                         {"a": 5, "b": 5}, {"trial_id": sel, "plateau_score": 1.0}, pl.DataFrame(), pl.DataFrame(),
                         pl.DataFrame(), {"method": "grid"})
     assert G.plateau_score(study, PPY)["plateau_score"] < 0.6
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=EMPTY_LEDGER)
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=register(study))
     assert rep.row("plateau").status == "FAIL"
 
 
@@ -596,7 +629,7 @@ def test_trade_count_fails_with_too_few_noisy_trades():
 def test_trade_count_skipped_without_trades(good):
     study, _ = good
     rep = G.evaluate_gates(study, None, periods_per_year=PPY, mechanism_check=_mech_ok, n_boot=300,
-                           ledger_dir=EMPTY_LEDGER)
+                           ledger_dir=register(study))
     row = rep.row("trade_count")
     assert row.status == "SKIPPED" and "No per-trade data" in row.interpretation
     assert rep.verdict != "PASS"
@@ -652,36 +685,119 @@ def test_holdout_band_reports_power_and_decisiveness():
     assert hb["p_pass_zero_edge"] < 0.30 and hb["decisive"] is True
 
 
-# ============================================================================ ledger: M4, m1, m9
-def _create(tmp, sid, attempt, system="toy"):
-    ledger.create_study(ledger_dir=tmp, study_id=sid, book="FBS", system=system, issue=99, attempt=attempt,
+# ============================================================================ ledger: M4, m1, m9, N2
+def _create(tmp, sid, attempt, system="toy", issue=99, n_trials=None, **extra):
+    extra.setdefault("search_space", GRID_SPACE)
+    extra.setdefault("method", "grid")
+    ledger.create_study(ledger_dir=tmp, study_id=sid, book="FBS", system=system, issue=issue, attempt=attempt,
                         dev_window=["2016-05-02", "2025-05-14"], cost_model_version="fbs-test",
-                        cv_scheme="CPCV(n=6,k=2)")
+                        cv_scheme="CPCV(n=6,k=2)", **extra)
+    if n_trials is not None:
+        ledger.log_event(sid, "trials", ledger_dir=tmp, n_trials=n_trials)
 
 
 def test_prior_trials_read_from_ledger_and_raise_when_missing(tmp_path, good):
     """M4 regression: evaluate_gates reads earlier attempts' raw trials itself; attempt 2 with
-    no ledger history raises instead of silently deflating by 0."""
+    no ledger history raises instead of silently deflating by 0.  N2: an explicit prior below
+    the ledger's count raises; the deprecated alias is gone."""
     study, trades = good
     a2 = replace(study, study_id="fbs-0099-a2", meta={**study.meta, "book": "FBS", "system": "toy", "attempt": 2})
     _create(tmp_path, "fbs-0099-a2", 2)
-    with pytest.raises(ValueError, match="attempt 2"):
+    with pytest.raises(G.GateError, match="attempt 2"):
         run(a2, trades, ledger_dir=tmp_path)
-    _create(tmp_path, "fbs-0099-a1", 1)
-    ledger.log_event("fbs-0099-a1", "trials", ledger_dir=tmp_path, n_trials=400)
-    _create(tmp_path, "fbs-0099-a3", 3)                      # a later attempt must not count
-    ledger.log_event("fbs-0099-a3", "trials", ledger_dir=tmp_path, n_trials=9999)
-    rep, _ = run(a2, trades, ledger_dir=tmp_path)
+    tmp2 = tmp_path / "l2"
+    _create(tmp2, "fbs-0099-a1", 1, n_trials=400)
+    _create(tmp2, "fbs-0099-a2", 2)
+    _create(tmp2, "fbs-0099-a3", 3, n_trials=9999)              # created later: must not count
+    rep, _ = run(a2, trades, ledger_dir=tmp2)
     et = rep.effective_trials
     assert et["n_trials_prior"] == 400 and et["n_trials"] == 425 and "fbs-0099-a1" in et["prior_source"]
-    # explicit prior wins; deprecated alias still works with a warning
-    assert run(a2, trades, ledger_dir=tmp_path, prior_trials=10)[0].effective_trials["n_trials_prior"] == 10
-    with pytest.warns(DeprecationWarning):
-        rep, _ = run(a2, trades, ledger_dir=tmp_path, prior_effective_trials=7.0)
-    assert rep.effective_trials["n_trials_prior"] == 7.0
-    # attempt taken from the ledger row / the -aN suffix when meta lacks it
-    bare = replace(study, study_id="fbs-0099-a2", meta={"n_trials": 25, "method": "grid"})
-    assert run(bare, trades, ledger_dir=tmp_path)[0].effective_trials["n_trials_prior"] == 400
+    # N2: explicit prior may only raise N
+    assert run(a2, trades, ledger_dir=tmp2, prior_trials=1000)[0].effective_trials["n_trials_prior"] == 1000
+    with pytest.raises(G.GateError, match="below the ledger"):
+        run(a2, trades, ledger_dir=tmp2, prior_trials=10)
+    with pytest.raises(TypeError, match="prior_trials"):
+        run(a2, trades, ledger_dir=tmp2, prior_effective_trials=7.0)
+    # identity comes from the ledger row when meta lacks it
+    bare = replace(study, study_id="fbs-0099-a2", meta={"n_trials": 25, "method": "grid", "space": GRID_SPACE})
+    assert run(bare, trades, ledger_dir=tmp2)[0].effective_trials["n_trials_prior"] == 400
+
+
+def test_gates_require_the_ledger_row_and_matching_meta(tmp_path, good):
+    """N2 regression: a study that is not in the ledger cannot be gated; a meta that disagrees
+    with the ledger (the r1_p11 (f) relabel: ledger sma/3, meta other/1) raises."""
+    study, trades = good
+    with pytest.raises(G.GateError, match="not in the ledger"):
+        G.evaluate_gates(study, FakeEvaluator(study, trades), periods_per_year=PPY, ledger_dir=tmp_path / "empty")
+    s3 = replace(study, study_id="fbs-0007-a3", meta={**study.meta, "system": "sma", "attempt": 3})
+    _create(tmp_path, "fbs-0007-a1", 1, system="sma", issue=7, n_trials=49)
+    _create(tmp_path, "fbs-0007-a2", 2, system="sma", issue=7, n_trials=49)
+    _create(tmp_path, "fbs-0007-a3", 3, system="sma", issue=7)
+    rep, _ = run(s3, trades, ledger_dir=tmp_path)
+    assert rep.effective_trials["n_trials_prior"] == 98
+    relabel = replace(s3, meta={**s3.meta, "system": "other", "attempt": 1})
+    with pytest.raises(G.GateError, match="disagrees with the ledger"):
+        run(relabel, trades, ledger_dir=tmp_path)
+    for bad in ({"issue": 8}, {"book": "B3"}, {"method": "sobol"}, {"plateau_radius": 0.3},
+                {"space": opt.SearchSpace([opt.IntParam("a", 1, 9), opt.IntParam("b", 1, 5)]).to_json()}):
+        with pytest.raises(G.GateError, match="disagrees"):
+            run(replace(s3, meta={**s3.meta, **bad}), trades, ledger_dir=tmp_path)
+
+
+def test_prior_trials_follow_system_name_or_issue_not_labels(tmp_path, good):
+    """N2 regression (r1_p11 b/c): a renamed system (same normalised name, or same issue) and a
+    new issue on the same system both count every earlier related study, whatever its attempt
+    label; an unrelated study (other name, other issue) does not."""
+    study, trades = good
+    _create(tmp_path, "fbs-0007-a1", 1, system="SMA-Cross", issue=7, n_trials=49)
+    _create(tmp_path, "fbs-0007-a2", 2, system="sma_cross", issue=7, n_trials=49)
+    _create(tmp_path, "fbs-0007-a3", 3, system="sma cross", issue=7, n_trials=49)
+    _create(tmp_path, "fbs-0050-a1", 1, system="rsi", issue=50, n_trials=1000)          # unrelated
+    # rename to a new label under the same issue, attempt reset to 1
+    _create(tmp_path, "fbs-0007-a1x", 1, system="sma_v2", issue=7)
+    s = replace(study, study_id="fbs-0007-a1x", meta={**study.meta, "system": "sma_v2", "attempt": 1})
+    et = run(s, trades, ledger_dir=tmp_path)[0].effective_trials
+    assert et["n_trials_prior"] == 147 and set(et["prior_studies"]) == {"fbs-0007-a1", "fbs-0007-a2", "fbs-0007-a3"}
+    # same system (normalised) under a NEW issue, attempt 1
+    _create(tmp_path, "fbs-0008-a1", 1, system="SMACROSS", issue=8)
+    s = replace(study, study_id="fbs-0008-a1", meta={**study.meta, "system": "SMACROSS", "attempt": 1})
+    et = run(s, trades, ledger_dir=tmp_path)[0].effective_trials
+    assert et["n_trials_prior"] == 147 and "fbs-0050-a1" not in et["prior_studies"]
+    assert ledger.normalise_system("SMA-Cross") == ledger.normalise_system("sma cross") == "smacross"
+
+
+def test_plateau_radius_comes_from_the_ledger(tmp_path, good):
+    """N3 regression: the gate-time plateau_radius kwarg is gone (TypeError); the radius is the
+    one pre-registered in the study's ledger row, and a radius below the floor is refused."""
+    study, trades = good
+    with pytest.raises(TypeError, match="plateau_radius"):
+        run(study, trades, plateau_radius=1e-6)
+    ld = register(study, plateau_radius={"a": 0.5, "b": 0.5})
+    rep, _ = run(study, trades, ledger_dir=ld)
+    assert rep.ledger_context["plateau_radius"] == {"a": 0.5, "b": 0.5}
+    assert rep.plateau_detail["radius"] == {"a": 0.5, "b": 0.5}
+    offs = [q["offset"] for q in rep.plateau_detail["points"] if q["param"] == "a"]
+    assert offs == ["x0.5", "x0.75", "x1.25", "x1.5"] and "ledger study_created row" in rep.row("plateau").interpretation
+    rep0, _ = run(study, trades)                                   # no radius in the row → DESIGN default
+    assert rep0.ledger_context["plateau_radius"] == 0.20 and "default" in rep0.plateau_detail["radius_source"]
+    with pytest.raises(G.GateError, match="plateau_radius"):
+        run(study, trades, ledger_dir=register(study, plateau_radius=1e-6))
+
+
+def test_data_dependent_flag_is_read_from_the_ledger(tmp_path, good):
+    """N1 regression (gate side): any ledger event that set candidate_set_data_dependent=True
+    (or logged TPE-sourced trials) makes the study data-dependent, and a meta that says False
+    raises instead of clearing it."""
+    study, trades = good
+    sid = study.study_id
+    _create(tmp_path, sid, 1, system="toy", issue=99, candidate_set_data_dependent=False)
+    ledger.log_event(sid, "trials", ledger_dir=tmp_path, n_trials=25, n_by_source={"tpe": 5, "sobol": 20})
+    ledger.log_event(sid, "selection", ledger_dir=tmp_path, candidate_set_data_dependent=False)
+    assert ledger.candidate_set_data_dependent(sid, ledger_dir=tmp_path) is True
+    with pytest.raises(G.GateError, match="candidate_set_data_dependent"):
+        run(replace(study, meta={**study.meta, "candidate_set_data_dependent": False}), trades, ledger_dir=tmp_path)
+    rep, _ = run(study, trades, ledger_dir=tmp_path)             # meta silent → ledger decides
+    assert rep.row("wfo_oos").status == "SKIPPED" and rep.verdict == "INCOMPLETE"
 
 
 def test_log_gates_counts_own_trials_and_flags_reruns(tmp_path, good):
@@ -698,6 +814,11 @@ def test_log_gates_counts_own_trials_and_flags_reruns(tmp_path, good):
     assert state["gates"]["cscv_oos_loss"] == pytest.approx(rep.row("cscv_oos_loss").value)
     assert state["gate_run"] == 1 and state["n_trials_study"] == 25 and state["n_trials_dsr"] == 25
     assert state["holdout_band"]["sharpe_lo"] == pytest.approx(rep.holdout_band["sharpe_lo"])
+    # N4: the judge-run plateau evaluations are logged (count + params + Sharpe) and not in N
+    pl_log = state["plateau"]
+    assert pl_log["kind"] == "judge-run" and pl_log["n_evaluations"] == 9 and len(pl_log["points"]) == 8
+    assert all({"params", "sharpe", "status", "pass"} <= set(q) for q in pl_log["points"])
+    assert state["n_trials_dsr"] == 25 and state["ledger_context"]["system"] == "toy"
     # attempt 2: prior = 25 (a1's own); after logging, attempt 3's prior = 25 + 25, not 25 + 50
     s2 = replace(study, study_id="fbs-0099-a2", meta={**s1.meta, "attempt": 2})
     _create(tmp_path, "fbs-0099-a2", 2)
@@ -738,3 +859,162 @@ def test_zero_edge_fails_95pct_and_planted_edge_passes():
     assert fails / n >= 0.95
     passes = sum(run(*make_study(seed=2000 + s), n_boot=200)[0].verdict == "PASS" for s in range(10))
     assert passes >= 8
+
+
+# ============================================================================ fix round 2: N4 judge-run plateau, N7
+def _study_run(ev, space, tmp, sid, **kw):
+    kw.setdefault("wfo", None)
+    kw.setdefault("cv", opt.CPCVConfig(6, 2))
+    return opt.run_study(ev, space, book="FBS", system="n4", issue=4, attempt=1, study_id=sid, n_jobs=1,
+                         ledger_dir=tmp / "ledger", studies_dir=tmp / "studies", **kw)
+
+
+def _gate(study, ev, tmp, **kw):
+    return G.evaluate_gates(study, ev, periods_per_year=PPY, n_boot=100, ledger_dir=tmp / "ledger",
+                            mechanism_check=_mech_ok, **kw)
+
+
+@pytest.mark.parametrize("step", [1, pytest.param(2, marks=pytest.mark.slow),
+                                  pytest.param(5, marks=pytest.mark.slow), 10])
+def test_judge_plateau_spike_fails_broad_passes_at_every_grid_step(tmp_path, step):
+    """N4 regression (red-team p10 surface, SyntheticEvaluator, real run_study): with an evaluator
+    the gate perturbs the selected config itself, so the verdict no longer depends on the grid
+    step: the 2 %-wide spike FAILs and a broad bump PASSes at steps 1 / 2 / 5 / 10."""
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 100, step)])
+    out = {}
+    for width in (0.02, 0.30):
+        ev = SyntheticEvaluator(bounds={"a": (0, 100)}, bumps=({"center": {"a": 50}, "height": 2.0, "width": width},),
+                                base_sharpe=0.5, rho=1.0, seed=3)
+        res = _study_run(ev, sp, tmp_path, f"spike-{step}-{width}")
+        assert res.selected_params["a"] == 50
+        rep = _gate(res, ev, tmp_path)
+        row = rep.row("plateau")
+        assert "judge-run" in row.interpretation and rep.plateau_detail["kind"] == "judge-run"
+        assert [q["value"] for q in rep.plateau_detail["points"]] == [30, 40, 60, 70]      # ± r/2, ± r of range
+        assert rep.plateau_detail["n_evaluations"] == 5
+        out[width] = row.status
+    assert out == {0.02: "FAIL", 0.30: "PASS"}, out
+
+
+def _sobol5():
+    return opt.SearchSpace([opt.IntParam("look", 10, 200), opt.FloatParam("mult", 1.0, 4.0),
+                            opt.IntParam("hold", 1, 20), opt.FloatParam("thr", 0.0, 2.0),
+                            opt.IntParam("slow", 20, 300)])
+
+
+def test_judge_plateau_on_d5_sobol_study(tmp_path):
+    """N4 regression (r1_p10e: a d = 5 Sobol study had 0 neighbours in the ±20 % box in 100 % of
+    studies → plateau SKIPPED, verdict never PASS).  The judge-run perturbations always exist:
+    a spike planted on a Sobol candidate FAILs, a broad optimum there PASSes; the matrix fallback
+    on the same study cannot judge it."""
+    sp = _sobol5()
+    cands = opt.candidate_set(sp, 64, method="sobol", seed=1)
+    margin = [min(min(p.unit(c[p.name]), 1 - p.unit(c[p.name])) for p in sp.params) for c in cands]
+    k = int(np.argmax(margin))
+    centre = cands[k]
+    bounds = {p.name: (p.low, p.high) for p in sp.params}
+    got = {}
+    for width in (0.02, 0.35):
+        ev = SyntheticEvaluator(bounds=bounds, bumps=({"center": centre, "height": 2.5, "width": width},),
+                                base_sharpe=0.0, rho=0.8, seed=7)
+        res = _study_run(ev, sp, tmp_path, f"sobol5-{width}", method="sobol", n_trials=64, seed=1)
+        assert res.trials["source"].to_list() == ["sobol"] * 64
+        judged = replace(res, selected_params=dict(centre), selection={**res.selection, "trial_id": k})
+        rep = _gate(judged, ev, tmp_path)
+        pdl = rep.plateau_detail
+        assert pdl["kind"] == "judge-run" and len(pdl["points"]) == 20 and pdl["n_evaluations"] <= 21
+        assert pdl["peak_sharpe"] > 1.5
+        got[width] = rep.row("plateau").status
+        fb = G.evaluate_gates(judged, None, periods_per_year=PPY, n_boot=100, ledger_dir=tmp_path / "ledger")
+        assert fb.row("plateau").status != "PASS" and "Matrix-based fallback" in fb.row("plateau").interpretation
+    assert got == {0.02: "FAIL", 0.35: "PASS"}, got
+
+
+def test_judge_plateau_validity_and_search_bounds(tmp_path):
+    """N4 + round 2b: points rejected by space.is_valid or by natural validity (lookback int
+    ≥ 1, positive params > 0) fail; points outside the SEARCH bounds are evaluated and reported;
+    ints that round back to x move to the next distinct int; score = min over axes."""
+    sp = opt.SearchSpace([opt.IntParam("a", 1, 10), opt.FloatParam("x", 0.0, 1.0)],
+                         constraint=lambda p: p["x"] < 0.75)
+    ev = SyntheticEvaluator(bounds={"a": (1, 10), "x": (0.0, 1.0)}, base_sharpe=1.5, rho=1.0, seed=2)
+    pts = G.plateau_perturbations(sp, {"a": 2, "x": 0.6}, 0.2)
+    assert [q["value"] for q in pts if q["param"] == "a"] == [0, 1, 3, 4]      # 1.6→2→1, 1.8→2 … distinct
+    assert [q["natural_valid"] for q in pts if q["param"] == "a"] == [False, True, True, True]
+    assert [q["value"] for q in pts if q["param"] == "x"] == [0.4, 0.5, 0.7, 0.8]
+    res = _study_run(ev, sp, tmp_path, "oob", method="sobol", n_trials=16, seed=0)
+    judged = replace(res, selected_params={"a": 2, "x": 0.6},
+                     selection={**res.selection, "trial_id": int(res.trials["trial_id"][0])})
+    pj = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
+    st = {(q["param"], q["value"]): q["status"] for q in pj["points"]}
+    assert st[("a", 0)] == "invalid_natural" and st[("x", 0.8)] == "invalid"
+    assert pj["pass_share_by_param"] == {"a": 0.75, "x": 0.75} and pj["plateau_score"] == 0.75
+    assert pj["n_evaluations"] == 7 and pj["outside_search_bounds_points"] == [("a", 0)]   # invalid anyway
+    # outside the search bounds but naturally valid → evaluated, reported, and the edge is flagged
+    pj = G.judge_plateau(replace(judged, selected_params={"a": 10, "x": 0.0}), ev, space=sp, radius=0.2,
+                         periods_per_year=PPY)
+    out = {(q["param"], q["value"]) for q in pj["points"] if q["outside_search_bounds"]}
+    assert out == {("a", 11), ("a", 12), ("x", -0.2), ("x", -0.1)}
+    assert all(q["status"] == "ok" for q in pj["points"]) and pj["plateau_score"] == 1.0
+    assert pj["selected_at_edge"] == ["a", "x"]
+
+
+def _n8_study(tmp, nd, sid):
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 10)] + [opt.IntParam(f"z{i}", 0, 20) for i in range(nd)])
+    ev0 = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=1.0, seed=5)
+    res = _study_run(ev0, sp, tmp, sid, method="sobol", n_trials=8, seed=0, cv=opt.CPCVConfig(4, 1))
+    sel = {"a": 5, **{f"z{i}": 10 for i in range(nd)}}
+    return sp, replace(res, selected_params=sel, selection={**res.selection, "trial_id": 0})
+
+
+def test_plateau_min_over_axes_is_not_lifted_by_irrelevant_params(tmp_path):
+    """N8 regression (round 2b): pooled over axes, a spike with 2 irrelevant dummies scored
+    0.67 (PASS) and a half-plateau with 1 dummy 0.75 (PASS).  With the min over axes, dummies
+    (share 1.0 each) cannot lift the relevant axis: spike and partial plateau FAIL with any
+    number of dummies; a broad plateau PASSes."""
+    for nd in (0, 1, 2, 3, 4):
+        sp, judged = _n8_study(tmp_path, nd, f"n8-{nd}")
+        got = {}
+        for name, width in (("spike", 0.02), ("partial", 0.09), ("broad", 0.30)):
+            ev = SyntheticEvaluator(bounds={"a": (0, 10)}, bumps=({"center": {"a": 5}, "height": 2.0, "width": width},),
+                                    rho=1.0, seed=5)
+            pj = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
+            assert all(pj["pass_share_by_param"][f"z{i}"] == 1.0 for i in range(nd))
+            got[name] = (pj["plateau_score"], pj["pooled_share"])
+        assert got["spike"][0] == 0.0 and got["partial"][0] == 0.5 and got["broad"][0] == 1.0, (nd, got)
+        assert [G._cmp(">=", got[k][0], 0.6) for k in ("spike", "partial", "broad")] == [False, False, True]
+        if nd >= 2:
+            assert got["spike"][1] >= 0.6            # the pooled share (diagnostic) would have passed
+
+
+def test_broad_plateau_selected_at_search_space_edge_passes(tmp_path):
+    """Round 2b: bounds are search limits.  A broad optimum sitting on the edge of the searched
+    space is judged on its real neighbourhood (points beyond the bound are evaluated), in both
+    relative (low > 0) and range mode, and the edge is reported."""
+    for lo, hi, x in ((10, 50, 50), (0, 10, 10)):
+        sp = opt.SearchSpace([opt.IntParam("look", lo, hi)])
+        ev = SyntheticEvaluator(bounds={"look": (lo, hi)},
+                                bumps=({"center": {"look": x}, "height": 2.0, "width": 0.4},), rho=1.0, seed=4)
+        res = _study_run(ev, sp, tmp_path, f"edge-{lo}")
+        judged = replace(res, selected_params={"look": x},
+                         selection={**res.selection, "trial_id": int(res.trials.filter(pl.col("param_look") == x)
+                                                                      ["trial_id"][0])})
+        rep = _gate(judged, ev, tmp_path)
+        row = rep.row("plateau")
+        assert row.status == "PASS", row.interpretation
+        assert "selected at search-space edge (look)" in row.interpretation
+        assert rep.diagnostics["plateau"]["n_outside_search_bounds"] == 2
+        assert rep.diagnostics["plateau"]["selected_at_search_space_edge"] == ["look"]
+        assert "Weakest parameter axis: look keeps 4/4" in row.interpretation
+
+
+def test_explicit_spec_must_match_evaluator_symbol(good):
+    """N7 regression: spec= for another instrument than evaluator.symbol raises."""
+    study, trades = good
+    ev = FakeEvaluator(study, trades, spec=None)
+    ev.symbol = "EURUSD"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        xau = load_instrument("XAUUSD", book="FBS")
+    with pytest.raises(G.GateError, match="N7"):
+        run(study, trades, evaluator=ev, spec=xau)
+    assert run(study, trades, evaluator=ev, spec=EURUSD)[0].row("cost_stress_sharpe").status == "PASS"

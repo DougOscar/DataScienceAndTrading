@@ -582,3 +582,89 @@ def test_worker_processes_start_with_thread_caps(tmp_path):
     res = _study(SyntheticEvaluator(bounds={"a": (0, 10)}), opt.SearchSpace([opt.IntParam("a", 0, 10)]),
                  tmp_path, "thr", n_jobs=2, wfo=None)
     assert res.meta["mp_start_method"] == "spawn" and res.meta["worker_threads"]["polars_threads"] == 1
+
+
+# --------------------------------------------------------------------------- fix round 2: N1 / N3 / N10
+def _resume_kw(**over):
+    kw = dict(book="FBS", system="synthetic", issue=1, attempt=1, method="tpe", n_trials=16, seed=3, wfo=None,
+              n_jobs=1, resume=True)
+    kw.update(over)
+    return kw
+
+
+def test_resume_cannot_change_method_seed_space_or_identity(tmp_path):
+    """N1 regression (r1_p07): TPE 12 → resume as Sobol cleared the data-dependence flag.  A resume
+    must match the ledger's study_created row (method / seed / space / radius / identity); a
+    refused resume leaves no event.  Each trial records its source; once TPE, always flagged."""
+    ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10), "x": (0.0, 1.0)}, rho=0.8)
+    sp = _space4()
+    t = _study(ev, sp, tmp_path, "n1", method="tpe", n_trials=12, seed=3, wfo=None)
+    assert t.trials["source"].to_list() == ["tpe"] * 12 and t.meta["candidate_set_data_dependent"] is True
+    led, sd = tmp_path / "ledger", tmp_path / "studies"
+    n_events = len(ledger.study_events("n1", ledger_dir=led))
+    bad = [dict(method="sobol", n_trials=24), dict(seed=4), dict(system="other"), dict(attempt=2),
+           dict(issue=2), dict(plateau_radius=0.3)]
+    for over in bad:
+        with pytest.raises(opt.StudyError, match="pre-registered settings"):
+            opt.run_study(ev, sp, study_id="n1", ledger_dir=led, studies_dir=sd, **_resume_kw(**over))
+    with pytest.raises(opt.StudyError, match="search_space"):
+        opt.run_study(ev, opt.SearchSpace(_space4().params[:3]), study_id="n1", ledger_dir=led,
+                      studies_dir=sd, **_resume_kw())
+    assert len(ledger.study_events("n1", ledger_dir=led)) == n_events           # nothing logged
+    t2 = opt.run_study(ev, sp, study_id="n1", ledger_dir=led, studies_dir=sd, **_resume_kw())
+    assert t2.trials.height == 16 and t2.trials["source"].to_list() == ["tpe"] * 16
+    assert t2.meta["candidate_set_data_dependent"] is True and t2.meta["plateau_radius"] == 0.20
+    st = ledger.studies(led)["n1"]
+    assert st["n_by_source"] == {"tpe": 16} and st["candidate_set_data_dependent"] is True
+    assert ledger.candidate_set_data_dependent("n1", ledger_dir=led) is True
+    # N10: the change of planned trials is an auditable event
+    ch = ledger.study_events("n1", "n_trials_changed", ledger_dir=led)
+    assert len(ch) == 1 and (ch[0]["n_trials_planned_old"], ch[0]["n_trials_planned_new"]) == (12, 16)
+    assert ch[0]["n_trials_recorded"] == 12 and ch[0]["gate_runs_before"] == 0
+
+
+def test_legacy_trials_without_source_take_the_ledger_method(tmp_path):
+    """N1: trials recorded before sources existed get the method of the ledger's created row."""
+    ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.8)
+    sp = opt.SearchSpace([opt.FloatParam("a", 0.0, 10.0)])
+    _study(ev, sp, tmp_path, "leg", method="tpe", n_trials=8, wfo=None)
+    d = tmp_path / "studies" / "leg"
+    for f in d.glob("trials-*.parquet"):
+        pl.read_parquet(f).drop("source").write_parquet(f)
+    assert opt._load_existing("leg", tmp_path / "studies", default_source="tpe")[0].source == "tpe"
+    r = _study(ev, sp, tmp_path, "leg", method="tpe", n_trials=10, wfo=None, resume=True)
+    assert r.trials["source"].to_list() == ["tpe"] * 10 and r.meta["candidate_set_data_dependent"] is True
+
+
+def test_sobol_resume_logs_n_trials_change_and_keeps_flag_false(tmp_path):
+    """N10: look → resume with more trials is logged with old / new values and prior gate runs."""
+    ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10), "x": (0.0, 1.0)}, rho=0.8)
+    r1 = _study(ev, _space4(), tmp_path, "n10", n_trials=20, seed=2, wfo=None)
+    assert r1.trials["source"].to_list() == ["sobol"] * 20
+    ledger.log_event("n10", "gates", ledger_dir=tmp_path / "ledger", verdict="FAIL", gate_run=1)
+    r2 = _study(ev, _space4(), tmp_path, "n10", n_trials=30, seed=2, wfo=None, resume=True)
+    assert r2.meta["candidate_set_data_dependent"] is False
+    ch = ledger.study_events("n10", "n_trials_changed", ledger_dir=tmp_path / "ledger")
+    assert [(c["n_trials_planned_old"], c["n_trials_planned_new"], c["gate_runs_before"]) for c in ch] == [(20, 30, 1)]
+    assert ledger.studies(tmp_path / "ledger")["n10"]["n_trials_planned"] == 30
+    _study(ev, _space4(), tmp_path, "n10", n_trials=30, seed=2, wfo=None, resume=True)   # same n: no new event
+    assert len(ledger.study_events("n10", "n_trials_changed", ledger_dir=tmp_path / "ledger")) == 1
+
+
+def test_plateau_radius_is_pre_registered_in_the_ledger(tmp_path):
+    """N3: run_study(plateau_radius=) is stored in study_created and meta; floor 0.10; names checked."""
+    ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10)}, rho=0.8)
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 3), opt.IntParam("b", 0, 3)])
+    r = _study(ev, sp, tmp_path, "rad", wfo=None, plateau_radius={"b": 0.3, "a": 0.25})
+    row = ledger.created_row("rad", ledger_dir=tmp_path / "ledger")
+    assert row["plateau_radius"] == {"a": 0.25, "b": 0.3} == r.meta["plateau_radius"]
+    assert ledger.created_row("rad", ledger_dir=tmp_path / "ledger")["seq"] == 0
+    _study(ev, sp, tmp_path, "rad0", wfo=None)
+    assert ledger.created_row("rad0", ledger_dir=tmp_path / "ledger")["plateau_radius"] == 0.20
+    with pytest.raises(ValueError, match="floor"):
+        _study(ev, sp, tmp_path, "rad1", wfo=None, plateau_radius=1e-6)
+    with pytest.raises(ValueError, match="unknown parameter"):
+        _study(ev, sp, tmp_path, "rad2", wfo=None, plateau_radius={"zz": 0.2})
+    # resume without a radius takes the ledger's; the same radius is accepted
+    _study(ev, sp, tmp_path, "rad", wfo=None, resume=True)
+    _study(ev, sp, tmp_path, "rad", wfo=None, resume=True, plateau_radius={"a": 0.25, "b": 0.3})

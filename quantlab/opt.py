@@ -110,7 +110,9 @@ does not itself depend on the data** — ``grid``, ``sobol`` and ``random`` cand
 are fixed before any evaluation; a ``tpe`` candidate set is chosen with the full-dev
 objective, so it already encodes the test folds / the future (red-team B3, probe p07:
 +0.17 Sharpe of spurious "OOS" under a zero-edge null).  ``meta["candidate_set_data_
-dependent"]`` flags this and the gates SKIP the OOS gates for such studies.  The switch
+dependent"]`` flags this and the gates SKIP the OOS gates for such studies.  Every trial records
+its ``source`` (grid / sobol / random / tpe); one TPE-sourced trial flags the study for good, and
+a resume can never change the method recorded in the ledger (red-team N1).  The switch
 is modelled as adopting the new configuration's book at *d* (its return on *d* includes
 positions it opened earlier — a documented simplification; the rule-based columns are
 evaluated continuously).  ``wfo_oos.n_trades`` = entries of the active configuration on
@@ -167,7 +169,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 import numpy as np
 import polars as pl
@@ -180,7 +182,8 @@ __all__ = [
     "Objective", "PlateauConfig", "CPCVConfig", "WFOConfig", "CPCVSplit",
     "neighbourhoods", "plateau_select", "cpcv_splits", "cpcv_path_map", "cpcv_paths",
     "walk_forward", "run_study", "StudyError", "candidate_set", "METHODS", "DATA_INDEPENDENT_METHODS",
-    "WORKER_THREAD_ENV",
+    "WORKER_THREAD_ENV", "PLATEAU_RADIUS_DEFAULT", "PLATEAU_RADIUS_MIN", "normalise_plateau_radius",
+    "space_from_json",
 ]
 
 log = logging.getLogger("quantlab.opt")
@@ -376,6 +379,55 @@ class SearchSpace:
 
 DATA_INDEPENDENT_METHODS = ("grid", "sobol", "random")
 METHODS = DATA_INDEPENDENT_METHODS + ("tpe",)
+
+# DESIGN §4.2 plateau neighbourhood: ±20 % economic radius, pre-registered on the hypothesis card
+# and stored in the study's ``study_created`` ledger row (red-team N3).  The floor keeps a
+# pre-registered radius from collapsing the neighbourhood onto the selected point.
+PLATEAU_RADIUS_DEFAULT = 0.20
+PLATEAU_RADIUS_MIN = 0.10
+
+
+def normalise_plateau_radius(radius: Any, names: Optional[Sequence[str]] = None) -> Any:
+    """Canonical (JSON-able) plateau radius: ``None`` → the DESIGN default 0.20; a number →
+    ``float``; a per-parameter mapping → ``{name: float}`` sorted by name (parameters not listed
+    use the default).  Every value must be finite and ≥ :data:`PLATEAU_RADIUS_MIN`; mapping keys
+    must be parameter names of the space when ``names`` is given."""
+    def _one(v: Any, what: str) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float, np.integer, np.floating)):
+            raise TypeError(f"plateau_radius{what} must be a number, got {v!r}")
+        v = float(v)
+        if not math.isfinite(v) or v < PLATEAU_RADIUS_MIN:
+            raise ValueError(f"plateau_radius{what} = {v!r} is below the floor {PLATEAU_RADIUS_MIN} "
+                             f"(DESIGN §4.2: ±20 % economic neighbourhood)")
+        return v
+    if radius is None:
+        return PLATEAU_RADIUS_DEFAULT
+    if isinstance(radius, Mapping):
+        out = {}
+        for k in sorted(radius, key=str):
+            if names is not None and k not in names:
+                raise ValueError(f"plateau_radius names unknown parameter {k!r} (space: {list(names)})")
+            out[str(k)] = _one(radius[k], f"[{k!r}]")
+        return out
+    return _one(radius, "")
+
+
+def space_from_json(js: Mapping[str, Any]) -> "SearchSpace":
+    """Rebuild a :class:`SearchSpace` from :meth:`SearchSpace.to_json` (the constraint callable is
+    not serialisable and is lost)."""
+    ps = []
+    for p in js["params"]:
+        kw = {k: p[k] for k in ("low", "high", "step") if k in p}
+        if p["kind"] == "categorical":
+            ps.append(Param(p["name"], "categorical", choices=tuple(p["choices"]), ordered=bool(p.get("ordered"))))
+        else:
+            ps.append(Param(p["name"], p["kind"], log=bool(p.get("log", False)), **kw))
+    return SearchSpace(tuple(ps))
+
+
+def _canon(x: Any) -> Any:
+    """JSON round-trip (tuples → lists, keys sorted) so call values compare with ledger values."""
+    return json.loads(json.dumps(_py(x), sort_keys=True, default=str))
 
 
 def candidate_set(space: SearchSpace, n: int, *, method: str = "sobol", seed: int = 0,
@@ -1113,6 +1165,7 @@ class _Rec:
     counts: Optional[np.ndarray] = None
     error: Optional[str] = None
     entries: Optional[np.ndarray] = None
+    source: str = ""                # how the configuration was proposed: grid / sobol / random / tpe (N1)
 
 
 class _Runner:
@@ -1213,15 +1266,15 @@ class _Book:
         r.metrics["objective_raw"] = raw
         r.metrics["objective"] = raw if ok else -np.inf
 
-    def add_result(self, params: dict[str, Any], res: Optional[dict[str, Any]]) -> _Rec:
+    def add_result(self, params: dict[str, Any], res: Optional[dict[str, Any]], source: str) -> _Rec:
         tid = self.next_id
         if res is None:
-            r = _Rec(tid, params, "invalid")
+            r = _Rec(tid, params, "invalid", source=source)
         elif not res["ok"]:
-            r = _Rec(tid, params, "error", error=res["error"])
+            r = _Rec(tid, params, "error", error=res["error"], source=source)
         else:
             r = _Rec(tid, params, "evaluated", dict(res["metrics"]), res["dates"], res["ret"], res["counts"],
-                     entries=res.get("entries"))
+                     entries=res.get("entries"), source=source)
         self._classify(r)
         self.pending.append(r)
         self.seen[_pjson(params)] = r
@@ -1251,7 +1304,7 @@ class _Book:
             m = {k: r.metrics.get(k, float("nan")) for k in self.keys}
             ret_df = (pl.DataFrame({"date": r.dates, "ret": r.ret}).with_columns(pl.col("date").cast(pl.Date))
                       if r.ret is not None else None)
-            tid = self.rec.add(_py_params(r.params), m, status=r.status, returns=ret_df)
+            tid = self.rec.add(_py_params(r.params), m, status=r.status, returns=ret_df, source=r.source or None)
             if tid != r.trial_id:
                 raise StudyError(f"trial id drift: recorder {tid} vs study {r.trial_id}")
         self.rec.flush()
@@ -1284,7 +1337,9 @@ def _py_params(p: dict[str, Any]) -> dict[str, Any]:
     return {k: (v.item() if isinstance(v, np.generic) else v) for k, v in p.items()}
 
 
-def _load_existing(study_id: str, studies_dir: Optional[Path]) -> list[_Rec]:
+def _load_existing(study_id: str, studies_dir: Optional[Path], default_source: str = "") -> list[_Rec]:
+    """Recorded trials of a study.  Trials recorded before sources were tracked get
+    ``default_source`` (the method of the study's ledger ``study_created`` row)."""
     trials = ledger.load_trials(study_id, studies_dir)
     if trials.height == 0:
         return []
@@ -1301,7 +1356,8 @@ def _load_existing(study_id: str, studies_dir: Optional[Path]) -> list[_Rec]:
     for row in trials.sort("trial_id").iter_rows(named=True):
         tid = row["trial_id"]
         r = _Rec(tid, json.loads(row["params"]), row["status"],
-                 {c[2:]: row[c] for c in mcols if row[c] is not None}, error=errors.get(tid))
+                 {c[2:]: row[c] for c in mcols if row[c] is not None}, error=errors.get(tid),
+                 source=row.get("source") or default_source)
         col = f"t{tid}"
         if rets.height and col in rets.columns:
             sub = rets.select("date", col).drop_nulls(col)
@@ -1329,7 +1385,8 @@ def _trials_frame(recs: Sequence[_Rec], space: SearchSpace) -> pl.DataFrame:
         for k in r.metrics:
             if k not in keys:
                 keys.append(k)
-    data: dict[str, list] = {"trial_id": [r.trial_id for r in recs], "status": [r.status for r in recs]}
+    data: dict[str, list] = {"trial_id": [r.trial_id for r in recs], "status": [r.status for r in recs],
+                             "source": [r.source or None for r in recs]}
     for n in space.names:
         data[f"param_{n}"] = [r.params.get(n) for r in recs]
     for k in keys:
@@ -1346,6 +1403,7 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
               parent_study: Optional[str] = None, notes: str = "", study_id: Optional[str] = None,
               storage: Optional[str] = None, resume: bool = False, tpe_batch: int = 8,
               checkpoint_every: int = 100, allow_large_grid: bool = False,
+              plateau_radius: Optional[float | Mapping[str, float]] = None,
               ledger_dir: Optional[Path] = None, studies_dir: Optional[Path] = None) -> StudyResult:
     """Run a fully logged study and assemble a :class:`contracts.StudyResult`.
 
@@ -1361,6 +1419,20 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     ``storage`` (Optuna RDB URL, e.g. ``sqlite:///…``) makes the sampler state durable;
     ``resume=True`` continues an existing study id from its recorded trials.
     ``min_trades`` overrides ``objective.min_trades``.  ``wfo=None`` skips the walk-forward.
+
+    ``plateau_radius`` (float, or ``{param: float}``; default 0.20, floor 0.10): the plateau
+    neighbourhood pre-registered on the hypothesis card (DESIGN §4.2, red-team N3).  It is
+    written to the ``study_created`` ledger row and the gates read it from there only.
+
+    Resume (red-team N1 / N10): the study's ``study_created`` ledger row is the source of truth.
+    ``book``, ``system``, ``issue``, ``attempt``, the resolved ``method``, ``seed``, the search
+    space (``to_json``) and ``plateau_radius`` (None = take the ledger's) must equal the
+    recorded values, else :class:`StudyError`.  Every trial records its ``source`` (grid /
+    sobol / random / tpe) in the trial store and in ``study.trials``; the ``trials`` event logs
+    ``n_by_source``.  ``candidate_set_data_dependent`` is the OR of the ledger's history and
+    the sources of all trials — once True it is never reset.  A resume that changes the planned
+    trial count logs an ``n_trials_changed`` event (old / new / already recorded / earlier gate
+    runs), so optional stopping is auditable.
     """
     t0 = time.perf_counter()
     if getattr(evaluator, "requires_refit", False):
@@ -1398,22 +1470,50 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     describe = getattr(evaluator, "describe", None)
     ev_desc = describe() if describe else {"evaluator": type(evaluator).__name__}
 
+    radius_call = None if plateau_radius is None else normalise_plateau_radius(plateau_radius, space.names)
+    n_planned = len(grid) if method != "tpe" else int(n_trials)
+    row: dict[str, Any] = {}
     if resume:
-        if sid not in ledger.studies(ledger_dir):
+        row = ledger.created_row(sid, ledger_dir=ledger_dir) or {}
+        if not row:
             raise StudyError(f"resume=True but study {sid} is not in the ledger")
-        ledger.log_event(sid, "resumed", ledger_dir=ledger_dir)
+        radius = normalise_plateau_radius(row.get("plateau_radius"), space.names)
+        recorded = {"book": row.get("book"), "system": row.get("system"), "issue": row.get("issue"),
+                    "attempt": row.get("attempt"), "method": row.get("method"), "seed": row.get("seed"),
+                    "search_space": row.get("search_space"), "plateau_radius": radius}
+        called = {"book": bname, "system": system, "issue": issue, "attempt": attempt, "method": method,
+                  "seed": seed, "search_space": space.to_json(),
+                  "plateau_radius": radius if radius_call is None else radius_call}
+        diff = {k: (recorded[k], called[k]) for k in recorded if _canon(recorded[k]) != _canon(called[k])}
+        if diff:
+            raise StudyError(
+                f"resume of {sid} must use the study's pre-registered settings from its ledger study_created row; "
+                f"these differ (ledger, call): {diff}. A different method / seed / space / radius is a new study "
+                f"(new attempt id), never a continuation (red-team N1)")
+        events = ledger.study_events(sid, ledger_dir=ledger_dir)
+        prev_planned = next((e["n_trials_planned"] for e in reversed(events) if "n_trials_planned" in e), None)
+        n_gate_runs = sum(e.get("event") == "gates" for e in events)
+        if prev_planned is not None and int(prev_planned) != n_planned:
+            ledger.log_event(sid, "n_trials_changed", ledger_dir=ledger_dir, n_trials_planned_old=int(prev_planned),
+                             n_trials_planned_new=n_planned, n_trials_planned=n_planned,
+                             n_trials_recorded=ledger.TrialRecorder(sid, studies_dir).count(),
+                             gate_runs_before=n_gate_runs)
+        ledger.log_event(sid, "resumed", ledger_dir=ledger_dir, method=method, seed=seed,
+                         n_trials_planned_call=n_planned, gate_runs_before=n_gate_runs)
+        data_dependent = data_dependent or ledger.candidate_set_data_dependent(sid, ledger_dir=ledger_dir)
     else:
+        radius = PLATEAU_RADIUS_DEFAULT if radius_call is None else radius_call
         ledger.create_study(
             ledger_dir=ledger_dir, study_id=sid, book=bname, system=system, issue=issue, attempt=attempt,
             parent_study=parent_study, dev_window=dev_window, cost_model_version=cost_version,
             cv_scheme=f"{cv_plan}+{wfo_desc}", search_space=space.to_json(), method=method,
-            n_trials_planned=len(grid) if method != "tpe" else n_trials, seed=seed,
+            n_trials_planned=n_planned, seed=seed, plateau_radius=radius,
             candidate_set=method, candidate_set_data_dependent=data_dependent,
             objective=objective.describe(), selection=selection.describe(), evaluator=_py(ev_desc), notes=notes)
 
     bk = _Book(sid, studies_dir, space, objective, ppy, checkpoint_every)
     if resume:
-        bk.restore(_load_existing(sid, studies_dir))
+        bk.restore(_load_existing(sid, studies_dir, default_source=str(row.get("method") or "")))
     runner = _Runner(evaluator, cost, jobs)
     worker_threads = None
     n_dupes = 0
@@ -1432,7 +1532,7 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
                 vchunk = [p for p in chunk if space.is_valid(p)]
                 res = runner.map(vchunk)
                 for p in chunk:
-                    bk.add_result(p, next(res) if space.is_valid(p) else None)
+                    bk.add_result(p, next(res) if space.is_valid(p) else None, method)
                 bk.flush()
         else:
             n_dupes = _run_tpe(bk, runner, space, sid, n_trials, seed, tpe_batch, storage)
@@ -1443,9 +1543,15 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         bk.flush()
         recs = bk.all()
         counts = {s: sum(r.status == s for r in recs) for s in STATUSES}
+        by_source: dict[str, int] = {}
+        for r in recs:
+            by_source[r.source or "unknown"] = by_source.get(r.source or "unknown", 0) + 1
+        # N1: a single TPE-proposed trial makes the candidate set data-dependent, forever
+        data_dependent = data_dependent or by_source.get("tpe", 0) > 0
         ledger.log_event(sid, "trials", ledger_dir=ledger_dir, n_trials=len(recs), status=status,
                          n_ok=counts["ok"], n_low_trades=counts["low_trades"], n_invalid=counts["invalid"],
-                         n_error=counts["error"], n_pruned=counts["pruned"])
+                         n_error=counts["error"], n_pruned=counts["pruned"], n_by_source=by_source,
+                         candidate_set_data_dependent=data_dependent)
 
     recs = bk.all()
     trials = _trials_frame(recs, space)
@@ -1500,6 +1606,7 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         "n_invalid": counts["invalid"], "n_error": counts["error"], "n_tpe_duplicates": n_dupes,
         "errors": [{"trial_id": r.trial_id, "error": r.error} for r in recs if r.error][:50],
         "runtime_s": runtime, "cost_model_version": cost_version, "n_jobs": jobs,
+        "plateau_radius": radius, "n_by_source": by_source, "search_space_obj": space,
         "objective": objective.describe(), "selection": cfg.describe(), "periods_per_year": ppy,
         "dev_window": [str(S.dates[0]), str(S.dates[-1])], "evaluator": ev_desc,
         "trade_counts": tcounts, "median_trades_ok": med_trades,
@@ -1573,7 +1680,7 @@ def _run_tpe(bk: _Book, runner: _Runner, space: SearchSpace, sid: str, n_trials:
                 n_dupes += 1
                 pending_tells.append((t, bk.seen[k]))
                 continue
-            r = bk.add_result(p, next(res) if i in new_idx else None)
+            r = bk.add_result(p, next(res) if i in new_idx else None, "tpe")
             t.set_user_attr("trial_id", r.trial_id)
             pending_tells.append((t, r))
         bk.flush()                                 # checkpoint before telling the sampler
