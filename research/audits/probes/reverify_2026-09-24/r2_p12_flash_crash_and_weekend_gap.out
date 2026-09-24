@@ -1,0 +1,7 @@
+USDJPY M1 lowest bars 2019-01-02..03: [{'ts': datetime.datetime(2019, 1, 3, 0, 39), 'open': 104.972, 'high': 105.319, 'low': 104.712, 'close': 105.317, 'spread': 43.0}, {'ts': datetime.datetime(2019, 1, 3, 0, 38), 'open': 105.459, 'high': 105.459, 'low': 104.95, 'close': 105.039, 'spread': 44.0}, {'ts': datetime.datetime(2019, 1, 3, 0, 40), 'open': 105.163, 'high': 105.673, 'low': 105.163, 'close': 105.299, 'spread': 43.0}]
+no m1: long entry 2019-01-03 00:00:00 @ 108.891, stop 107.891 -> exit 2019-01-03 00:00:00 stop @ 107.891
+m1   : long entry 2019-01-03 00:00:00 @ 108.891, stop 107.891 -> exit 2019-01-03 00:00:00 stop @ 107.891
+first M1 bar through the stop: [{'ts': datetime.datetime(2019, 1, 3, 0, 35), 'open': 108.125, 'high': 108.125, 'low': 106.299, 'close': 106.299}]
+EURUSD: largest weekend gap 2020-03-13 22:59:00 close 1.10982 -> 2020-03-16 00:00:00 open 1.11882 (|gap|=0.00900, spread at Monday open 22.0)
+USDJPY: largest weekend gap 2020-03-13 22:59:00 close 107.979 -> 2020-03-16 00:00:00 open 106.933 (|gap|=1.04600, spread at Monday open 19.0)
+XAUUSD: largest weekend gap 2020-03-13 22:54:00 close 1529.79 -> 2020-03-16 00:00:00 open 1570.21 (|gap|=40.42000, spread at Monday open 58.0)

@@ -1,0 +1,25 @@
+EURUSD H1: 12447 bars, 200 random bars checked; off-grid labels=0
+EURUSD H4: 3114 bars, 200 random bars checked; off-grid labels=0
+EURUSD D1: 519 bars, 200 random bars checked; off-grid labels=0
+XAUUSD H1: 11786 bars, 200 random bars checked; off-grid labels=0
+XAUUSD H4: 3095 bars, 200 random bars checked; off-grid labels=0
+XAUUSD D1: 517 bars, 200 random bars checked; off-grid labels=0
+USDJPY H1: 12449 bars, 200 random bars checked; off-grid labels=0
+USDJPY H4: 3114 bars, 200 random bars checked; off-grid labels=0
+USDJPY D1: 519 bars, 200 random bars checked; off-grid labels=0
+total value mismatches: 0
+ts_utc mismatches vs zoneinfo (2019 Mar-Nov): 0
+2019-03-08 first bar 2019-03-08 00:00:00 utc 2019-03-07 22:00:00+00:00 | last bar 2019-03-08 23:00:00 utc 2019-03-08 21:00:00+00:00 | n 24
+2019-03-11 first bar 2019-03-11 00:00:00 utc 2019-03-10 22:00:00+00:00 | last bar 2019-03-11 23:00:00 utc 2019-03-11 21:00:00+00:00 | n 24
+2019-03-29 first bar 2019-03-29 00:00:00 utc 2019-03-28 22:00:00+00:00 | last bar 2019-03-29 22:00:00 utc 2019-03-29 20:00:00+00:00 | n 23
+2019-04-01 first bar 2019-04-01 00:00:00 utc 2019-03-31 21:00:00+00:00 | last bar 2019-04-01 23:00:00 utc 2019-04-01 20:00:00+00:00 | n 24
+2019-10-25 first bar 2019-10-25 00:00:00 utc 2019-10-24 21:00:00+00:00 | last bar 2019-10-25 23:00:00 utc 2019-10-25 20:00:00+00:00 | n 24
+2019-10-28 first bar 2019-10-28 00:00:00 utc 2019-10-27 22:00:00+00:00 | last bar 2019-10-28 23:00:00 utc 2019-10-28 21:00:00+00:00 | n 24
+2019-11-01 first bar 2019-11-01 00:00:00 utc 2019-10-31 22:00:00+00:00 | last bar 2019-11-01 22:00:00 utc 2019-11-01 20:00:00+00:00 | n 23
+2019-11-04 first bar 2019-11-04 00:00:00 utc 2019-11-03 22:00:00+00:00 | last bar 2019-11-04 23:00:00 utc 2019-11-04 21:00:00+00:00 | n 24
+D1 open hour in New York (count): [{'ny_hour': 17, 'len': 239}, {'ny_hour': 18, 'len': 20}]
+D1 bars opening at NY hour != 17: [{'ts': datetime.datetime(2019, 3, 11, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 10, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 12, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 11, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 13, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 12, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 14, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 13, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 15, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 14, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 18, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 17, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 19, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 18, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 20, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 19, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 21, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 20, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 22, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 21, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 25, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 24, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}, {'ts': datetime.datetime(2019, 3, 26, 0, 0), 'ts_utc': datetime.datetime(2019, 3, 25, 22, 0, tzinfo=zoneinfo.ZoneInfo(key='UTC'))}]
+D1 weekday counts: [{'ts': 1, 'len': 52}, {'ts': 2, 'len': 52}, {'ts': 3, 'len': 51}, {'ts': 4, 'len': 52}, {'ts': 5, 'len': 52}]
+BTC M1 around fall-back: n 80 dup ts_utc 0 non-increasing 0
+  03:xx server rows: 60 (a 24/7 feed would have 120 real minutes in the repeated hour if server clock repeats)
+BTC M1 around spring-forward: hours present [2, 3, 4] n 65

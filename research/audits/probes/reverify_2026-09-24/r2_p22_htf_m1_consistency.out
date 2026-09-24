@@ -1,0 +1,46 @@
+[accepted] EURUSD H1 (resampled) + M1, same window
+[accepted] EURUSD D1 + M1
+[accepted] EURUSD H4 + M1
+[accepted] EURUSD native-H1 file + M1 (broker's own H1 bars)
+    native H1 vs M1-resampled H1: 0 of 6212 bars differ in high/low
+[accepted] H1 from 2018-12 (warm-up) + M1 from 2019-01-01 (aligned)
+[REJECTED] H1 + M1 starting mid-bar (2019-01-02 10:30): run_backtest: bars row 10 (ts=2019-01-02 10:00:00) is inconsistent with its own M1 window under timeframe='H1' -- bar high=np.float64(1.14773) vs M1 max=1.14524, bar low=
+[REJECTED] D1 to 2019-07-01 + M1 ending mid-day 2019-06-28 12:00: run_backtest: bars row 127 (ts=2019-06-28 00:00:00) is inconsistent with its own M1 window under timeframe='D1' -- bar high=np.float64(1.13942) vs M1 max=1.13939, bar low
+[REJECTED] H1 + M1 with 1 M1 bar missing (the high of 2019-06-06 14:xx): run_backtest: bars row 2675 (ts=2019-06-06 14:00:00) is inconsistent with its own M1 window under timeframe='H1' -- bar high=np.float64(1.12725) vs M1 max=1.12725, bar lo
+[REJECTED] D1 bars mis-declared as H1: run_backtest: bars row 0 (ts=2019-01-02 00:00:00) is inconsistent with its own M1 window under timeframe='H1' -- bar high=np.float64(1.14959) vs M1 max=1.14654, bar low=n
+[accepted] H1 bars declared as D1
+[REJECTED] H4 bars declared as H1: run_backtest: bars row 0 (ts=2019-01-02 00:00:00) is inconsistent with its own M1 window under timeframe='H1' -- bar high=np.float64(1.14668) vs M1 max=1.14654, bar low=n
+[REJECTED] H1 of EURUSD + M1 of GBPUSD: run_backtest: bars row 0 (ts=2019-01-02 00:00:00) is inconsistent with its own M1 window under timeframe='H1' -- bar high=np.float64(1.14654) vs M1 max=1.2751, bar low=np
+[accepted] BTCUSD H1 + M1 2019-03-25..2019-04-05
+[accepted] BTCUSD H4 + M1 2019-03-25..2019-04-05
+[accepted] BTCUSD D1 + M1 2019-03-25..2019-04-05
+    BTC 2019-03-25+6d: M1 rows with server hour 03 = 0, total rows that day = 1041
+[accepted] BTCUSD H1 + M1 2020-03-23..2020-04-03
+[accepted] BTCUSD H4 + M1 2020-03-23..2020-04-03
+[accepted] BTCUSD D1 + M1 2020-03-23..2020-04-03
+    BTC 2020-03-23+6d: M1 rows with server hour 03 = 0, total rows that day = 1380
+[accepted] BTCUSD H1 + M1 2021-03-22..2021-04-02
+[accepted] BTCUSD H4 + M1 2021-03-22..2021-04-02
+[accepted] BTCUSD D1 + M1 2021-03-22..2021-04-02
+    BTC 2021-03-22+6d: M1 rows with server hour 03 = 0, total rows that day = 1371
+[accepted] BTCUSD H1 + M1 2019-10-21..2019-11-01
+[accepted] BTCUSD H4 + M1 2019-10-21..2019-11-01
+[accepted] BTCUSD D1 + M1 2019-10-21..2019-11-01
+    BTC 2019-10-21+6d: M1 rows with server hour 03 = 60, total rows that day = 1439
+calendar_anomalies(BTCUSD) columns: ['date', 'n_minutes', 'first_ts', 'last_ts'] rows: 9
+shape: (9, 4)
+┌────────────┬───────────┬─────────────────────┬─────────────────────┐
+│ date       ┆ n_minutes ┆ first_ts            ┆ last_ts             │
+│ ---        ┆ ---       ┆ ---                 ┆ ---                 │
+│ date       ┆ u32       ┆ datetime[ms]        ┆ datetime[ms]        │
+╞════════════╪═══════════╪═════════════════════╪═════════════════════╡
+│ 2017-03-26 ┆ 54        ┆ 2017-03-26 03:00:00 ┆ 2017-03-26 03:59:00 │
+│ 2018-03-25 ┆ 60        ┆ 2018-03-25 03:00:00 ┆ 2018-03-25 03:59:00 │
+│ 2019-03-31 ┆ 48        ┆ 2019-03-31 03:00:00 ┆ 2019-03-31 03:59:00 │
+│ 2020-03-29 ┆ 60        ┆ 2020-03-29 03:00:00 ┆ 2020-03-29 03:59:00 │
+│ 2021-03-28 ┆ 4         ┆ 2021-03-28 03:00:00 ┆ 2021-03-28 03:03:00 │
+│ 2022-03-27 ┆ 4         ┆ 2022-03-27 03:00:00 ┆ 2022-03-27 03:03:00 │
+│ 2023-03-26 ┆ 4         ┆ 2023-03-26 03:00:00 ┆ 2023-03-26 03:03:00 │
+│ 2024-03-31 ┆ 4         ┆ 2024-03-31 03:00:00 ┆ 2024-03-31 03:03:00 │
+│ 2025-03-30 ┆ 4         ┆ 2025-03-30 03:00:00 ┆ 2025-03-30 03:03:00 │
+└────────────┴───────────┴─────────────────────┴─────────────────────┘

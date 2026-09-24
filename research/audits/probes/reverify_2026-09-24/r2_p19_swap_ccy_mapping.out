@@ -1,0 +1,7 @@
+USDJPY CURRENCY_DEPOSIT  -> swap_mode=money    swap_ccy=ACCOUNT | trade dir=+1 nights=3 swap_money/lot=-15.00 swap_pts=0.0 entry=108.122 -> booked USD -15.00
+EURUSD CURRENCY_SYMBOL   -> swap_mode=money    swap_ccy=EUR     | trade dir=+1 nights=1 swap_money/lot=-15.00 swap_pts=0.0 entry=1.15248 -> booked USD -17.26
+EURJPY CURRENCY_MARGIN   -> swap_mode=money    swap_ccy=EUR     | trade dir=+1 nights=4 swap_money/lot=-30.00 swap_pts=0.0 entry=123.11399999999999 -> booked USD -34.49
+GBPUSD INTEREST_CURRENT  -> swap_mode=interest swap_ccy=USD     | trade dir=+1 nights=2 swap_money/lot=-14.04 swap_pts=0.0 entry=1.26343 -> booked USD -14.04
+AUDUSD POINTS            -> swap_mode=points   swap_ccy=USD     | trade dir=+1 nights=3 swap_money/lot=0.00 swap_pts=-15.0 entry=0.70158 -> booked USD -15.00
+USDJPY DEPOSIT on a EUR account: swap_money/lot=-15.00 -> booked EUR -15.00 (identity, correct: deposit ccy = account ccy)
+crypto spec (fallback) swap_every_day: True | can the export override it? field not read from TSV: True

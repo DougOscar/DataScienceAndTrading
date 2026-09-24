@@ -1,0 +1,1 @@
+trades=292; final equity naive-ts=76014.83 aware-ts=76042.40; lots differ on 100 trades; risk_realisation_error>0 (over-risk vs entry-time rate) when recomputed at true entry rate: 43

@@ -1,0 +1,3 @@
+leak every 50 rows (124 leak rows): signal changes=3163, forced cuts used=200 (cap 200); auditor passed 0/10 seeds [4s]
+leak every 200 rows (31 leak rows): signal changes=3221, forced cuts used=200 (cap 200); auditor passed 9/10 seeds [22s]
+leak every 600 rows (10 leak rows): signal changes=3229, forced cuts used=200 (cap 200); auditor passed 10/10 seeds [22s]

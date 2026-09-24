@@ -1,0 +1,4 @@
+sparse_peek    passed assert_no_lookahead in 12/20 seeds | non-null signal rows=143 | backtest trades=64 sum pnl_points=3353 win%=42.2
+external_d1    passed assert_no_lookahead in 20/20 seeds | non-null signal rows=6212 | backtest trades=126 sum pnl_points=67207 win%=96.8
+self_d1        passed assert_no_lookahead in 0/20 seeds | non-null signal rows=6212 | backtest trades=126 sum pnl_points=67207 win%=96.8
+global_z       passed assert_no_lookahead in 0/20 seeds | non-null signal rows=6212 | backtest trades=83 sum pnl_points=9587 win%=91.6

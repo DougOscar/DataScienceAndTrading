@@ -1,0 +1,42 @@
+
+--- 2019-01-04T07:00 dir=+1: signal bar 2019-01-04T06:00 fast=1.138386 slow=1.138307 prev fast=1.138314 prev slow=1.138412 cross=True
+  ATR14@2019-01-04T06:00=0.0014914 -> stop_dist=0.0029829
+  entry M1 2019-01-04T07:00 open=1.13926 spread=9 -> fill Ask = 1.13935; stop = 1.1363671
+  exit at M1 2019-01-04T15:30 (H1 2019-01-04T15) reason=stop price=1.1363671 (M1 o/h/l/spr = 1.14029/1.14035/1.13602/9)
+  pnl_points = -298.285714
+  ENGINE: {'exit_ts': '2019-01-04T15:00:00.000000', 'entry_price': '1.1393499999999999', 'exit_price': '1.1363671428571427', 'stop_price': '1.1363671428571427', 'exit_reason': 'stop', 'pnl_points': '-298.2857142857176', 'nights': '0', 'mae_points': '332.9999999999833', 'mfe_points': '245.0000000000063'}
+
+--- 2019-01-09T02:00 dir=-1: signal bar 2019-01-09T01:00 fast=1.144424 slow=1.144434 prev fast=1.144332 prev slow=1.144304 cross=True
+  ATR14@2019-01-09T01:00=0.0016150 -> stop_dist=0.0032300
+  entry M1 2019-01-09T02:00 open=1.14567 spread=9 -> fill Bid = 1.14567; stop = 1.1489000
+  exit at M1 2019-01-09T16:35 (H1 2019-01-09T16) reason=stop price=1.1489000 (M1 o/h/l/spr = 1.14793/1.14947/1.14792/9)
+  pnl_points = -323.000000
+  ENGINE: {'exit_ts': '2019-01-09T16:00:00.000000', 'entry_price': '1.14567', 'exit_price': '1.1489', 'stop_price': '1.1489', 'exit_reason': 'stop', 'pnl_points': '-323.0000000000066', 'nights': '0', 'mae_points': '686.9999999999931', 'mfe_points': '187.0000000000038'}
+
+--- 2019-01-11T09:00 dir=-1: signal bar 2019-01-11T08:00 fast=1.151465 slow=1.151608 prev fast=1.151491 prev slow=1.151482 cross=True
+  ATR14@2019-01-11T08:00=0.0011614 -> stop_dist=0.0023229
+  entry M1 2019-01-11T09:00 open=1.15219 spread=9 -> fill Bid = 1.15219; stop = 1.1545129
+  exit at M1 2019-01-18T15:00 (H1 2019-01-18T15) reason=signal price=1.1402300 (M1 o/h/l/spr = 1.14014/1.14025/1.13988/9)
+  pnl_points = 1196.000000
+  ENGINE: {'exit_ts': '2019-01-18T15:00:00.000000', 'entry_price': '1.15219', 'exit_price': '1.1402299999999999', 'stop_price': '1.1545128571428571', 'exit_reason': 'signal', 'pnl_points': '1196.000000000019', 'nights': '5', 'mae_points': '178.99999999999582', 'mfe_points': '1537.0000000000105'}
+
+--- 2019-01-25T23:00 dir=+1: signal bar 2019-01-25T22:00 fast=1.135392 slow=1.135141 prev fast=1.134863 prev slow=1.135085 cross=True
+  ATR14@2019-01-25T22:00=0.0015521 -> stop_dist=0.0031043
+  entry M1 2019-01-25T23:00 open=1.14139 spread=17 -> fill Ask = 1.14156; stop = 1.1384557
+  exit at M1 2019-02-01T07:00 (H1 2019-02-01T07) reason=signal price=1.1441200 (M1 o/h/l/spr = 1.14412/1.14421/1.14411/9)
+  pnl_points = 256.000000
+  ENGINE: {'exit_ts': '2019-02-01T07:00:00.000000', 'entry_price': '1.14156', 'exit_price': '1.14412', 'stop_price': '1.1384557142857141', 'exit_reason': 'signal', 'pnl_points': '256.00000000001177', 'nights': '5', 'mae_points': '258.999999999987', 'mfe_points': '985.0000000000135'}
+
+--- 2019-02-15T09:00 dir=+1: signal bar 2019-02-15T08:00 fast=1.128742 slow=1.128671 prev fast=1.128654 prev slow=1.128766 cross=True
+  ATR14@2019-02-15T08:00=0.0006314 -> stop_dist=0.0012629
+  entry M1 2019-02-15T09:00 open=1.12876 spread=9 -> fill Ask = 1.12885; stop = 1.1275871
+  exit at M1 2019-02-15T09:38 (H1 2019-02-15T09) reason=stop price=1.1275871 (M1 o/h/l/spr = 1.12779/1.1278/1.12736/9)
+  pnl_points = -126.285714
+  ENGINE: {'exit_ts': '2019-02-15T09:00:00.000000', 'entry_price': '1.12885', 'exit_price': '1.127587142857143', 'stop_price': '1.127587142857143', 'exit_reason': 'stop', 'pnl_points': '-126.285714285701', 'nights': '0', 'mae_points': '184.9999999999907', 'mfe_points': '13.00000000001855'}
+
+--- 2019-04-05T00:00 dir=-1: signal bar 2019-04-04T23:00 fast=1.122640 slow=1.122729 prev fast=1.122767 prev slow=1.122686 cross=True
+  ATR14@2019-04-04T23:00=0.0009457 -> stop_dist=0.0018914
+  entry M1 2019-04-05T00:00 open=1.12144 spread=29 -> fill Bid = 1.12144; stop = 1.1233314
+  exit at M1 2019-04-05T09:17 (H1 2019-04-05T09) reason=stop price=1.1233314 (M1 o/h/l/spr = 1.12312/1.12324/1.12312/11)
+  pnl_points = -189.142857
+  ENGINE: {'exit_ts': '2019-04-05T09:00:00.000000', 'entry_price': '1.12144', 'exit_price': '1.1233314285714284', 'stop_price': '1.1233314285714284', 'exit_reason': 'stop', 'pnl_points': '-189.14285714284327', 'nights': '0', 'mae_points': '201.99999999999105', 'mfe_points': '0.0'}

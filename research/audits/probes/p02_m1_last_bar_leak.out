@@ -1,0 +1,7 @@
+A) D1 last bar ts: 2019-06-13 00:00:00 | M1 rows mapped to it: 2160 | M1 ts range: 2019-06-13 00:00:00 -> 2019-06-14 11:59:00
+B) HTF last bar: 2019-05-31 23:00:00 high/low 1.1172 1.11646
+   without m1: [{'entry_ts': datetime.datetime(2019, 5, 31, 23, 0), 'exit_ts': datetime.datetime(2019, 5, 31, 23, 0), 'exit_reason': 'eod', 'entry_price': 1.11728, 'stop_price': 1.1142800000000002, 'target_price': 1.12528, 'exit_price': 1.1165}]
+   with m1   : [{'entry_ts': datetime.datetime(2019, 5, 31, 23, 0), 'exit_ts': datetime.datetime(2019, 5, 31, 23, 0), 'exit_reason': 'target', 'entry_price': 1.11728, 'stop_price': 1.1142800000000002, 'target_price': 1.12528, 'exit_price': 1.12528}]
+   M1 bars mapped to last H1 bar: 28846 (should be <= 60)
+   target was triggered by M1 bar at 2019-06-03 21:50:00 -> outside the last H1 window (future data)
+C) session-filtered H1: max M1 rows mapped to one H1 bar = 29266 at 2019-05-31 16:00:00

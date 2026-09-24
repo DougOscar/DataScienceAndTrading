@@ -1,0 +1,6 @@
+naive rejected: conversion_rate: ts_utc must be a timezone-aware Datetime series, got dtype Date
+t=2019-07-03 10:00:00 server: 1/rate=107.623 | close of bar opened 2019-07-03 09:59:00 (closed 2019-07-03 10:00:00) = 107.623 | close of bar opened 2019-07-03 10:00:00 (closes 2019-07-03 10:01:00) = 107.625 -> OK (closed bar)
+t=2019-01-09 10:00:00 server: 1/rate=108.896 | close of bar opened 2019-01-09 09:59:00 (closed 2019-01-09 10:00:00) = 108.896 | close of bar opened 2019-01-09 10:00:00 (closes 2019-01-09 10:01:00) = 108.899 -> OK (closed bar)
+t=2019-01-09 10:00:30 server: 1/rate=108.896 | close of bar opened 2019-01-09 09:59:00 (closed 2019-01-09 10:00:00) = 108.896 | close of bar opened 2019-01-09 10:00:00 (closes 2019-01-09 10:01:00) = 108.899 -> OK (closed bar)
+EUR->JPY 121.44700 (direct EURJPY exists) vs EURJPY 09:59-bar close 121.447
+NZD->CHF 0.65827 vs NZDCHF 09:59-bar close 0.65827

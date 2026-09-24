@@ -1,0 +1,8 @@
+sparse_peek        passed auditor 0/5 seeds | backtest trades=64 pnl=3353 win%=42.2 | audit on 6212 bars took 0s | look-ahead detected (truncation@t=121): column 'signal' differs at row 121 (ts=2019-01-09 
+veto_peek          passed auditor 0/5 seeds | backtest trades=36 pnl=5057 win%=55.6 | audit on 6212 bars took 0s | look-ahead detected (future-perturbation@t=54,draw=0): column 'signal' differs at row 54 (
+exit_peek          passed auditor 0/5 seeds | backtest trades=143 pnl=5422 win%=41.3 | audit on 6212 bars took 0s | look-ahead detected (future-perturbation@t=8,draw=1): column 'signal' differs at row 8 (ts
+external_d1_attr   passed auditor 0/1 seeds | backtest trades=126 pnl=67207 win%=96.8 | audit on 768 bars took 0s | look-ahead detected (full run): quantlab.data.load_bars was called while a look-ahead audi
+imported_load_bars passed auditor 0/1 seeds | backtest trades=126 pnl=67207 win%=96.8 | audit on 768 bars took 0s | look-ahead detected (full run): quantlab.data.load_bars was called while a look-ahead audi
+private_helper     passed auditor 0/1 seeds | backtest trades=126 pnl=67207 win%=96.8 | audit on 768 bars took 0s | look-ahead detected (full run): quantlab.data._load_resampled was called while a look-ahea
+raw_parquet        passed auditor 0/1 seeds | backtest trades=126 pnl=67207 win%=96.8 | audit on 768 bars took 0s | look-ahead detected (full run): a raw Parquet/CSV reader (polars or pyarrow) was called fr
+closure_cache      passed auditor 1/1 seeds | backtest trades=126 pnl=67207 win%=96.8 | audit on 768 bars took 1s | 

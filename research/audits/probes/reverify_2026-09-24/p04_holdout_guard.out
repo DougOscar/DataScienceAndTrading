@@ -1,0 +1,35 @@
+[ok] default end, M1: last ts=2025-05-14 23:58:00, last bar closes 2025-05-14 23:59:00
+[ok] end == cutoff, M1: last ts=2025-05-14 23:58:00, last bar closes 2025-05-14 23:59:00
+[ok] default end, M5: last ts=2025-05-14 23:55:00, last bar closes 2025-05-15 00:00:00
+[ok] end == cutoff, M5: last ts=2025-05-14 23:55:00, last bar closes 2025-05-15 00:00:00
+[ok] default end, H1: last ts=2025-05-14 23:00:00, last bar closes 2025-05-15 00:00:00
+[ok] end == cutoff, H1: last ts=2025-05-14 23:00:00, last bar closes 2025-05-15 00:00:00
+[ok] default end, H4: last ts=2025-05-14 20:00:00, last bar closes 2025-05-15 00:00:00
+[ok] end == cutoff, H4: last ts=2025-05-14 20:00:00, last bar closes 2025-05-15 00:00:00
+[ok] default end, D1: last ts=2025-05-14 00:00:00, last bar closes 2025-05-15 00:00:00
+[ok] end == cutoff, D1: last ts=2025-05-14 00:00:00, last bar closes 2025-05-15 00:00:00
+[blocked HoldoutLocked] end = cutoff+1ms
+[blocked HoldoutLocked] end = '2025-05-15 00:00:00.000001'
+[ok, empty] start after cutoff, no end
+[blocked HoldoutLocked] start after cutoff, end > cutoff
+[blocked TypeError] end tz-aware UTC (= 2025-05-15 00:00 UTC = 03:00 server): can't compare offset-naive and offset-aware datetimes
+[blocked TypeError] end tz-aware string +00:00: can't compare offset-naive and offset-aware datetimes
+[blocked TypeError] end tz-aware -05:00 on dev day (2025-05-14 20:00 NY = 05-15 03:00 server): can't compare offset-naive and offset-aware datetimes
+[blocked HoldoutLocked] include_holdout=True, no system
+[blocked HoldoutLocked] system given, include_holdout False
+[blocked HoldoutLocked] system not unlocked + include_holdout
+[blocked HoldoutLocked] book='fbs' lowercase
+[blocked ValueError] book='B3' for FX symbol: book mismatch for 'EURUSD': its market 'forex' belongs to book 'FBS', not 'B3'
+[ok] source_file = native H1 file, H1: last ts=2025-05-14 23:00:00, last bar closes 2025-05-15 00:00:00
+[ok] source_file = native H1 file, D1: last ts=2025-05-14 00:00:00, last bar closes 2025-05-15 00:00:00
+[ok] source_file = native H1 file, H4 (relative path): last ts=2025-05-14 20:00:00, last bar closes 2025-05-15 00:00:00
+[blocked ValueError] source_file = XAUUSD file but symbol EURUSD: source_file '/home/douglaso/Finances/DataScienceAndTrading/data/forex/XAUUSD_M1_2016050200
+[ok] H4, end=2025-05-14 22:00: last ts=2025-05-14 16:00:00, last bar closes 2025-05-14 20:00:00
+[ok] D1, end=2025-05-14 23:59: last ts=2025-05-13 00:00:00, last bar closes 2025-05-14 00:00:00
+[ok] BTCUSD D1 default: last ts=2025-05-14 00:00:00, last bar closes 2025-05-15 00:00:00
+[blocked HoldoutLocked] conversion_rate EUR->USD at 2025-05-20
+[ok] conversion_rate at 2025-05-14 23:59:30 server (window end +1min crosses cutoff): last ts=2025-05-14 23:59:00, last bar closes 2025-05-15 00:00:00
+[blocked ValueError] conversion_rate with NAIVE series (2025-05-14 22:30): conversion_rate: ts_utc must be a timezone-aware Datetime series, got dtype Datetime(time_
+[blocked HoldoutLocked] conversion_rate via triangulation EUR->JPY at 2025-05-20
+infer_point reads raw file tail without load_bars guard: False
+private _load_resampled returns full series up to 2026-05-15 00:00:00 (private helper; cache parquet on disk also unguarded)

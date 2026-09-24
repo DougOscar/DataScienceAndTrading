@@ -1,0 +1,7 @@
+(a) swap_mode=points: trades' swap_points sum=-398.0, swap_money_per_lot sum=0.0 -> total pnl_ccy=-2622.14
+(a) swap_mode=money : trades' swap_points sum=0.0, swap_money_per_lot sum=-398.0 -> total pnl_ccy=-2224.14
+(b) floor_to_step: {0.3: 0.3, 0.29999999: 0.29, 0.0099999: 0.0, 0.07: 0.07, 1.15: 1.15, 0.57: 0.57, 0.58: 0.58, 2.01: 2.01, 600.0: 500}
+(d) risk realisation error: mean=-0.0010 min=-0.0043 max=-0.0000 (must be <=0)
+    stop-exit loss / risk target: min=0.9973 max=1.0000
+(c) final daily equity 96383.30 vs equity0+sum(pnl_ccy) 96383.30; days=259
+    daily equity truncation test at 2019-07-01: differing days = 0 -> []

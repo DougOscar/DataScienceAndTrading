@@ -136,3 +136,13 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 
 Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
+
+# Research workflow (pro research team)
+
+- Spec: `research/DESIGN.md` (v1.1, approved 2026-09-23). It governs agents, gates, ledger and holdout.
+- Agents: `.claude/agents/` (11 specialists). Skills: `/research-cycle`, `/scout`, `/validate`,
+  `/unlock-holdout`, `/promote`, `/decay-review` + reference skills in `.claude/skills/`.
+- New code goes in `quantlab/`; `source/` is legacy (frozen). Data: `data/<market>/*.parquet`
+  (see `data/manifest.json`, converter `tools/mt5_csv_to_parquet.py`).
+- Never read holdout data (FBS: from 2025-05-15) outside `/unlock-holdout`; never skip the trial ledger.
+- Python: `.venv/bin/python`.
