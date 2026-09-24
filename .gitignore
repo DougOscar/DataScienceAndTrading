@@ -61,3 +61,7 @@ htmlcov/
 
 # Comparison dashboard parquet cache (per-strategy results, regenerated on demand)
 comparison/.cache/
+
+# Research: per-trial study artefacts (large); ledger JSONL stays tracked
+research/studies/
+research/systems/_drafts/
