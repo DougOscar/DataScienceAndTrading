@@ -72,3 +72,50 @@ class Strategy(Protocol):
 
 class HoldoutLocked(PermissionError):
     """Raised when code asks for holdout data without a ledger unlock (DESIGN §4.1)."""
+
+
+# --------------------------------------------------------------------------- Phase 1: studies
+# Daily returns convention (used by stats, opt, gates, portfolio):
+#   pl.DataFrame(date: Date, ret: Float64) — daily simple return of equity on the book's
+#   nominal account (sizing.daily_equity 'ret'), one row per server trading day of the
+#   evaluated window, sorted, no gaps filled.  Wide matrices: 'date' + one column per trial.
+
+@dataclass
+class Outcome:
+    """One evaluated parameter set over a window (normally the full dev window)."""
+
+    daily: pl.DataFrame                 # date, ret
+    trades: pl.DataFrame                # engine trades + sizing columns
+    metrics: dict[str, float]
+
+
+@runtime_checkable
+class Evaluator(Protocol):
+    """Maps a parameter set to an Outcome.  Rule-based systems are evaluated ONCE per
+    parameter set on the full dev window; CV/walk-forward then slice the daily return
+    matrix (valid because signals at t depend only on data <= t).  Systems that must be
+    re-fitted per window (ML) set ``requires_refit = True`` and implement ``fit_window``
+    (Phase 1 only needs the rule-based path; the flag keeps the API honest)."""
+
+    book: str
+    periods_per_year: float
+    requires_refit: bool
+    cost: Any                           # base costs.CostModel (gates derive the stressed model from it)
+
+    def __call__(self, params: dict[str, Any], *, cost: Any = None) -> Outcome: ...
+
+
+@dataclass
+class StudyResult:
+    """Everything a study produces; input to the gate evaluation (DESIGN §4.2)."""
+
+    study_id: str
+    param_names: tuple[str, ...]
+    trials: pl.DataFrame        # trial_id, status, param_<name>..., m_<metric>...
+    returns: pl.DataFrame       # wide: date + 't<trial_id>' daily returns (full dev window)
+    selected_params: dict[str, Any]
+    selection: dict[str, Any]   # method, plateau_score, neighbourhood, objective values
+    cpcv_paths: pl.DataFrame    # date, path_id, ret — OOS returns of the *selection procedure*
+    wfo_oos: pl.DataFrame       # date, ret, refit_id — simulated re-optimisation schedule
+    wfo_params: pl.DataFrame    # refit_id, refit_date, train_start, train_end, param_<name>...
+    meta: dict[str, Any]        # cv scheme, schedule, n_trials, seeds, runtime, cost version

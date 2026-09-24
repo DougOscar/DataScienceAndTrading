@@ -25,3 +25,5 @@ polars>=1.30
 numba>=0.60
 pytest>=8.0
 hypothesis>=6.0
+optuna>=4.0
+scipy>=1.11

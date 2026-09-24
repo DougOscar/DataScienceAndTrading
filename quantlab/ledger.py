@@ -172,6 +172,20 @@ def system_trial_count(book: str, system: str, ledger_dir: Path | None = None) -
                if s["book"] == config.get_book(book).name and s["system"] == system)
 
 
+def system_effective_trials(book: str, system: str, *, exclude_study: str | None = None,
+                            ledger_dir: Path | None = None) -> float:
+    """Sum of ``effective_trials`` logged by the gate evaluation of every earlier attempt of a
+    system (feeds ``gates.evaluate_gates(prior_effective_trials=...)`` so DSR deflates for all
+    attempts, DESIGN §0.3 / §4.5).  Attempts without a gates event contribute their raw n_trials."""
+    total = 0.0
+    for sid, s in studies(ledger_dir).items():
+        if sid == exclude_study or s["book"] != config.get_book(book).name or s["system"] != system:
+            continue
+        eff = s.get("effective_trials")
+        total += float(eff) if eff is not None else float(s.get("n_trials", 0))
+    return total
+
+
 # --------------------------------------------------------------------------- holdout
 def holdout_unlocks(ledger_dir: Path | None = None) -> list[dict[str, Any]]:
     return _read(_ledger_dir(ledger_dir) / HOLDOUT_FILE)
@@ -255,7 +269,7 @@ class TrialRecorder:
     def flush(self) -> None:
         if not self._rows:
             return
-        pl.DataFrame(self._rows).write_parquet(self.dir / f"trials-{self._part:05d}.parquet")
+        pl.DataFrame(self._rows, infer_schema_length=None).write_parquet(self.dir / f"trials-{self._part:05d}.parquet")
         if self._returns:
             long = pl.concat([df.select("date", "ret").with_columns(pl.lit(k).alias("trial"))
                               for k, df in self._returns.items()])

@@ -129,3 +129,14 @@ def test_unlock_requires_exact_user_phrase(tmp_path, clean_tree):
                                        pass_band={"x": 1}, user_confirmation=ledger.unlock_phrase("fbs", "donchian"),
                                        ledger_dir=tmp_path)
     assert row["user_confirmation"] == "UNLOCK HOLDOUT FBS/donchian"
+
+
+def test_system_effective_trials_sums_prior_attempts(tmp_path, clean_tree):
+    ledger.create_study(ledger_dir=tmp_path, **_study())
+    ledger.log_event("fbs-0007-a1", "trials", ledger_dir=tmp_path, n_trials=400)
+    ledger.log_event("fbs-0007-a1", "gates", ledger_dir=tmp_path, effective_trials=31.5)
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0007-a2", attempt=2))
+    ledger.log_event("fbs-0007-a2", "trials", ledger_dir=tmp_path, n_trials=50)   # no gates yet
+    assert ledger.system_effective_trials("FBS", "donchian", ledger_dir=tmp_path) == 81.5
+    assert ledger.system_effective_trials("FBS", "donchian", exclude_study="fbs-0007-a2",
+                                          ledger_dir=tmp_path) == 31.5
