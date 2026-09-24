@@ -930,23 +930,81 @@ def test_judge_plateau_on_d5_sobol_study(tmp_path):
     assert got == {0.02: "FAIL", 0.35: "PASS"}, got
 
 
-def test_judge_plateau_counts_invalid_and_out_of_bounds_as_failed(tmp_path):
-    """N4: points outside the declared bounds or rejected by space.is_valid are failed
-    neighbours (never evaluated); ints that round back to x move to the next distinct int."""
+def test_judge_plateau_validity_and_search_bounds(tmp_path):
+    """N4 + round 2b: points rejected by space.is_valid or by natural validity (lookback int
+    ≥ 1, positive params > 0) fail; points outside the SEARCH bounds are evaluated and reported;
+    ints that round back to x move to the next distinct int; score = min over axes."""
     sp = opt.SearchSpace([opt.IntParam("a", 1, 10), opt.FloatParam("x", 0.0, 1.0)],
                          constraint=lambda p: p["x"] < 0.75)
     ev = SyntheticEvaluator(bounds={"a": (1, 10), "x": (0.0, 1.0)}, base_sharpe=1.5, rho=1.0, seed=2)
     pts = G.plateau_perturbations(sp, {"a": 2, "x": 0.6}, 0.2)
     assert [q["value"] for q in pts if q["param"] == "a"] == [0, 1, 3, 4]      # 1.6→2→1, 1.8→2 … distinct
-    assert [q["in_bounds"] for q in pts if q["param"] == "a"] == [False, True, True, True]
+    assert [q["natural_valid"] for q in pts if q["param"] == "a"] == [False, True, True, True]
     assert [q["value"] for q in pts if q["param"] == "x"] == [0.4, 0.5, 0.7, 0.8]
     res = _study_run(ev, sp, tmp_path, "oob", method="sobol", n_trials=16, seed=0)
     judged = replace(res, selected_params={"a": 2, "x": 0.6},
                      selection={**res.selection, "trial_id": int(res.trials["trial_id"][0])})
     pj = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
     st = {(q["param"], q["value"]): q["status"] for q in pj["points"]}
-    assert st[("a", 0)] == "out_of_bounds" and st[("x", 0.8)] == "invalid"
-    assert pj["plateau_score"] == pytest.approx(6 / 8) and pj["n_evaluations"] == 7
+    assert st[("a", 0)] == "invalid_natural" and st[("x", 0.8)] == "invalid"
+    assert pj["pass_share_by_param"] == {"a": 0.75, "x": 0.75} and pj["plateau_score"] == 0.75
+    assert pj["n_evaluations"] == 7 and pj["outside_search_bounds_points"] == [("a", 0)]   # invalid anyway
+    # outside the search bounds but naturally valid → evaluated, reported, and the edge is flagged
+    pj = G.judge_plateau(replace(judged, selected_params={"a": 10, "x": 0.0}), ev, space=sp, radius=0.2,
+                         periods_per_year=PPY)
+    out = {(q["param"], q["value"]) for q in pj["points"] if q["outside_search_bounds"]}
+    assert out == {("a", 11), ("a", 12), ("x", -0.2), ("x", -0.1)}
+    assert all(q["status"] == "ok" for q in pj["points"]) and pj["plateau_score"] == 1.0
+    assert pj["selected_at_edge"] == ["a", "x"]
+
+
+def _n8_study(tmp, nd, sid):
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 10)] + [opt.IntParam(f"z{i}", 0, 20) for i in range(nd)])
+    ev0 = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=1.0, seed=5)
+    res = _study_run(ev0, sp, tmp, sid, method="sobol", n_trials=8, seed=0, cv=opt.CPCVConfig(4, 1))
+    sel = {"a": 5, **{f"z{i}": 10 for i in range(nd)}}
+    return sp, replace(res, selected_params=sel, selection={**res.selection, "trial_id": 0})
+
+
+def test_plateau_min_over_axes_is_not_lifted_by_irrelevant_params(tmp_path):
+    """N8 regression (round 2b): pooled over axes, a spike with 2 irrelevant dummies scored
+    0.67 (PASS) and a half-plateau with 1 dummy 0.75 (PASS).  With the min over axes, dummies
+    (share 1.0 each) cannot lift the relevant axis: spike and partial plateau FAIL with any
+    number of dummies; a broad plateau PASSes."""
+    for nd in (0, 1, 2, 3, 4):
+        sp, judged = _n8_study(tmp_path, nd, f"n8-{nd}")
+        got = {}
+        for name, width in (("spike", 0.02), ("partial", 0.09), ("broad", 0.30)):
+            ev = SyntheticEvaluator(bounds={"a": (0, 10)}, bumps=({"center": {"a": 5}, "height": 2.0, "width": width},),
+                                    rho=1.0, seed=5)
+            pj = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
+            assert all(pj["pass_share_by_param"][f"z{i}"] == 1.0 for i in range(nd))
+            got[name] = (pj["plateau_score"], pj["pooled_share"])
+        assert got["spike"][0] == 0.0 and got["partial"][0] == 0.5 and got["broad"][0] == 1.0, (nd, got)
+        assert [G._cmp(">=", got[k][0], 0.6) for k in ("spike", "partial", "broad")] == [False, False, True]
+        if nd >= 2:
+            assert got["spike"][1] >= 0.6            # the pooled share (diagnostic) would have passed
+
+
+def test_broad_plateau_selected_at_search_space_edge_passes(tmp_path):
+    """Round 2b: bounds are search limits.  A broad optimum sitting on the edge of the searched
+    space is judged on its real neighbourhood (points beyond the bound are evaluated), in both
+    relative (low > 0) and range mode, and the edge is reported."""
+    for lo, hi, x in ((10, 50, 50), (0, 10, 10)):
+        sp = opt.SearchSpace([opt.IntParam("look", lo, hi)])
+        ev = SyntheticEvaluator(bounds={"look": (lo, hi)},
+                                bumps=({"center": {"look": x}, "height": 2.0, "width": 0.4},), rho=1.0, seed=4)
+        res = _study_run(ev, sp, tmp_path, f"edge-{lo}")
+        judged = replace(res, selected_params={"look": x},
+                         selection={**res.selection, "trial_id": int(res.trials.filter(pl.col("param_look") == x)
+                                                                      ["trial_id"][0])})
+        rep = _gate(judged, ev, tmp_path)
+        row = rep.row("plateau")
+        assert row.status == "PASS", row.interpretation
+        assert "selected at search-space edge (look)" in row.interpretation
+        assert rep.diagnostics["plateau"]["n_outside_search_bounds"] == 2
+        assert rep.diagnostics["plateau"]["selected_at_search_space_edge"] == ["look"]
+        assert "Weakest parameter axis: look keeps 4/4" in row.interpretation
 
 
 def test_explicit_spec_must_match_evaluator_symbol(good):

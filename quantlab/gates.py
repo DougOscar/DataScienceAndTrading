@@ -33,9 +33,12 @@ Gates and the series each one uses
   evaluator the judge runs it (N4, :func:`judge_plateau`): the selected configuration is
   re-evaluated perturbed along each numeric axis at ×(1 ± r/2) and ×(1 ± r) (± r/2, ± r of the
   declared range for params that are not strictly positive), r = the radius pre-registered in
-  the study's ledger row (default 0.20, N3).  Score = share of perturbations whose full-dev
-  Sharpe is ≥ 50 % of the re-evaluated peak and > 0; invalid / out-of-bounds / erroring
-  points count as failures.  These ≤ 4·d evaluations are judge diagnostics (logged with the
+  the study's ledger row (default 0.20, N3).  A point passes if its full-dev Sharpe is ≥ 50 %
+  of the re-evaluated peak and > 0; score = the MINIMUM over parameter axes of the per-axis
+  pass share (N8: irrelevant axes cannot lift a fragile one; 0.60 ⇒ ≥ 3 of 4 on every axis).
+  Search bounds are not validity limits: points outside them are evaluated (and reported);
+  invalid (constraint, or natural: positive params > 0, lookback ints ≥ 1) and erroring points
+  fail.  These ≤ 4·d evaluations are judge diagnostics (logged with the
   gates event), not selection trials: they do not enter the DSR's N.  Without an evaluator the
   matrix-based ±radius box over the recorded trials is used and labelled as such
   (:func:`plateau_score`).
@@ -196,10 +199,15 @@ class GateReport:
                   f"Radius {pdl.get('radius')} ({pdl.get('radius_source')}); peak (re-evaluated) Sharpe "
                   f"{pdl.get('peak_sharpe', nan):.2f}; {pdl.get('n_evaluations', 0)} evaluations in "
                   f"{pdl.get('runtime_s', nan):.1f} s.", "",
-                  "| Param | Offset | Value | Sharpe | Status | Keeps ≥ 50% of peak |", "|---|---|---|---|---|---|"]
+                  f"Score = min over parameter axes of the per-axis pass share; weakest axis "
+                  f"{pdl.get('weakest_axis')} ({pdl.get('pass_share_by_param')}). Selected at search-space edge: "
+                  f"{', '.join(pdl.get('selected_at_edge') or []) or 'no'}.", "",
+                  "| Param | Offset | Value | Outside search bounds | Sharpe | Status | Keeps ≥ 50% of peak |",
+                  "|---|---|---|---|---|---|---|"]
             for q in pdl["points"]:
                 sr = q.get("sharpe")
                 L.append(f"| {q['param']} | {q['offset']} | {q['value']} | "
+                         f"{'yes' if q.get('outside_search_bounds') else ''} | "
                          f"{'—' if sr is None or not np.isfinite(sr) else f'{sr:.2f}'} | {q['status']} | "
                          f"{'yes' if q.get('pass') else 'no'} |")
             L.append("")
@@ -415,10 +423,13 @@ def plateau_perturbations(space: Any, selected: Mapping[str, Any],
     * ints are rounded (half up); a point that rounds back to x moves to the next int in its
       direction, and the outer point is kept distinct from the inner one (so each side has
       two distinct ints);
-    * ordered categoricals: the adjacent levels that exist; unordered categoricals: held fixed;
-    * a point outside the declared [low, high] is kept with ``in_bounds = False`` (the caller
-      counts it as a failed neighbour — conservative).
-    Returns dicts ``param, offset, value, in_bounds, params``."""
+    * ordered categoricals: the adjacent levels that exist; unordered categoricals: held fixed
+      (no axis).
+    The declared [low, high] are SEARCH limits, not validity limits (round 2b): points outside
+    them are kept and evaluated (``outside_search_bounds = True`` is reported).  Only natural
+    validity is enforced here (``natural_valid``): a strictly positive param (declared low > 0)
+    must stay > 0, and an int with declared low ≥ 1 (lookback / period) must stay ≥ 1.
+    Returns dicts ``param, offset, value, outside_search_bounds, natural_valid, params``."""
     pts: list[dict[str, Any]] = []
     for p in space.params:
         if p.name not in selected:
@@ -430,7 +441,8 @@ def plateau_perturbations(space: Any, selected: Mapping[str, Any],
             i = list(p.choices).index(x)
             for j, lab in ((i - 1, "level -1"), (i + 1, "level +1")):
                 if 0 <= j < len(p.choices):
-                    pts.append({"param": p.name, "offset": lab, "value": p.choices[j], "in_bounds": True})
+                    pts.append({"param": p.name, "offset": lab, "value": p.choices[j],
+                                "outside_search_bounds": False, "natural_valid": True})
             continue
         if x is None:
             continue
@@ -458,30 +470,54 @@ def plateau_perturbations(space: Any, selected: Mapping[str, Any],
             vals = [(lab, round(v, 12)) for lab, v in raw]
         tol = 1e-9 * max(1.0, abs(lo), abs(hi))
         for lab, v in vals:
-            pts.append({"param": p.name, "offset": lab, "value": v, "in_bounds": lo - tol <= v <= hi + tol})
+            natural = not ((lo > 0 and v <= 0) or (p.kind == "int" and lo >= 1 and v < 1))
+            pts.append({"param": p.name, "offset": lab, "value": v,
+                        "outside_search_bounds": not (lo - tol <= v <= hi + tol), "natural_valid": natural})
     for q in pts:
         q["params"] = {**dict(selected), q["param"]: q["value"]}
     return pts
 
 
+def selected_at_edge(space: Any, selected: Mapping[str, Any]) -> list[str]:
+    """Params whose selected value sits on a declared search bound (or first/last ordered level)."""
+    out = []
+    for p in space.params:
+        x = selected.get(p.name)
+        if x is None:
+            continue
+        if p.kind == "categorical":
+            if p.ordered and x in p.choices and list(p.choices).index(x) in (0, len(p.choices) - 1):
+                out.append(p.name)
+        elif float(x) <= float(p.low) or float(x) >= float(p.high):
+            out.append(p.name)
+    return out
+
+
 def judge_plateau(study: StudyResult, evaluator: Any, *, space: Any, radius: float | Mapping[str, float] | None,
                   periods_per_year: float = 260.0, n_jobs: Any = 1) -> dict[str, Any]:
-    """Judge-run plateau (DESIGN §4.2 v1.2; red-team N4).  Evaluates the selected configuration
-    and each :func:`plateau_perturbations` point that is inside the declared bounds and valid
-    (``space.is_valid``) with ``evaluator(params, cost=None)`` (the evaluator's base cost, as in
-    ``run_study``), on ``opt``'s runner (in-process for ``n_jobs=1``, else its capped process
-    pool).  Score = share of ALL perturbation points whose full-dev Sharpe is ≥
-    ``PLATEAU_PEAK_FRACTION`` × peak and > 0, peak = the re-evaluated selected configuration
-    (0 when peak ≤ 0); out-of-bounds, invalid and erroring points count as failures.  NaN (and
-    the gate SKIPPED) only when there is no perturbable parameter."""
+    """Judge-run plateau (DESIGN §4.2 v1.2; red-team N4, N8; round 2b).
+
+    Evaluates the selected configuration and every :func:`plateau_perturbations` point that is
+    naturally valid and accepted by ``space.is_valid`` (the constraint; search bounds are NOT a
+    validity check — points outside them are evaluated and reported) with
+    ``evaluator(params, cost=None)`` (the evaluator's base cost, as in ``run_study``), on
+    ``opt``'s runner (in-process for ``n_jobs=1``, else its capped process pool).
+
+    A point passes if its full-dev Sharpe is ≥ ``PLATEAU_PEAK_FRACTION`` × peak and > 0, peak =
+    the re-evaluated selected configuration (nothing passes when peak ≤ 0); invalid and
+    erroring points fail.  **Score = the minimum over parameter axes of the per-axis pass
+    share** (N8: an irrelevant axis scores 1.0 and cannot lift a failing relevant axis; with 4
+    points per axis the 0.60 gate means ≥ 3 of 4 on every axis).  Unordered categoricals give no
+    axis; an ordered categorical at an edge has 1 point (share 0 or 1).  The pooled share and
+    ``pass_share_by_param`` are diagnostics.  NaN (gate SKIPPED) when there is no axis."""
     from . import opt
     t0 = time.perf_counter()
     ppy = float(periods_per_year)
     sel = dict(study.selected_params)
     pts = plateau_perturbations(space, sel, radius)
     for q in pts:
-        if not q["in_bounds"]:
-            q["status"] = "out_of_bounds"
+        if not q["natural_valid"]:
+            q["status"] = "invalid_natural"
         elif not space.is_valid(q["params"]):
             q["status"] = "invalid"
         else:
@@ -515,19 +551,30 @@ def judge_plateau(study: StudyResult, evaluator: Any, *, space: Any, radius: flo
         sr = q["sharpe"]
         q["pass"] = bool(ok_peak and q["status"] == "ok" and sr is not None and np.isfinite(sr)
                          and sr > 0 and sr >= PLATEAU_PEAK_FRACTION * peak)
-    score = float(np.mean([q["pass"] for q in pts])) if pts else float("nan")
     by_param: dict[str, list] = {}
     for q in pts:
         by_param.setdefault(q["param"], []).append(q["pass"])
-    return {"plateau_score": score, "n_points": len(pts), "n_neighbours": len(pts),
-            "n_evaluations": len(todo), "n_failed_unevaluated": sum(q["status"] in ("out_of_bounds", "invalid")
-                                                                    for q in pts),
+    shares = {k: float(np.mean(v)) for k, v in by_param.items()}
+    counts = {k: (int(sum(v)), len(v)) for k, v in by_param.items()}
+    if shares:
+        weakest = min(shares, key=lambda k: (shares[k], list(shares).index(k)))
+        score = shares[weakest]
+    else:
+        weakest, score = None, float("nan")
+    pooled = float(np.mean([q["pass"] for q in pts])) if pts else float("nan")
+    return {"plateau_score": score, "score_rule": "min over parameter axes", "pooled_share": pooled,
+            "weakest_axis": weakest, "weakest_axis_passes": counts.get(weakest), "n_axes": len(shares),
+            "n_points": len(pts), "n_neighbours": len(pts), "n_evaluations": len(todo),
+            "n_invalid": sum(q["status"] in ("invalid", "invalid_natural") for q in pts),
+            "n_outside_search_bounds": sum(bool(q["outside_search_bounds"]) for q in pts),
+            "outside_search_bounds_points": [(q["param"], q["value"]) for q in pts if q["outside_search_bounds"]],
+            "selected_at_edge": selected_at_edge(space, sel),
             "peak_sharpe": float(peak) if peak is not None else float("nan"), "peak_source": peak_src,
             "peak_sharpe_study": float(peak_study), "points": pts, "radius": radius,
-            "pass_share_by_param": {k: float(np.mean(v)) for k, v in by_param.items()},
+            "pass_share_by_param": shares, "pass_count_by_param": counts,
             "runtime_s": time.perf_counter() - t0, "n_jobs": jobs,
             "method": (f"judge-run perturbations ×(1 ± r/2), ×(1 ± r) per numeric axis (± r·range when not strictly "
-                       f"positive), r = {radius}; {len(pts)} points, {len(todo)} evaluations")}
+                       f"positive), r = {radius}; score = min over axes; {len(pts)} points, {len(todo)} evaluations")}
 
 
 def _outcome_sharpe(o: Outcome, ppy: float) -> float:
@@ -959,26 +1006,34 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
         pj = judge_plateau(study, evaluator, space=jspace, radius=radius, periods_per_year=ppy, n_jobs=n_jobs)
         psc = pj["plateau_score"]
         plateau_detail = {**pj, "radius_source": ctx["radius_source"], "kind": "judge-run",
-                          "points": [{k: q.get(k) for k in ("param", "offset", "value", "params", "sharpe",
-                                                            "status", "pass")} for q in pj["points"]]}
+                          "points": [{k: q.get(k) for k in ("param", "offset", "value", "params", "sharpe", "status",
+                                                            "outside_search_bounds", "pass")} for q in pj["points"]]}
         if space_note:
             plateau_detail["note"] = space_note
-        diag["plateau"] = {"kind": "judge-run", "plateau_score": psc, "n_points": pj["n_points"],
-                           "n_evaluations": pj["n_evaluations"], "peak_sharpe": pj["peak_sharpe"],
-                           "peak_sharpe_study": pj["peak_sharpe_study"], "radius": radius,
-                           "radius_source": ctx["radius_source"], "runtime_s": pj["runtime_s"],
-                           "pass_share_by_param": pj["pass_share_by_param"]}
-        if pj["n_points"] == 0:
+        diag["plateau"] = {"kind": "judge-run", "plateau_score": psc, "score_rule": pj["score_rule"],
+                           "pooled_share": pj["pooled_share"], "weakest_axis": pj["weakest_axis"],
+                           "n_points": pj["n_points"], "n_evaluations": pj["n_evaluations"],
+                           "peak_sharpe": pj["peak_sharpe"], "peak_sharpe_study": pj["peak_sharpe_study"],
+                           "radius": radius, "radius_source": ctx["radius_source"], "runtime_s": pj["runtime_s"],
+                           "pass_share_by_param": pj["pass_share_by_param"],
+                           "n_outside_search_bounds": pj["n_outside_search_bounds"],
+                           "selected_at_search_space_edge": pj["selected_at_edge"]}
+        if pj["n_axes"] == 0:
             rows.append(GateRow("plateau", None, f"{op} {thr}", "SKIPPED",
                                 "No numeric or ordered parameter to perturb; plateau cannot be judged."))
         else:
             ok = _cmp(op, psc, thr)
-            nf = pj["n_failed_unevaluated"]
+            k_pass, k_n = pj["weakest_axis_passes"]
+            ni, no = pj["n_invalid"], pj["n_outside_search_bounds"]
+            edge = pj["selected_at_edge"]
             rows.append(GateRow("plateau", psc, f"{op} {thr}", "PASS" if ok else "FAIL",
-                                f"{psc:.0%} of {pj['n_points']} judge-run perturbations (±r/2, ±r per axis, r = "
-                                f"{radius}, {ctx['radius_source']}) keep ≥ 50% of the peak Sharpe "
-                                f"{pj['peak_sharpe']:.2f}"
-                                + (f"; {nf} out of bounds / invalid counted as failed" if nf else "")
+                                f"Weakest parameter axis: {pj['weakest_axis']} keeps {k_pass}/{k_n} judge-run "
+                                f"perturbations (±r/2, ±r, r = {radius}, {ctx['radius_source']}) at ≥ 50% of the peak "
+                                f"Sharpe {pj['peak_sharpe']:.2f}; score = min over {pj['n_axes']} axes (pooled "
+                                f"{pj['pooled_share']:.0%})"
+                                + (f"; {no} point(s) outside the search bounds evaluated" if no else "")
+                                + (f"; {ni} invalid counted as failed" if ni else "")
+                                + (f"; selected at search-space edge ({', '.join(edge)})" if edge else "")
                                 + (f"; {space_note}" if space_note else "")
                                 + f"; {pj['n_evaluations']} evaluations in {pj['runtime_s']:.1f} s; "
                                 + ("broad optimum." if ok else "sharp, fragile optimum.")))
@@ -1113,11 +1168,13 @@ def log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: Pa
     n_prev = len(ledger.study_events(sid, "gates", ledger_dir=ledger_dir))
     et = report.effective_trials
     pdl = report.plateau_detail or {}
-    plateau = {k: pdl.get(k) for k in ("kind", "radius", "radius_source", "plateau_score", "n_evaluations",
-                                       "peak_sharpe", "peak_sharpe_study", "runtime_s", "note") if k in pdl}
+    plateau = {k: pdl.get(k) for k in ("kind", "radius", "radius_source", "plateau_score", "score_rule",
+                                       "pooled_share", "weakest_axis", "pass_share_by_param", "selected_at_edge",
+                                       "n_evaluations", "peak_sharpe", "peak_sharpe_study", "runtime_s", "note")
+               if k in pdl}
     if pdl.get("points") is not None:
-        plateau["points"] = [{k: q.get(k) for k in ("param", "offset", "params", "sharpe", "status", "pass")}
-                             for q in pdl["points"]]
+        plateau["points"] = [{k: q.get(k) for k in ("param", "offset", "params", "sharpe", "status",
+                                                    "outside_search_bounds", "pass")} for q in pdl["points"]]
     if pdl.get("neighbour_trials") is not None:
         plateau["neighbour_trials"] = pdl["neighbour_trials"]
     return ledger.log_event(sid, "gates", ledger_dir=ledger_dir,
