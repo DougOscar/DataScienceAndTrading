@@ -1,0 +1,8 @@
+(a) long stopped at 1.09900 (stop), pnl=-110 pts, but mfe_points=10 (post-exit rally to 1.1100 counted) and mae_points=210 vs realised loss 110
+(b) EURUSD H1 2019 stop exits: 86; MAE > 1.2x realised loss in 7 (8%), median MAE/loss=1.05, max=2.81
+    signal exits: 56 (exit at open of bar -> no post-exit contamination on those)
+(c) nights Fri 12:00 -> Mon 12:00: (1, 1.0) | Sat 01:00 -> Sun 23:00: (0, 0.0) | Sat 01:00 -> Mon 01:00 : (0, 0.0)
+    entry 00:00 Mon -> exit 00:00 Tue: (1, 1.0) | entry 23:00 Mon -> exit 00:00 Tue (signal at open): (1, 1.0)
+    Christmas: Tue 2019-12-24 12:00 -> Thu 12-26 12:00: (2, 4.0)
+(d) short eod exit price 1.10010 = close + spread of last bar's open (10 pts)
+(e) stop_dist 5pts < spread 10pts: exit_reason=gap_stop at bar 1 price 1.1 (entry 1.1001)

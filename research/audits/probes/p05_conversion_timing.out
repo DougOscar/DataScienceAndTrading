@@ -1,0 +1,9 @@
+entry 2019-07-03 10:00:00 server: rate(naive series)=0.00928419 -> 1/107.710; rate(aware)=0.00929152 -> 1/107.625
+   USDJPY M1 close@2019-07-03 10:00:00=107.625 (known only at 2019-07-03 10:01:00), open@2019-07-03 10:00:00=107.625, close@2019-07-03 09:59:00=107.623
+   close@2019-07-03 12:00:00 (= naive treated as UTC, +2h) = 107.69
+   close@2019-07-03 13:00:00 (= naive treated as UTC, +3h) = 107.71
+entry 2019-01-09 10:00:00 server: rate(naive series)=0.00918383 -> 1/108.887; rate(aware)=0.00918282 -> 1/108.899
+   USDJPY M1 close@2019-01-09 10:00:00=108.899 (known only at 2019-01-09 10:01:00), open@2019-01-09 10:00:00=108.896, close@2019-01-09 09:59:00=108.896
+   close@2019-01-09 12:00:00 (= naive treated as UTC, +2h) = 108.887
+   close@2019-01-09 13:00:00 (= naive treated as UTC, +3h) = 108.876
+apply_sizing passes trades['entry_ts'] (naive server time): True

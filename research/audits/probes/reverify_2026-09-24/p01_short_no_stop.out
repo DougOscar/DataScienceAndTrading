@@ -1,0 +1,5 @@
+long  no stop/no target    entry_idx=1 exit_idx=49 reason=eod        entry=1.00148 exit=0.99281 pnl_pts=-867.0
+short no stop/no target    entry_idx=1 exit_idx=49 reason=eod        entry=1.00138 exit=0.99291 pnl_pts=847.0
+short stop only            entry_idx=1 exit_idx=49 reason=eod        entry=1.00138 exit=0.99291 pnl_pts=847.0
+short target only          entry_idx=1 exit_idx=49 reason=eod        entry=1.00138 exit=0.99291 pnl_pts=847.0
+short stop+target          entry_idx=1 exit_idx=49 reason=eod        entry=1.00138 exit=0.99291 pnl_pts=847.0

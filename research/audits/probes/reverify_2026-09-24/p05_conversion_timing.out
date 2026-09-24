@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/douglaso/Finances/DataScienceAndTrading/research/audits/probes/p05_conversion_timing.py", line 14, in <module>
+    r_naive = data.conversion_rate("JPY", "USD", naive)
+  File "/home/douglaso/Finances/DataScienceAndTrading/quantlab/data.py", line 508, in conversion_rate
+    raise ValueError(
+    ...<3 lines>...
+    )
+ValueError: conversion_rate: ts_utc must be a timezone-aware Datetime series, got dtype Datetime(time_unit='ms', time_zone=None) (naive); a naive series is never silently assumed to be UTC (M3) -- localise it explicitly first

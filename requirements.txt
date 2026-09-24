@@ -19,3 +19,9 @@ pyarrow>=14.0
 torch>=2.3
 stable-baselines3[extra]>=2.3
 gymnasium>=0.29
+
+# quantlab research library (research/DESIGN.md)
+polars>=1.30
+numba>=0.60
+pytest>=8.0
+hypothesis>=6.0

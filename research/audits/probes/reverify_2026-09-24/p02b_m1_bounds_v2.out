@@ -1,0 +1,11 @@
+A) inferred D1 span: 86400000 milliseconds | M1 rows mapped to last D1 bar 2019-06-13 00:00:00 = 1440 | last mapped M1: 2019-06-13 23:59:00
+B) timeframe=None: exit eod @ 1.11650 (p02 pre-fix: target @ 1.12528 from 2019-06-03 21:50)
+B) timeframe=H1: exit eod @ 1.11650 (p02 pre-fix: target @ 1.12528 from 2019-06-03 21:50)
+C) session-filtered: inferred span 3600000 milliseconds | max M1 rows per H1 bar 60
+D) one-bar-per-day H1 frame: inferred span 86400000 milliseconds | max M1 rows per 'H1' bar 1440 | last bar 2019-05-31 08:00:00 maps M1 up to 2019-05-31 23:59:00
+   timeframe=None: last-bar long exit target @ 1.11425
+   timeframe=H1: last-bar long exit eod @ 1.11276
+E) D1 SMA5/20 stop 2ATR target 1ATR: timeframe='D1' pnl=-4545 reasons={'stop': 5, 'signal': 2, 'eod': 1, 'target': 5}
+   timeframe='H1' (mis-declared, no error raised): pnl=-8059 reasons={'signal': 8, 'eod': 1, 'gap_stop': 1, 'gap_target': 3}
+   timeframe omitted (inferred): pnl=-4545
+F) assert_engine_causal (H1 slices + full-year M1): PASSED

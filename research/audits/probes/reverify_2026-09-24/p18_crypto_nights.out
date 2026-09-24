@@ -1,0 +1,3 @@
+BTC swap_every_day True swap_3day 2 | EURUSD False
+BTC Fri12->Mon12 (3, 3.0)
+BTC Mon->Mon (7, 9.0)

@@ -1,0 +1,4 @@
+apply_sizing without bars= rejected: apply_sizing: rate_fn requires bars=<the same bar frame run_backtest u
+rate_fn received dtypes: ["Datetime(time_unit='ms', time_zone='UTC')", "Datetime(time_unit='ms', time_zone='UTC')"]
+entry rates match independent closed-bar as-of: True; exit rates match: True
+risk_realisation_error max=-0.000010 (must be <= 0); final equity=75556.60
