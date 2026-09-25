@@ -46,12 +46,16 @@ and is read-only.
    `UNLOCK HOLDOUT <BOOK>/<system>` (`quantlab.ledger.unlock_phrase`). The phrase is the same for a
    re-exam. Never type, suggest-and-accept, or compose the phrase yourself; if the user doesn't type
    it, stop.
-2. Write the unlock row with `quantlab.ledger.record_holdout_unlock(..., pass_band=<the registered band>, user_confirmation=<the user's text verbatim>)`.
-   The ledger refuses the unlock if the band is not the registered one, if the band is stale versus
-   the manifest, if the horizon doesn't come from the manifest, after a FAIL or a PASS, while an exam
-   is pending, or (for a re-exam) if the band doesn't reach past the last exam's horizon. The row
-   records `exam` (1, 2, …) and the horizon. This is what makes `quantlab.data` serve holdout data
-   for this system, up to the band's `horizon_end`.
+2. Write the unlock row with `quantlab.gates.unlock_holdout(study, evaluator, periods_per_year=…, user_confirmation=<the user's text verbatim>, mechanism_check=…)`
+   (`ledger.record_holdout_unlock` is no longer public, red-team R3-1). It re-verifies the study
+   against its trial store and ledger, recomputes every gate (a MANUAL mechanism gate needs a passing
+   `quantlab.ledger.record_mechanism_review`) and the band, and refuses unless the recomputed verdict
+   is PASS and the recomputed band equals the registered one. The ledger then refuses the unlock if
+   the band is stale versus the manifest, if the horizon doesn't come from the manifest, after a FAIL
+   or a PASS anywhere in the system's holdout family, while an exam is pending, or (for a re-exam) if
+   the band doesn't reach past the last exam's horizon. The row records `exam` (1, 2, …), the horizon
+   and the verification. This is what makes `quantlab.data` serve holdout data for this system (its
+   own system name only, its registered symbols only), up to the band's `horizon_end`.
 3. Delegate to **optimization-architect** only to *execute* the frozen procedure over the **full**
    holdout span, from the holdout start to the unlock's `horizon_end` (scheduled re-fits included,
    DESIGN §4.6). A re-exam also re-runs the full span, not just the new data. No design changes, no

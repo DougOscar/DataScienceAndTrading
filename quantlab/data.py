@@ -500,8 +500,9 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
         if access is None:
             raise contracts.HoldoutLocked(
                 f"{book_obj.name}/{symbol}: requested window ends {resolved_end}, which reaches the "
-                f"holdout (starts {holdout_start}); pass include_holdout=True with a `system` that has "
-                f"an unlock recorded in the ledger to access it"
+                f"holdout (starts {holdout_start}); pass include_holdout=True with the `system` (normalised "
+                f"name) of a study whose unlock is recorded in the ledger to access it (R3-5: aliases and "
+                f"other family members are refused)"
             )
         # R2-2: an unlock opens the holdout only for the unlocked study's registered symbols
         # (traded + conversion legs), not for every symbol in the book.
@@ -517,7 +518,7 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
         if access_end is not None and resolved_end > access_end:
             resolved_end = access_end
         ledger.log_holdout_read(book=book_obj.name, system=system, study_id=access.get("study_id"),
-                                symbol=symbol, timeframe=timeframe,
+                                unlocked_system=access.get("system"), symbol=symbol, timeframe=timeframe,
                                 start=max(start_dt, holdout_start) if start_dt is not None else holdout_start,
                                 end=resolved_end)
 

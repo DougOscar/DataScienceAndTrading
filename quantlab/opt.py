@@ -203,6 +203,19 @@ def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, (bool, np.bool_))
 
 
+def _numeric_like(v: Any) -> bool:
+    """A number, or a string that parses as one (``"50"``, ``" 1e3 "``) — red-team R3-3."""
+    if _is_number(v):
+        return True
+    if isinstance(v, str):
+        try:
+            float(v.strip().replace("_", ""))
+            return True
+        except ValueError:
+            return False
+    return False
+
+
 @dataclass(frozen=True)
 class Param:
     """One searched parameter.  Build with :func:`IntParam` / :func:`FloatParam` /
@@ -224,10 +237,19 @@ class Param:
     declared scale against the hypothesis card (a scale much finer than the card's economic
     neighbourhood is a finding).
 
-    Categoricals: an **unordered** categorical whose choices are all numbers is refused (use a
-    numeric or an ordered categorical parameter — a numeric knob hidden as an unordered
-    categorical would never be perturbed).  Ordered categoricals are perturbed by ±1 and ±2
-    levels (up to 4 points; a level beyond either end does not exist and is not scored)."""
+    The judge floors every numeric perturbation at ``gates.PLATEAU_MIN_RANGE_FRACTION`` (5 %) of the
+    declared range (R3-3), so a scale finer than that has no effect.
+
+    ``levels=`` (numeric params only): an explicit, uneven grid of values in [low, high] (e.g.
+    holds 12 / 24 / 48) — the candidate set uses exactly these values, the plateau perturbs the
+    number itself (between and beyond the levels) with the declared scale.
+
+    Categoricals (R2-1 / R3-3): a categorical with any choice that is a number or a string that
+    parses as a number is refused (use a numeric param, with ``levels=`` for an uneven grid) —
+    ordered or not.  Ordered categoricals (non-numeric labels) are perturbed by ±1 and ±2 levels
+    (up to 4 points; a level beyond either end does not exist and is not scored).  Unordered
+    categoricals are never perturbed: the gate lists them as "not judged — review at S2", and
+    the card must name and justify each one."""
 
     name: str
     kind: str                                   # "int" | "float" | "categorical"
@@ -239,6 +261,7 @@ class Param:
     ordered: bool = False                       # categorical only: is there a natural order?
     plateau_scale: Optional[str] = None         # numeric only: "relative" (see class docstring)
     plateau_step: Optional[float] = None        # numeric only: absolute perturbation step
+    levels: tuple = ()                          # numeric only: explicit (uneven) grid of values
 
     def __post_init__(self) -> None:
         if self.kind not in ("int", "float", "categorical"):
@@ -246,15 +269,16 @@ class Param:
         if self.kind == "categorical":
             if not self.choices:
                 raise ValueError(f"{self.name}: categorical needs choices")
-            if self.plateau_scale is not None or self.plateau_step is not None:
-                raise ValueError(f"{self.name}: plateau_scale / plateau_step apply to numeric parameters only "
-                                 f"(ordered categoricals are perturbed by ±1 / ±2 levels)")
-            if not self.ordered and all(_is_number(c) for c in self.choices):
+            if self.plateau_scale is not None or self.plateau_step is not None or self.levels:
+                raise ValueError(f"{self.name}: plateau_scale / plateau_step / levels apply to numeric parameters "
+                                 f"only (ordered categoricals are perturbed by ±1 / ±2 levels)")
+            num = [c for c in self.choices if _numeric_like(c)]
+            if num:
                 raise ValueError(
-                    f"{self.name}: an unordered categorical whose choices are all numeric {list(self.choices)} is "
-                    f"refused (red-team R2-1: it would never be perturbed by the plateau gate); use an "
-                    f"ordered/numeric param (IntParam / FloatParam with a plateau scale, or "
-                    f"CategoricalParam(..., ordered=True))")
+                    f"{self.name}: a categorical with numeric choices {num} is refused (red-team R2-1 / R3-3: a "
+                    f"numeric knob as a categorical escapes the plateau scale and its floor); use an "
+                    f"ordered/numeric param — IntParam / FloatParam with a plateau scale, and levels=(...) for "
+                    f"an uneven grid")
         else:
             if self.low is None or self.high is None or self.high < self.low:
                 raise ValueError(f"{self.name}: need low <= high")
@@ -262,6 +286,15 @@ class Param:
                 raise ValueError(f"{self.name}: log scale needs low > 0")
             if self.step is not None and self.step <= 0:
                 raise ValueError(f"{self.name}: step must be > 0")
+            if self.levels:
+                lv = tuple(int(v) if self.kind == "int" else float(v) for v in self.levels)
+                if (self.kind == "int" and any(float(v) != float(o) for v, o in zip(lv, self.levels))) \
+                        or list(lv) != sorted(set(lv)) or lv[0] < self.low or lv[-1] > self.high:
+                    raise ValueError(f"{self.name}: levels must be distinct, increasing, within [low, high] "
+                                     f"(and ints for an IntParam); got {self.levels!r}")
+                if self.step not in (None, 1) and self.kind == "int" or (self.kind == "float" and self.step is not None):
+                    raise ValueError(f"{self.name}: pass either step= or levels=, not both")
+                object.__setattr__(self, "levels", lv)
             has_rel, has_step = self.plateau_scale is not None, self.plateau_step is not None
             if has_rel == has_step:
                 raise ValueError(
@@ -284,11 +317,13 @@ class Param:
 
     @property
     def discrete(self) -> bool:
-        return self.kind != "float" or self.step is not None
+        return self.kind != "float" or self.step is not None or bool(self.levels)
 
     def grid_values(self) -> list:
         if self.kind == "categorical":
             return list(self.choices)
+        if self.levels:
+            return list(self.levels)
         if self.kind == "int":
             return list(range(int(self.low), int(self.high) + 1, int(self.step or 1)))
         if self.step is None:
@@ -319,6 +354,8 @@ class Param:
         u = min(max(float(u), 0.0), 1.0 - 1e-12)
         if self.kind == "categorical":
             return self.choices[int(u * len(self.choices))]
+        if self.levels:
+            return self.levels[int(u * len(self.levels))]
         if self.log:
             lo, hi = float(self.low), float(self.high)
             if self.kind == "int":
@@ -333,6 +370,8 @@ class Param:
     def suggest(self, trial: Any) -> Any:
         if self.kind == "categorical":
             return trial.suggest_categorical(self.name, list(self.choices))
+        if self.levels:
+            return trial.suggest_categorical(self.name, list(self.levels))
         if self.kind == "int":
             if self.log:
                 return trial.suggest_int(self.name, int(self.low), int(self.high), log=True)
@@ -345,6 +384,8 @@ class Param:
         import optuna.distributions as d
         if self.kind == "categorical":
             return d.CategoricalDistribution(list(self.choices))
+        if self.levels:
+            return d.CategoricalDistribution(list(self.levels))
         if self.kind == "int":
             return d.IntDistribution(int(self.low), int(self.high), log=self.log,
                                      step=1 if self.log else int(self.step or 1))
@@ -366,19 +407,27 @@ class Param:
             out["plateau_scale"] = self.plateau_scale
         if self.plateau_step is not None:
             out["plateau_step"] = float(self.plateau_step)
+        if self.levels:
+            out["levels"] = list(self.levels)
         return out
 
 
 def IntParam(name: str, low: int, high: int, step: int = 1, log: bool = False, *,
-             plateau_scale: Optional[str] = None, plateau_step: Optional[float] = None) -> Param:
-    """Integer parameter; declare ``plateau_scale="relative"`` or ``plateau_step=`` (see :class:`Param`)."""
-    return Param(name, "int", low, high, step, log, plateau_scale=plateau_scale, plateau_step=plateau_step)
+             plateau_scale: Optional[str] = None, plateau_step: Optional[float] = None,
+             levels: Sequence[int] = ()) -> Param:
+    """Integer parameter; declare ``plateau_scale="relative"`` or ``plateau_step=`` (see :class:`Param`);
+    ``levels=`` for an explicit uneven grid."""
+    return Param(name, "int", low, high, step, log, plateau_scale=plateau_scale, plateau_step=plateau_step,
+                 levels=tuple(levels))
 
 
 def FloatParam(name: str, low: float, high: float, step: Optional[float] = None, log: bool = False, *,
-               plateau_scale: Optional[str] = None, plateau_step: Optional[float] = None) -> Param:
-    """Float parameter; declare ``plateau_scale="relative"`` or ``plateau_step=`` (see :class:`Param`)."""
-    return Param(name, "float", low, high, step, log, plateau_scale=plateau_scale, plateau_step=plateau_step)
+               plateau_scale: Optional[str] = None, plateau_step: Optional[float] = None,
+               levels: Sequence[float] = ()) -> Param:
+    """Float parameter; declare ``plateau_scale="relative"`` or ``plateau_step=`` (see :class:`Param`);
+    ``levels=`` for an explicit uneven grid."""
+    return Param(name, "float", low, high, step, log, plateau_scale=plateau_scale, plateau_step=plateau_step,
+                 levels=tuple(levels))
 
 
 def CategoricalParam(name: str, choices: Sequence[Any], ordered: bool = False) -> Param:
@@ -489,7 +538,8 @@ def space_from_json(js: Mapping[str, Any]) -> "SearchSpace":
             ps.append(Param(p["name"], "categorical", choices=tuple(p["choices"]), ordered=bool(p.get("ordered"))))
         else:
             ps.append(Param(p["name"], p["kind"], log=bool(p.get("log", False)),
-                            plateau_scale=p.get("plateau_scale"), plateau_step=p.get("plateau_step"), **kw))
+                            plateau_scale=p.get("plateau_scale"), plateau_step=p.get("plateau_step"),
+                            levels=tuple(p.get("levels") or ()), **kw))
     return SearchSpace(tuple(ps))
 
 
@@ -1332,6 +1382,39 @@ def _evaluator_symbols(evaluator: Any, book: str) -> tuple[list[str], list[str]]
     return [str(sym)], legs
 
 
+def evaluator_code_fingerprint(evaluator: Any) -> Optional[dict[str, Any]]:
+    """SHA-256 of the source file(s) that define the evaluated system (red-team R3-7): the strategy
+    class's module for an evaluator with ``strategy_cls`` (RuleEvaluator), else the evaluator
+    class's own module unless it is part of the ``quantlab`` library (library evaluators are
+    identified by ``describe()`` and the cost model version).  None when no source file is found.
+    Recorded in ``study_created`` and compared by the gates: a strategy edited after its study
+    was run cannot be gated as that study."""
+    import hashlib
+    import inspect
+    objs = [getattr(evaluator, "strategy_cls", None)] if getattr(evaluator, "strategy_cls", None) is not None \
+        else [type(evaluator)]
+    lib = Path(__file__).resolve().parent
+    files = []
+    for o in objs:
+        try:
+            f = inspect.getsourcefile(o)
+        except (TypeError, OSError):
+            f = None
+        if not f:
+            continue
+        fp = Path(f).resolve()
+        if fp.is_relative_to(lib) and getattr(evaluator, "strategy_cls", None) is None:
+            continue
+        files.append(fp)
+    if not files:
+        return None
+    h = hashlib.sha256()
+    for fp in sorted(files):
+        h.update(fp.read_bytes())
+    rel = [str(fp.relative_to(config.ROOT)) if fp.is_relative_to(config.ROOT) else fp.name for fp in sorted(files)]
+    return {"files": rel, "sha256": h.hexdigest()}
+
+
 def _auto_jobs(n_jobs: Any) -> int:
     if n_jobs in (None, "auto"):
         return max(1, min(8, (os.cpu_count() or 2) // 2))
@@ -1569,6 +1652,10 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         raise NotImplementedError(
             "run_study: evaluators with requires_refit=True (ML, fit per window) are not supported in "
             "Phase 1 — the rule-based path evaluates each parameter set once on the dev window.")
+    if isinstance(issue, bool) or not isinstance(issue, (int, np.integer)) or int(issue) < 0:
+        raise ValueError(f"run_study: issue must be the hypothesis issue number (int >= 0), got {issue!r} "
+                         f"(red-team R3-4)")
+    issue = int(issue)
     method_requested = method
     method = _resolve_method(method, space)
     bname = config.get_book(book).name
@@ -1642,6 +1729,9 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         extra: dict[str, Any] = {}
         if syms:
             extra.update(symbols=syms, conversion_legs=legs)
+        code = evaluator_code_fingerprint(evaluator)
+        if code is not None:
+            extra["evaluator_code"] = code
         if studies_dir is not None and Path(studies_dir).resolve() != Path(config.STUDIES_DIR).resolve():
             extra["studies_dir"] = str(Path(studies_dir).resolve())    # where the gates load the trial store
         ledger.create_study(
@@ -1772,7 +1862,10 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         "eval_start_effective": eval_start_eff, "data_gaps": gaps,
         "m_trades_across_data_gap": gap_trades,
     }
-    ledger.log_event(sid, "selection", ledger_dir=ledger_dir, selected_params=selected,
+    artifact_sha = ledger.write_study_artifacts(sid, {"cpcv_paths": paths, "wfo_oos": wfo_oos, "wfo_params": wfo_params,
+                                                     "trade_counts": tcounts, "entry_counts": ecounts}, studies_dir)
+    meta["entry_counts"] = ecounts
+    ledger.log_event(sid, "selection", ledger_dir=ledger_dir, selected_params=selected, artifact_sha256=artifact_sha,
                      selection=_py({k: v for k, v in sel_info.items()}), cv_scheme=cv_scheme,
                      cpcv_paths=cmeta["n_paths"], cpcv_embargo_days=cmeta["embargo_days"],
                      cpcv_purge_days=cmeta["purge_days"], embargo_capped=meta["embargo_capped"],
