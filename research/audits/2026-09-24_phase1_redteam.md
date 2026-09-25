@@ -270,3 +270,114 @@ Zero neighbours → SKIPPED → the verdict can never be PASS. One neighbour →
 - **Repeated gate runs:** flagged (r1_misc).
 - **F1 spawn pool:** caps, env restore, determinism and resume all correct (r1_f1).
 - **m2 cross conversion:** fixed (r1_p08b).
+
+---
+
+## Re-verification round 2 (48e696f)
+
+- Date: 2026-09-25 · Branch `feat/quantlab-phase1` @ `48e696f` (library not modified by this audit; nothing committed)
+- Probes: `research/audits/probes/phase1/r2_*.py` + `.out`. Every study and gate run uses a fresh tmp ledger/studies dir, with ≤ 4 worker processes. `research/ledger/` was not touched.
+- Holdout life-cycle probe (`r2_p04`): synthetic data only. `data.catalog`, the manifest, `LEDGER_DIR`, `CACHE_DIR` and `git_commit` are patched. The synthetic M1 files are in a tmp dir, and the fake manifest points at non-existent files.
+- Real data read: dev window only. That was D1 2024-01..06 for 8 symbols (r2_p09), H1 bars and the first M1 rows of 2016 for USDCHF/AUDNZD/EURUSD (r2_p10), and `series_start`, which is a column-min of `ts`.
+
+### Verdict on the open findings
+
+| # | Status | Evidence (probe) |
+|---|---|---|
+| B2 dead edge passes S5 | **PARTIAL (accepted, user decision)** | r2_p05: S5 PASS for an edge dead from 55 % is 5/12 (default WFO) and 4/12 (min_train 1y). Dead from 70 %: 6/12 and 3/12. Unchanged from r1; the recency test is still "> 0" (median recent-third SR −0.09). |
+| B3 TPE candidate-set leak | **CLOSED (library path)** | r2_p01 N1: pure TPE is flagged and all 3 OOS gates are SKIPPED. Only a hand-edited `StudyResult` gets round it (R2-4). |
+| M2 slippage scope | **CLOSED** | r1 engine checks still hold; per-asset sizes in N6. |
+| M3 holdout band power / N5 joint-band regression | **N5 CLOSED; M3 PARTIAL (by design ≤ 0.30)** | r2_p05, 18 dead-edge studies that pass S5, each examined on a zero-edge holdout: **P(PASS) is 0.197 on average, at most 0.300** under the NOT_DECISIVE chain (1y → 2.5y). For comparison: 0.337 for a v1.2 1-year criteria pass (r1 behaviour) and 0.183 for the v1.1-level band. So the joint band is back to about v1.1 strictness. Live controls: 0.127. About 20 % of dead edges that pass S5 still get a decisive PASS, which is the accepted 0.30 design. |
+| M4 / N2 prior trials | **PARTIAL** | r2_p01. **Blocked:** resume relabel, explicit `prior_trials` below the ledger count, an empty ledger_dir. `S.M.A` is normalised onto `sma` (prior 196), and a new issue on the same system counts all earlier studies (147). **Still open:** a new system name plus a new issue gives prior 0 (`sma_v2`, `sma_cross_fast`). The prior counts only studies created **earlier**, so re-gating a1 after a2–a5 exist gives prior 0 against 245 trials explored (N2b). In-memory truncation also shrinks N (R2-4). |
+| M5 plateau resolution / separation | **PARTIAL** | r2_p02: the 2 %-wide spike FAILs at grid steps 10/5/2/1. On zero-edge worlds with IS SR > 0 (r2_p06) the plateau passes 0.27 / 0.29 / 0.67, against 0.80 / 0.86 / 0.92 in r1. But the perturbation scale can be set by the author (R2-1). |
+| N1 resume launders TPE | **CLOSED** | r2_p01: resume with `method=sobol`/`random` raises `StudyError`. The ledger flag is sticky (`n_by_source`); resuming as TPE stays flagged and SKIPPED. |
+| N3 free radius | **CLOSED** | r2_p01: the `evaluate_gates(plateau_radius=)` kwarg raises TypeError. `run_study` refuses 1e-6 and 0.05. Resuming with another radius raises. The radius is stored in `study_created`. The 0.10 floor and per-parameter mapping are user-approved; see the G6 note. |
+| N4 Sobol plateau | **CLOSED** | r2_p02: for d = 3/4/5 at n = 64 there are 12/16/20 judge points and no SKIPs. Scores on zero surfaces are 0–0.5. |
+| N6 stress slippage | **CLOSED** | r2_p09: per-fill slippage / median spread (bp of price) is EURUSD 0.33 (0.9), USDJPY 0.14, XAU 0.36, XAG 0.26 (was 2.6), BTC 1.74 (5.4 bp), ETH 1.00, WIN 1 tick, WDO 1 tick. An unknown class raises. |
+| N7 spec mismatch | **CLOSED** | r2_p01: BTCUSD spec on an EURUSD evaluator raises GateError. Residual: an evaluator with no `.symbol` accepts any spec, and the `is_synthetic` attribute exemption is unchanged. |
+| N8 irrelevant params | **CLOSED** | r2_p02: 0/1/2 dummies score 0.00 (the pooled share would have been 0.38/0.33). The reverse game, correlated duplicates, is R2-1. |
+| N10 unlogged look → resume | **CLOSED** | r2_p01: an `n_trials_changed` event is logged; a seed/method/space change on resume is refused. |
+
+### New findings
+
+**R2-1 — MAJOR. The judge plateau's perturbation size is chosen by the strategy author through the parametrisation.**
+Perturbations are ×(1 ± r/2, 1 ± r) of the selected value when the declared `low > 0`, else ± r·(declared range). They move one axis at a time; unordered categoricals are held fixed, and ordered categoricals move to adjacent levels. The same 2 %-wide spike that FAILs as `a ∈ [1, 101]` PASSes 1.0 in each of the cases below (r2_p02):
+- **G1:** reparametrised as `d = a − 49.9` on [0.05, 5]. Relative mode: d = 0.05 is perturbed to 0.04–0.06. Declared as [0, 5] (range mode, ±1 unit), it passes too.
+- **G2:** written as the mean of k ≥ 4 duplicate params. k = 1/2/3/4/5 → 0.00 / 0.50 / 0.50 / 1.00 / 1.00.
+- **G3:** declared as an unordered categorical, plus one irrelevant numeric param. There is no axis for `a`, and the score of 1.0 comes from the dummy.
+- **G4:** an ordered categorical with fine levels (48..52). This brings back the grid-step neighbourhood that the r1 fix removed.
+- **G1b:** this happens **without any intent** too: `thr ∈ [0.01, 2]` selected at 0.05 is only tested at 0.04–0.06 and PASSes a spike that FAILs when `low = 0` is declared.
+
+What does not help the author: constraints (G5: rejected points count as failures) and selecting at an edge (an out-of-bounds point is evaluated).
+*Failure scenario:* a knife-edge threshold or offset parameter declared with a small positive `low` passes the plateau gate without anyone gaming it. Or an agent "refactors" a fragile lookback into a categorical or an averaged pair after seeing a plateau FAIL. The null e2e still gives 0 PASS verdicts, so the other gates carry it today.
+*Fix:*
+- Perturb by max(r·|x|, r·(high − low)·c) with a pre-registered economic scale per parameter (card), and forbid relative mode for parameters whose origin is arbitrary.
+- Treat unordered categoricals that encode numbers as an error. Require ordered-categorical levels to span ±r of the value.
+- Evaluate a joint (diagonal) perturbation set as well, and flag algebraically redundant parameters (identical Sharpe along a direction).
+
+**R2-2 — MAJOR. Holdout enforcement is keyed on the exact `system` string.**
+(a) r2_p04 H3: after `probe` FAILs (killed), studies named **`Probe`** (same issue 42, and it normalises equal) and `probe_v2` each get a fresh exam-1 unlock. `holdout_history` matches `system` exactly, and neither the unlock nor the skill's pre-flight uses `normalise_system` or the issue. "A FAIL means killed, enforced by the ledger" holds only while the name is unchanged.
+(b) r2_p04 H5: `load_bars(any_symbol, include_holdout=True, system=X)` is gated only on X having an unlock:
+- a PASSED system reads **all** holdout data for **any** symbol (GBPUSD to 2026-09-29, although the system traded EURUSD);
+- a pending or NOT_DECISIVE system reads every symbol up to its horizon, including symbols of systems that were never unlocked.
+
+So "newer exports stay unseen until the band is rebuilt" is not enforced. The data is a shared resource, but the key is per system.
+(c) r2_p04 H1 quantifies the sequential effect.
+- **Honest NOT_DECISIVE chain (exams at 1, 1.5, 2, 2.5 y):** zero-edge P(PASS) is 0.214 for dev SR 1.5 and 0.209 for SR 1.9. That is **lower** than a single exam at the first decisive horizon (0.264 / 0.251), because earlier FAILs kill. At most one decisive exam happens, so P(PASS) ≤ its band's p ≤ 0.30, and re-examination does not inflate the false-pass rate.
+- **Author who can see the running holdout** (via (b)) and unlocks at the first month-end where the full span passes a decisive band: **0.383 / 0.349**, which is +45 % and breaks the 0.30 ceiling.
+
+*Fix:* key holdout state on (book, normalised system) and on the issue, and refuse an unlock if any related system is killed. Scope `load_bars` holdout access to the unlocked study's symbols, including conversion legs. After a PASS, cap access at the exam horizon and use the decay-review path for newer data. Log every holdout read (symbol, span, caller system) in `holdout_access.jsonl`.
+
+**R2-3 — MAJOR. The holdout band can be re-rolled at S5, and the rebuild inputs can be overridden.**
+`registered_holdout_band` returns the latest `gates` event's band when no `holdout_band_registered` event exists. The "strictly later horizon" rule applies only to `register_holdout_band`. r2_p04 H2: seven `evaluate_gates`+`log_gates` runs on one study with seeds 1–7 and `n_boot` of 2000/100/60 give `sharpe_lo` from −0.418 to +0.072 and `p_pass_zero_edge` from 0.395 to 0.511. The last run (n_boot = 60) became the registered band, and **the unlock accepted it**. `n_boot` has no floor.
+`rebuild_holdout_band(seed=999, n_boot=40, symbols=["GBPUSD"])` was accepted for an EURUSD system, taking its horizon from GBPUSD's later end (2027-03-01 against EURUSD's 2026-09-30). The unlock's staleness check then uses the band's own `symbols`, so it cannot catch this.
+*Failure scenario:* at S5 the agent re-runs the gates a few times and logs the most lenient band that is still decisive. Gate runs are counted (m9), but nothing at the unlock refuses a band from gate run > 1, a band with a small `n_boot`, or symbols that differ from the study's.
+*Fix:*
+- Freeze the band at the first `gates` event that produces one; any later band must go through `register_holdout_band` with a newer horizon.
+- Fix `seed` and `n_boot` (≥ 2000) as constants.
+- Take `symbols` from the ledger row (traded symbols plus conversion legs), never from the caller.
+
+**R2-4 — MAJOR. The gates trust the in-memory `StudyResult` and evaluator; only identity fields are checked against the ledger.**
+The r2_p01 ID section and r2_p03:
+- **(a)** Keeping 10 of 441 trials in `study.trials`/`returns` gives N_study = 10 (DSR 0.986 → 1.000) without an error, although the ledger's `trials` event says 441.
+- **(b)** `log_gates` then writes `n_trials_study = 10`, and `study_trial_count` prefers that over the optimizer's `trials` count. Attempt 2's prior becomes **10 instead of 441**, so the understatement persists in the ledger.
+- **(c)** A TPE `StudyResult` relabelled to a clean Sobol study's id, with the `source` column and meta keys dropped, passes `oos_sharpe`, `wfo_oos` and `cscv_oos_loss` (`ledger_context` skips meta keys that are absent).
+- **(d)** An evaluator other than the study's (broad surface, zero drag) makes the judge plateau go 0.00 FAIL → 1.00 PASS and raises the cost stress from 2.93 to 3.31. The ledger's `evaluator` description, which differs, is never compared.
+
+*Fix:* load `trials`/`returns` from the trial store by `study_id`, or compare a content hash logged in the `trials`/`selection` events. Take N_study = max(in-memory count, ledger `trials` event n_trials), and never let a `gates` event lower it. Compare `evaluator.describe()` and the cost-model version with the ledger row.
+
+### Minor
+
+- **Prior-trial residuals (N2b):** creation-order counting. After exploring a2–a5, re-gating or promoting a1 counts prior 0. A new name plus a new issue also counts 0. Consider counting every related study that exists at gate time, and flagging a promotion of attempt k when attempts > k exist.
+- **H7:** the horizon uses only `evaluator.symbol`, not the conversion legs. EURJPY alone ends 2027-05-14 (522 d); with USDJPY it ends 2026-05-15 (262 d). The exam could run past the conversion series (stale as-of rates, or errors).
+- **H6:** the exam accepts a realised series within ±max(10 d, 5 %) of the band's horizon, which is up to ~45 calendar days at 2.5 y. `manifest_sha` is stored but not re-checked at unlock, so a manifest end edited within that tolerance is not detected.
+- **H4:** an unlock with no recorded exam stays `pending` forever: not killed, not visible as a FAIL, and its name keeps a data key (R2-2b). Add a deadline, or treat an unrecorded exam as FAIL at the next `/unlock-holdout` or `/promote`.
+- **Cost stress severity is uneven across classes:** per fill, FX is 0.14–0.36× spread, crypto 1.0–1.7× (5–7 bp), B3 1 tick. The gate text still says "1 pip = 1 points" for BTC/WIN/WDO while the real slippage is 3383 / 5 / 500 points (display uses `pip_points`).
+- **Abort:** there is a false positive when the first 2 trials fail with the same parameter-specific message (r2_p10 `FirstTwoBoom`). It is conservative, it raises, and it hides nothing.
+- **Plateau, looser than v1.1's grid neighbourhood:**
+  - axes are perturbed one at a time with no joint (diagonal) points;
+  - an ordered categorical at an edge gives 1 point (share 0 or 1);
+  - the per-parameter radius floor 0.10 (user-approved) lets the one fragile axis be tested at ±10 %: G6, a spike with sd 4 units, FAILs 0.5 at 0.20 and PASSes 1.0 at {a: 0.10}.
+
+### Checks run that found nothing wrong
+
+- **Abort-on-uniform-errors (r2_p10):** it cannot hide trials. Aborted studies log `trials` with `status=aborted`, n_trials = the recorded rows (2), and are counted in the next attempt's prior (4 from 2 aborted studies). With the abort disabled, error trials count in N.
+- **L1 clamp (r2_p10):** no look-ahead.
+  - USDCHF and AUDNZD H1: the eval start moves 00:00 → 01:00 because the conversion series starts at 00:01. The result is identical for end 2017 / 2020 / 2025, so it does not depend on future data.
+  - The conversion at `available_from − 1 min` raises. At +0 it uses the first bar's open; at +1 it uses the first bar's close. Both are causal.
+  - L4 row-based hold (reading): consistent with CPCV purging, which works in rows.
+- **Ledger identity (r2_p01):**
+  - resume with changed system/attempt/method/seed/space/radius raises;
+  - `S.M.A` and `sma` normalise to the same name;
+  - the issue link counts studies across systems;
+  - an explicit `prior_trials` below the ledger count raises;
+  - a study missing from the ledger raises.
+- **Holdout (r2_p04/r2_p05):**
+  - a FAIL blocks any later band/unlock/exam for the same name;
+  - a pending exam blocks a rebuild;
+  - a re-exam needs a strictly later horizon and the frozen study;
+  - the exam status is re-derived and forged statuses are rejected (existing tests);
+  - the NOT_DECISIVE chain does not inflate the zero-edge PASS rate when there is no peeking (H1).
+- **End to end, zero-edge worlds (r2_p06, 72 worlds):**
+  - 0 PASS verdicts;
+  - per-gate pass rates are as in r1, except the plateau (all worlds 0.17 / 0.17 / 0.33).

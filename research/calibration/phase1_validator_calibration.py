@@ -427,6 +427,20 @@ def _mean_rho(study) -> float | None:
     return float(np.nanmean(C[iu]))
 
 
+def _matrix_plateau(study, work: Path, ppy: float) -> dict[str, Any]:
+    """The pre-round-2 matrix-based ±radius box plateau over the recorded trials (diagnostic
+    only, for comparison with the judge-run gate).  Radius and space from the study's ledger row."""
+    try:
+        ctx = gates.ledger_context(study, work / "ledger")
+        pm = gates.plateau_score(study, ppy, radius=ctx["plateau_radius"], space=ctx.get("space") or {})
+        sc = pm["plateau_score"]
+        status = "SKIPPED" if pm["n_neighbours"] == 0 else ("PASS" if sc >= gates.GATE_THRESHOLDS["plateau"][1]
+                                                            else "FAIL")
+        return {"score": sc, "n_neighbours": pm["n_neighbours"], "status": status}
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        return {"error": repr(e)[:200]}
+
+
 def _summarise_report(rep: gates.GateReport) -> dict[str, Any]:
     stat = {g: rep.row(g).status for g in STAT_GATES}
     et = rep.effective_trials
@@ -447,6 +461,7 @@ def _summarise_report(rep: gates.GateReport) -> dict[str, Any]:
         "n_eff": et.get("n_eff"), "n_eff_eigen": et.get("eigen"), "n_eff_cluster": et.get("cluster"),
         "n_eff_liji": et.get("liji"),
         "holdout_band": rep.holdout_band,
+        "holdout_horizon_note": rep.diagnostics.get("holdout_horizon_note"),
         "cpcv_path_sharpe": rep.diagnostics.get("cpcv_path_sharpe"),
         "pbo_detail": rep.diagnostics.get("pbo_detail"),
         "cost_stress_by_swap_mult": rep.diagnostics.get("cost_stress_by_swap_mult"),
@@ -468,11 +483,14 @@ def _run_real_study(task: dict[str, Any], work: Path) -> tuple[dict[str, Any], A
                           ledger_dir=work / "ledger", studies_dir=work / "studies")
     t_study = time.perf_counter() - t0
     t1 = time.perf_counter()
+    # final run: the holdout-band horizon comes from the data manifest (DESIGN §4.4, 2026-09-24;
+    # metadata only); the v1.2 run used an explicit 260-day horizon.
+    hkw = {} if task.get("manifest_horizon") else {"holdout_days": 260}
     rep = gates.evaluate_gates(study, ev, periods_per_year=ev.periods_per_year, n_boot=2000,
-                               seed=task["salt"], ledger_dir=work / "ledger", holdout_days=260)
+                               seed=task["salt"], ledger_dir=work / "ledger", **hkw)
     t_gates = time.perf_counter() - t1
     srs = _trial_sharpes(study)
-    row: dict[str, Any] = {}
+    row: dict[str, Any] = {"plateau_matrix": _matrix_plateau(study, work, ev.periods_per_year)}
     if "param_hold" in study.trials.columns and task.get("space", "seedhold") == "seedhold":
         tids = [int(c[1:]) for c in study.returns.columns if c != "date"]
         hold_of = dict(zip(study.trials["trial_id"].to_list(), study.trials["param_hold"].to_list()))
@@ -618,6 +636,7 @@ def _run_synthetic(task: dict[str, Any], work: Path) -> dict[str, Any]:
                                holdout_days=260)  # pseudo-holdout: 1 y after SPLIT_CAL_END, not the manifest
     sel = study.selected_params
     return {**_summarise_report(rep), "selected_params": sel,
+            "plateau_matrix": _matrix_plateau(study, work, 260.0),
             "true_sharpe_selected": ev.true_sharpe(sel) if sel else None,
             "true_sharpe_selected_late": ev.true_sharpe(sel, 0.99) if sel else None,
             "true_sharpe_max": task.get("height", 0.0),
@@ -726,6 +745,61 @@ def build_tasks(experiments: set[str], n_null: int = 200, n_null_xau: int = 100,
                "salt": 17000 + s} for s in range(n_sobol)]
         T += [{**base, "task_id": f"sobol-oracle-p0.650-{s:03d}", "kind": "oracle", "space": "sobol4_oracle",
                "p": 0.65, "salt": 18000 + s} for s in range(n_sobol // 2)]
+    return T
+
+
+FINAL_CHECKPOINT = OUT_DIR / "phase1_final_results.jsonl"
+FINAL_ORACLE_P = (0.555, 0.575, 0.59, 0.60, 0.61, 0.62, 0.65, 0.72)
+
+
+def build_final_tasks(n_null: int = 100, n_chf: int = 60, n_corr: int = 100, n_sobol0: int = 60,
+                      n_sobol: int = 40, n_planted: int = 20, n_dead: int = 15, n_syn: int = 100,
+                      n_syn_other: int = 20) -> list[dict[str, Any]]:
+    """Targeted final confirmation run (2026-09-25, library @ 48e696f): judge-run plateau (min over
+    axes), L1 eval-start clamp, L4 hold in rows, manifest holdout horizon.  Task ids and salts
+    are those of the v1.2 run wherever the family existed (paired rows); new families:
+    ``null-chf`` (USDCHF H1, L1 check) and ``sobol-oracle-p0.620``."""
+    T: list[dict[str, Any]] = []
+    mh = {"manifest_horizon": True}
+    T += [{"task_id": f"null-eur-{s:03d}", "experiment": "null", "kind": "null", "setup": "EURUSD_H1",
+           "salt": 1000 + s, **mh} for s in range(n_null)]
+    T += [{"task_id": f"null-eur0-{s:03d}", "experiment": "null", "kind": "null", "setup": "EURUSD_H1",
+           "salt": 2500 + s, "cost": "zero", **mh} for s in range(n_null)]
+    T += [{"task_id": f"null-xau-{s:03d}", "experiment": "null", "kind": "null", "setup": "XAUUSD_H4",
+           "salt": 2000 + s, **mh} for s in range(n_null)]
+    T += [{"task_id": f"null-chf-{s:03d}", "experiment": "null", "kind": "null", "setup": "USDCHF_H1",
+           "salt": 19000 + s, **mh} for s in range(n_chf)]
+    base = {"experiment": "corr", "setup": "EURUSD_H1", **mh}
+    T += [{**base, "task_id": f"corr-shared-eur0-{s:03d}", "family": "shared", "kind": "null",
+           "space": "exits", "cost": "zero", "salt": 11000 + s} for s in range(n_corr)]
+    T += [{**base, "task_id": f"corr-sma-eur0-{s:03d}", "family": "sma_flip", "kind": "sma",
+           "space": "sma", "cost": "zero", "salt": 13000 + s} for s in range(n_corr)]
+    base = {"experiment": "sobol", "setup": "EURUSD_H1", "method": "sobol", **mh}
+    T += [{**base, "task_id": f"sobol-null-eur0-{s:03d}", "kind": "null", "space": "sobol4", "cost": "zero",
+           "salt": 16000 + s} for s in range(n_sobol0)]
+    T += [{**base, "task_id": f"sobol-null-eur-{s:03d}", "kind": "null", "space": "sobol4",
+           "salt": 17000 + s} for s in range(n_sobol)]
+    T += [{**base, "task_id": f"sobol-oracle-p0.650-{s:03d}", "kind": "oracle", "space": "sobol4_oracle",
+           "p": 0.65, "salt": 18000 + s} for s in range(20)]
+    T += [{**base, "task_id": f"sobol-oracle-p0.620-{s:03d}", "kind": "oracle", "space": "sobol4_oracle",
+           "p": 0.62, "salt": 18500 + s} for s in range(15)]
+    for p in FINAL_ORACLE_P:
+        T += [{"task_id": f"planted-eur-p{p:.3f}-{s:03d}", "experiment": "planted", "kind": "oracle",
+               "setup": "EURUSD_H1", "p": p, "salt": 3000 + s, **mh} for s in range(n_planted)]
+    for p in DEAD_P:
+        for fr in DEAD_FRACS:
+            T += [{"task_id": f"dead-p{p:.3f}-d{int(fr * 100)}-{s:03d}", "experiment": "dead", "kind": "oracle",
+                   "setup": "EURUSD_H1", "p": p, "death_frac": fr, "death": frac_date(fr),
+                   "salt": 3000 + s, **mh} for s in range(n_dead)]
+    T += [{"task_id": f"syn-zero-{s:03d}", "experiment": "synthetic", "scenario": "zero", "salt": 6000 + s}
+          for s in range(n_syn)]
+    for h in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+        T += [{"task_id": f"syn-plateau-h{h:.1f}-{s:03d}", "experiment": "synthetic", "scenario": "plateau",
+               "height": h, "salt": 7000 + s} for s in range(n_syn_other)]
+    T += [{"task_id": f"syn-spike-h3.0-{s:03d}", "experiment": "synthetic", "scenario": "spike",
+           "height": 3.0, "salt": 8000 + s} for s in range(2 * n_syn_other)]
+    T += [{"task_id": f"syn-regime-h3.0-{s:03d}", "experiment": "synthetic", "scenario": "regime",
+           "height": 3.0, "salt": 9000 + s} for s in range(2 * n_syn_other)]
     return T
 
 
@@ -860,6 +934,7 @@ FAMILIES = (
      and r.get("cost") == "zero"),
     ("SOBOL null costs (4 params)", lambda r: r["experiment"] == "sobol" and r["kind"] == "null"
      and r.get("cost") is None),
+    ("NULL USDCHF H1 costs (seed×hold)", lambda r: r["experiment"] == "null" and r["setup"] == "USDCHF_H1"),
     ("SYN zero", lambda r: r.get("scenario") == "zero"),
 )
 
@@ -992,12 +1067,142 @@ def summarise(results: list[dict[str, Any]]) -> str:
     return "\n".join(L)
 
 
+def _pl_status(r: dict[str, Any], kind: str) -> str:
+    if kind == "judge":
+        return r["gate_status"]["plateau"]
+    return (r.get("plateau_matrix") or {}).get("status", "ERROR")
+
+
+def summarise_final(results: list[dict[str, Any]], v12_path: Path = CHECKPOINT) -> str:
+    """Final-run comparisons: v1.2 pairing, judge vs matrix plateau, runtime of the judge plateau."""
+    ok = [r for r in results if not r.get("error")]
+    v12 = {r["task_id"]: r for r in load_results(v12_path) if not r.get("error")}
+    L = ["# Final-run comparisons", ""]
+    # ---- power
+    pl_ = [r for r in ok if r["experiment"] == "planted"]
+    if pl_:
+        x = np.array([r["true_sharpe_mean_trials"] for r in pl_])
+        pv = [v12[r["task_id"]] for r in pl_ if r["task_id"] in v12]
+        xv = np.array([r["true_sharpe_mean_trials"] for r in pv])
+        L += ["## Power (logistic on true net SR)", "", "| Gate set | n | 50 % | 80 % |", "|---|---|---|---|"]
+        fits = (("final as built", pl_, x, lambda r: r["stat_pass"]),
+                ("final without cost_stress", pl_, x, lambda r: pass_without(r, ("cost_stress_sharpe",))),
+                ("final without plateau", pl_, x, lambda r: pass_without(r, ("plateau",))),
+                ("final with matrix plateau instead of judge", pl_, x,
+                 lambda r: pass_without(r, ("plateau",)) and _pl_status(r, "matrix") == "PASS"),
+                ("v1.2 same task ids", pv, xv, lambda r: r["stat_pass"]))
+        for lab, rows, xx, fn in fits:
+            y = np.array([bool(fn(r)) for r in rows], float)
+            if len(rows) and 0 < y.sum() < len(rows):
+                _a, _b, x50, x80 = logistic_fit(xx, y)
+                L.append(f"| {lab} | {len(rows)} | {x50:.2f} | {x80:.2f} |")
+        L += ["", "| p | n | true SR | final PASS | v1.2 PASS (paired) | changed (v1.2→final) | judge plateau PASS |"
+              " matrix plateau PASS | failing gates |", "|---|---|---|---|---|---|---|---|---|"]
+        for p_ in sorted({r["p"] for r in pl_}):
+            rr = [r for r in pl_ if r["p"] == p_]
+            pr = [(r, v12.get(r["task_id"])) for r in rr]
+            ch = [f"{r['task_id'][-3:]}:{int(bool(v['stat_pass']))}→{int(r['stat_pass'])}" for r, v in pr
+                  if v is not None and bool(v["stat_pass"]) != bool(r["stat_pass"])]
+            fails: dict[str, int] = {}
+            for r in rr:
+                for g, st_ in r["gate_status"].items():
+                    if st_ != "PASS":
+                        fails[g] = fails.get(g, 0) + 1
+            L.append(f"| {p_} | {len(rr)} | {np.mean([r['true_sharpe_mean_trials'] for r in rr]):.2f} | "
+                     f"{_rate(rr)} | {sum(bool(v and v['stat_pass']) for _, v in pr)}/{sum(v is not None for _, v in pr)} | "
+                     f"{', '.join(ch) or '—'} | {sum(_pl_status(r, 'judge') == 'PASS' for r in rr)} | "
+                     f"{sum(_pl_status(r, 'matrix') == 'PASS' for r in rr)} | "
+                     f"{', '.join(f'{g} {c}' for g, c in sorted(fails.items(), key=lambda t: -t[1])) or '—'} |")
+        L.append("")
+    # ---- plateau: judge vs matrix, by family
+    fams = list(FAMILIES) + [
+        ("PLANTED grid (all p)", lambda r: r["experiment"] == "planted"),
+        ("PLANTED grid p ≥ 0.65", lambda r: r["experiment"] == "planted" and r["p"] >= 0.65),
+        ("SOBOL oracle p=0.65", lambda r: r["experiment"] == "sobol" and r["kind"] == "oracle" and r["p"] == 0.65),
+        ("SOBOL oracle p=0.62", lambda r: r["experiment"] == "sobol" and r["kind"] == "oracle" and r["p"] == 0.62),
+        ("DEAD (all)", lambda r: r["experiment"] == "dead"),
+        ("SYN plateau h ≥ 1.5", lambda r: r.get("scenario") == "plateau" and r["height"] >= 1.5),
+        ("SYN spike", lambda r: r.get("scenario") == "spike"),
+        ("SYN regime", lambda r: r.get("scenario") == "regime")]
+    L += ["## Plateau: judge-run (gate) vs matrix box (old), standalone", "",
+          "| Family | n | judge PASS | judge SKIPPED | matrix PASS | matrix SKIPPED | agree | median judge evals |"
+          " median judge s | weakest axis (mode) |", "|---|---|---|---|---|---|---|---|---|---|"]
+    for name, sel in fams:
+        rr = [r for r in ok if sel(r)]
+        if not rr:
+            continue
+        j = [_pl_status(r, "judge") for r in rr]
+        m = [_pl_status(r, "matrix") for r in rr]
+        pdg = [r.get("plateau_diag") or {} for r in rr]
+        ax: dict[str, int] = {}
+        for d in pdg:
+            if d.get("weakest_axis"):
+                ax[d["weakest_axis"]] = ax.get(d["weakest_axis"], 0) + 1
+        L.append(f"| {name} | {len(rr)} | {_rate_k(j.count('PASS'), len(rr))} | {j.count('SKIPPED')} | "
+                 f"{_rate_k(m.count('PASS'), len(rr))} | {m.count('SKIPPED')} | "
+                 f"{sum((a == 'PASS') == (b == 'PASS') for a, b in zip(j, m))}/{len(rr)} | "
+                 f"{np.median([d.get('n_evaluations', np.nan) or np.nan for d in pdg]):.0f} | "
+                 f"{np.nanmedian([d.get('runtime_s', np.nan) or np.nan for d in pdg]):.2f} | "
+                 f"{max(ax, key=ax.get) if ax else '—'} |")
+    L.append("")
+    # ---- L1 / L4 / L3 checks
+    chf = [r for r in results if r.get("setup") == "USDCHF_H1"]
+    xau = [r for r in ok if r.get("setup") == "XAUUSD_H4"]
+    sob = [r for r in ok if r["experiment"] == "sobol"]
+    L += ["## Library checks", "",
+          f"- L1 USDCHF: {len(chf)} studies, {sum(bool(r.get('error')) for r in chf)} errors; "
+          f"median runtime {np.median([r['runtime_total_s'] for r in chf]) if chf else float('nan'):.0f}s",
+          f"- L4 XAUUSD: embargo days median {np.median([r['embargo_days'] for r in xau]) if xau else float('nan')}, "
+          f"capped {sum(bool(r['embargo_capped']) for r in xau)}/{len(xau)}; oos_sharpe SKIPPED "
+          f"{sum(r['gate_status']['oos_sharpe'] == 'SKIPPED' for r in xau)}, cscv SKIPPED "
+          f"{sum(r['gate_status']['cscv_oos_loss'] == 'SKIPPED' for r in xau)}",
+          f"- L3 Sobol: judge plateau SKIPPED {sum(r['gate_status']['plateau'] == 'SKIPPED' for r in sob)}/{len(sob)};"
+          f" matrix box empty {sum((r.get('plateau_matrix') or {}).get('n_neighbours') == 0 for r in sob)}/{len(sob)}",
+          f"- errors overall: {len(results) - len(ok)}", ""]
+    # ---- holdout band (manifest horizon)
+    hb = [r for r in ok if r.get("manifest_horizon") and r.get("holdout_band")]
+    if hb:
+        src: dict[str, int] = {}
+        for r in hb:
+            k = f"{r['holdout_band'].get('horizon_source')}:{r['holdout_band'].get('horizon_days')}"
+            src[k] = src.get(k, 0) + 1
+        L += [f"Holdout band horizon (real studies): {src}; notes: "
+              f"{sum(bool(r.get('holdout_horizon_note')) for r in hb)}", ""]
+        pp = [r for r in hb if r["experiment"] == "planted" and r["stat_pass"]]
+        if pp:
+            L.append(f"Gate-passing planted studies: band decisive {sum(bool(r['holdout_band'].get('decisive')) for r in pp)}"
+                     f"/{len(pp)}; median P(pass | zero edge) {np.median([r['holdout_band']['p_pass_zero_edge'] for r in pp]):.2f}")
+            for p_ in sorted({r['p'] for r in pp}):
+                q = [r for r in pp if r["p"] == p_]
+                L.append(f"  p={p_}: decisive {sum(bool(r['holdout_band'].get('decisive')) for r in q)}/{len(q)}, "
+                         f"median P0 {np.median([r['holdout_band']['p_pass_zero_edge'] for r in q]):.2f}")
+            L.append("")
+    # ---- runtime
+    real = [r for r in ok if r["experiment"] != "synthetic"]
+    if real:
+        jr = [((r.get("plateau_diag") or {}).get("runtime_s") or np.nan) for r in real]
+        L += ["## Runtime", "",
+              f"- real studies {len(real)}: total per study median {np.median([r['runtime_total_s'] for r in real]):.1f}s; "
+              f"run_study {np.median([r['runtime_study_s'] for r in real]):.1f}s; gates "
+              f"{np.median([r['runtime_gates_s'] for r in real]):.1f}s; judge plateau median {np.nanmedian(jr):.2f}s "
+              f"(p95 {np.nanpercentile(jr, 95):.2f}s, max {np.nanmax(jr):.2f}s), "
+              f"{np.nanmedian(np.array(jr) / np.array([r['runtime_gates_s'] for r in real])):.0%} of gate time",
+              f"- by space: " + "; ".join(
+                  f"{sp}: {np.nanmedian([(r.get('plateau_diag') or {}).get('runtime_s') or np.nan for r in real if r.get('space', 'seedhold') == sp]):.2f}s "
+                  f"/ {np.nanmedian([(r.get('plateau_diag') or {}).get('n_evaluations') or np.nan for r in real if r.get('space', 'seedhold') == sp]):.0f} evals"
+                  for sp in sorted({r.get('space', 'seedhold') for r in real})),
+              f"- core-h total {np.sum([r['runtime_total_s'] for r in results]) / 3600:.2f}", ""]
+    return "\n".join(L)
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--experiments", default="null,planted,synthetic,holdout,corr,dead,sobol")
     ap.add_argument("--workers", type=int, default=MAX_WORKERS)
     ap.add_argument("--checkpoint", default=str(CHECKPOINT))
     ap.add_argument("--summarise", action="store_true", help="only print the summary of the checkpoint")
+    ap.add_argument("--final", action="store_true",
+                    help="the targeted final confirmation run (build_final_tasks → output/phase1_final_results.jsonl)")
     ap.add_argument("--require-key", default=None,
                     help="re-run finished tasks whose checkpoint row lacks this key (backfill)")
     ap.add_argument("--only", default=None, help="comma-separated task_id prefixes to run (pilot)")
@@ -1013,8 +1218,10 @@ def main(argv=None) -> None:
     ap.add_argument("--n-sobol", type=int, default=40, help="Sobol null studies per cost setting")
     a = ap.parse_args(argv)
     ck = Path(a.checkpoint)
+    if a.final and a.checkpoint == str(CHECKPOINT):
+        ck = FINAL_CHECKPOINT
     if not a.summarise:
-        tasks = build_tasks(set(a.experiments.split(",")), a.n_null, a.n_null_xau, a.n_planted, a.n_syn,
+        tasks = build_final_tasks() if a.final else build_tasks(set(a.experiments.split(",")), a.n_null, a.n_null_xau, a.n_planted, a.n_syn,
                             a.n_ho, a.n_ho_null, a.n_corr, a.n_dead, a.n_sobol)
         if a.only:
             pre = tuple(a.only.split(","))
@@ -1023,6 +1230,8 @@ def main(argv=None) -> None:
         run_all(tasks, a.workers, ck, require_key=a.require_key or None)
         print(f"total wall time {(time.perf_counter() - t0) / 60:.1f} min")
     print(summarise(load_results(ck)))
+    if a.final:
+        print(summarise_final(load_results(ck)))
 
 
 if __name__ == "__main__":
