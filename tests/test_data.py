@@ -76,7 +76,10 @@ def test_unlock_recorded_in_ledger_grants_holdout_access(monkeypatch, tmp_path, 
     with pytest.raises(contracts.HoldoutLocked):
         data.load_bars("EURUSD", "H1", end="2025-06-01", include_holdout=True, system="eurusd_probe")
 
-    band = {**data.holdout_horizon("FBS", "EURUSD"), "sharpe_lo": 0.1, "p_pass_zero_edge": 0.1}
+    from quantlab import stats
+    band = {**data.holdout_horizon("FBS", "EURUSD"), "sharpe_lo": 0.1, "p_pass_zero_edge": 0.1,
+            "seed": stats.holdout_band_seed("fbs-0001-a1"), "n_boot_requested": stats.HOLDOUT_BAND_N_BOOT,
+            "n_power_requested": stats.HOLDOUT_BAND_N_POWER}
     ledger.register_holdout_band(study_id="fbs-0001-a1", band=band, reason="S5")
     ledger.record_holdout_unlock(book="FBS", system="eurusd_probe", study_id="fbs-0001-a1",
                                  pass_band=band, user_confirmation=ledger.unlock_phrase("FBS", "eurusd_probe"))

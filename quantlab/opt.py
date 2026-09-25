@@ -199,10 +199,35 @@ class StudyError(RuntimeError):
 
 
 # =========================================================================== search space
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, (bool, np.bool_))
+
+
 @dataclass(frozen=True)
 class Param:
     """One searched parameter.  Build with :func:`IntParam` / :func:`FloatParam` /
-    :func:`CategoricalParam`."""
+    :func:`CategoricalParam`.
+
+    Plateau scale (DESIGN §4.2, red-team R2-1) — every numeric (int / float) parameter must
+    declare, when the space is built, how the judge-run plateau perturbs it:
+
+    * ``plateau_scale="relative"``: ±r/2·|x| and ±r·|x| around the selected value x (r = the
+      study's pre-registered radius, default 0.20).  Allowed only for strictly positive
+      parameters (declared ``low > 0``) whose origin is economically meaningful (a lookback, a
+      multiplier) — never for an offset or a threshold whose zero is arbitrary;
+    * ``plateau_step=<float > 0>``: an absolute step in the parameter's own units; the judge
+      perturbs by ±step/2 and ±step (the radius does not apply to it).
+
+    There is no default: a numeric parameter without one of them raises ``ValueError``.  The
+    choice is written into the space JSON (``to_json``), which is stored in the study's
+    ``study_created`` ledger row, so it is pre-registered.  The S2 red-team reviews every
+    declared scale against the hypothesis card (a scale much finer than the card's economic
+    neighbourhood is a finding).
+
+    Categoricals: an **unordered** categorical whose choices are all numbers is refused (use a
+    numeric or an ordered categorical parameter — a numeric knob hidden as an unordered
+    categorical would never be perturbed).  Ordered categoricals are perturbed by ±1 and ±2
+    levels (up to 4 points; a level beyond either end does not exist and is not scored)."""
 
     name: str
     kind: str                                   # "int" | "float" | "categorical"
@@ -212,6 +237,8 @@ class Param:
     log: bool = False
     choices: tuple = ()
     ordered: bool = False                       # categorical only: is there a natural order?
+    plateau_scale: Optional[str] = None         # numeric only: "relative" (see class docstring)
+    plateau_step: Optional[float] = None        # numeric only: absolute perturbation step
 
     def __post_init__(self) -> None:
         if self.kind not in ("int", "float", "categorical"):
@@ -219,6 +246,15 @@ class Param:
         if self.kind == "categorical":
             if not self.choices:
                 raise ValueError(f"{self.name}: categorical needs choices")
+            if self.plateau_scale is not None or self.plateau_step is not None:
+                raise ValueError(f"{self.name}: plateau_scale / plateau_step apply to numeric parameters only "
+                                 f"(ordered categoricals are perturbed by ±1 / ±2 levels)")
+            if not self.ordered and all(_is_number(c) for c in self.choices):
+                raise ValueError(
+                    f"{self.name}: an unordered categorical whose choices are all numeric {list(self.choices)} is "
+                    f"refused (red-team R2-1: it would never be perturbed by the plateau gate); use an "
+                    f"ordered/numeric param (IntParam / FloatParam with a plateau scale, or "
+                    f"CategoricalParam(..., ordered=True))")
         else:
             if self.low is None or self.high is None or self.high < self.low:
                 raise ValueError(f"{self.name}: need low <= high")
@@ -226,6 +262,25 @@ class Param:
                 raise ValueError(f"{self.name}: log scale needs low > 0")
             if self.step is not None and self.step <= 0:
                 raise ValueError(f"{self.name}: step must be > 0")
+            has_rel, has_step = self.plateau_scale is not None, self.plateau_step is not None
+            if has_rel == has_step:
+                raise ValueError(
+                    f"{self.name}: a numeric parameter must declare exactly one plateau scale — "
+                    f"plateau_scale='relative' (strictly positive params only) or plateau_step=<float> (an "
+                    f"absolute step in param units); got plateau_scale={self.plateau_scale!r}, "
+                    f"plateau_step={self.plateau_step!r} (DESIGN §4.2, red-team R2-1: no silent default)")
+            if has_rel:
+                if self.plateau_scale != "relative":
+                    raise ValueError(f"{self.name}: plateau_scale must be 'relative' (or use plateau_step=), "
+                                     f"got {self.plateau_scale!r}")
+                if not self.low > 0:
+                    raise ValueError(f"{self.name}: plateau_scale='relative' needs a strictly positive parameter "
+                                     f"(declared low > 0, got {self.low}); declare an absolute plateau_step=")
+            else:
+                ps = self.plateau_step
+                if isinstance(ps, bool) or not _is_number(ps) or not math.isfinite(float(ps)) or float(ps) <= 0:
+                    raise ValueError(f"{self.name}: plateau_step must be a finite number > 0, got {ps!r}")
+                object.__setattr__(self, "plateau_step", float(ps))
 
     @property
     def discrete(self) -> bool:
@@ -307,15 +362,23 @@ class Param:
         if self.kind == "categorical":
             out["choices"] = list(self.choices)
             out["ordered"] = self.ordered
+        if self.plateau_scale is not None:
+            out["plateau_scale"] = self.plateau_scale
+        if self.plateau_step is not None:
+            out["plateau_step"] = float(self.plateau_step)
         return out
 
 
-def IntParam(name: str, low: int, high: int, step: int = 1, log: bool = False) -> Param:
-    return Param(name, "int", low, high, step, log)
+def IntParam(name: str, low: int, high: int, step: int = 1, log: bool = False, *,
+             plateau_scale: Optional[str] = None, plateau_step: Optional[float] = None) -> Param:
+    """Integer parameter; declare ``plateau_scale="relative"`` or ``plateau_step=`` (see :class:`Param`)."""
+    return Param(name, "int", low, high, step, log, plateau_scale=plateau_scale, plateau_step=plateau_step)
 
 
-def FloatParam(name: str, low: float, high: float, step: Optional[float] = None, log: bool = False) -> Param:
-    return Param(name, "float", low, high, step, log)
+def FloatParam(name: str, low: float, high: float, step: Optional[float] = None, log: bool = False, *,
+               plateau_scale: Optional[str] = None, plateau_step: Optional[float] = None) -> Param:
+    """Float parameter; declare ``plateau_scale="relative"`` or ``plateau_step=`` (see :class:`Param`)."""
+    return Param(name, "float", low, high, step, log, plateau_scale=plateau_scale, plateau_step=plateau_step)
 
 
 def CategoricalParam(name: str, choices: Sequence[Any], ordered: bool = False) -> Param:
@@ -417,14 +480,16 @@ def normalise_plateau_radius(radius: Any, names: Optional[Sequence[str]] = None)
 
 def space_from_json(js: Mapping[str, Any]) -> "SearchSpace":
     """Rebuild a :class:`SearchSpace` from :meth:`SearchSpace.to_json` (the constraint callable is
-    not serialisable and is lost)."""
+    not serialisable and is lost).  A pre-R2-1 space whose numeric params carry no plateau scale
+    raises ``ValueError`` (it cannot be judged)."""
     ps = []
     for p in js["params"]:
         kw = {k: p[k] for k in ("low", "high", "step") if k in p}
         if p["kind"] == "categorical":
             ps.append(Param(p["name"], "categorical", choices=tuple(p["choices"]), ordered=bool(p.get("ordered"))))
         else:
-            ps.append(Param(p["name"], p["kind"], log=bool(p.get("log", False)), **kw))
+            ps.append(Param(p["name"], p["kind"], log=bool(p.get("log", False)),
+                            plateau_scale=p.get("plateau_scale"), plateau_step=p.get("plateau_step"), **kw))
     return SearchSpace(tuple(ps))
 
 
@@ -1234,6 +1299,39 @@ def _matrix(recs: Sequence[_Rec], field_: str = "ret") -> pl.DataFrame:
     return pl.DataFrame(cols).with_columns(pl.col("date").cast(pl.Date))
 
 
+def _evaluator_symbols(evaluator: Any, book: str) -> tuple[list[str], list[str]]:
+    """(traded symbols, conversion legs) of a real evaluator, recorded in the ``study_created`` row
+    (R2-2: they scope holdout access and the holdout horizon).  Legs = the series
+    ``data.conversion_rate`` reads for the instrument's quote and swap currencies → account
+    currency.  Synthetic evaluators (no instrument) → ([], [])."""
+    from .evaluators import SyntheticEvaluator
+    if (isinstance(evaluator, SyntheticEvaluator) or getattr(evaluator, "is_synthetic", False)
+            or isinstance(getattr(evaluator, "inner", None), SyntheticEvaluator)):
+        return [], []
+    sym = getattr(evaluator, "symbol", None)
+    if not sym:
+        return [], []
+    from . import data
+    ccys: list[str] = []
+    spec = getattr(evaluator, "spec", None)
+    if spec is None:
+        try:
+            from .costs import load_instrument
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                spec = load_instrument(sym, book=book)
+        except Exception:  # noqa: BLE001 — the quote-currency leg below still applies
+            spec = None
+    if spec is not None:
+        ccys = [c for c in (getattr(spec, "quote_ccy", None), getattr(spec, "swap_ccy", None)) if c]
+    try:
+        legs = data.conversion_legs([sym], book=book, currencies=ccys)
+    except ValueError as e:
+        raise StudyError(f"cannot resolve the conversion legs of {sym!r} ({e}); the study's holdout symbols "
+                         f"must be registered at creation (R2-2)") from e
+    return [str(sym)], legs
+
+
 def _auto_jobs(n_jobs: Any) -> int:
     if n_jobs in (None, "auto"):
         return max(1, min(8, (os.cpu_count() or 2) // 2))
@@ -1447,7 +1545,14 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
 
     ``plateau_radius`` (float, or ``{param: float}``; default 0.20, floor 0.10): the plateau
     neighbourhood pre-registered on the hypothesis card (DESIGN §4.2, red-team N3).  It is
-    written to the ``study_created`` ledger row and the gates read it from there only.
+    written to the ``study_created`` ledger row and the gates read it from there only.  It
+    scales the ``plateau_scale="relative"`` params; ``plateau_step`` params are perturbed by
+    their own step (a per-param radius naming one raises).
+
+    The ``study_created`` row also records (R2-2 / R2-4) the evaluator's description and cost
+    model version (compared by the gates), the traded ``symbols`` + ``conversion_legs`` of a real
+    evaluator (holdout access scope and horizon), and ``studies_dir`` when it is not the default
+    (the gates load the trial store from there).
 
     Resume (red-team N1 / N10): the study's ``study_created`` ledger row is the source of truth.
     ``book``, ``system``, ``issue``, ``attempt``, the resolved ``method``, ``seed``, the search
@@ -1496,6 +1601,11 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     ev_desc = describe() if describe else {"evaluator": type(evaluator).__name__}
 
     radius_call = None if plateau_radius is None else normalise_plateau_radius(plateau_radius, space.names)
+    if isinstance(radius_call, Mapping):
+        absolute = [n for n in radius_call if next(p for p in space.params if p.name == n).plateau_step is not None]
+        if absolute:
+            raise ValueError(f"plateau_radius names {absolute}, which declare an absolute plateau_step: the radius "
+                             f"does not apply to them (R2-1) — pre-register the step itself")
     n_planned = len(grid) if method != "tpe" else int(n_trials)
     row: dict[str, Any] = {}
     if resume:
@@ -1528,13 +1638,20 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         data_dependent = data_dependent or ledger.candidate_set_data_dependent(sid, ledger_dir=ledger_dir)
     else:
         radius = PLATEAU_RADIUS_DEFAULT if radius_call is None else radius_call
+        syms, legs = _evaluator_symbols(evaluator, bname)
+        extra: dict[str, Any] = {}
+        if syms:
+            extra.update(symbols=syms, conversion_legs=legs)
+        if studies_dir is not None and Path(studies_dir).resolve() != Path(config.STUDIES_DIR).resolve():
+            extra["studies_dir"] = str(Path(studies_dir).resolve())    # where the gates load the trial store
         ledger.create_study(
             ledger_dir=ledger_dir, study_id=sid, book=bname, system=system, issue=issue, attempt=attempt,
             parent_study=parent_study, dev_window=dev_window, cost_model_version=cost_version,
             cv_scheme=f"{cv_plan}+{wfo_desc}", search_space=space.to_json(), method=method,
             n_trials_planned=n_planned, seed=seed, plateau_radius=radius,
             candidate_set=method, candidate_set_data_dependent=data_dependent,
-            objective=objective.describe(), selection=selection.describe(), evaluator=_py(ev_desc), notes=notes)
+            objective=objective.describe(), selection=selection.describe(), evaluator=_py(ev_desc), notes=notes,
+            **extra)
 
     bk = _Book(sid, studies_dir, space, objective, ppy, checkpoint_every,
                abort_after=max(jobs, 2) if abort_on_uniform_errors else 0)

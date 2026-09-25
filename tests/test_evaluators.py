@@ -255,7 +255,7 @@ def test_usdchf_h1_study_records_eval_start_effective(tmp_path):
     evaluators.clear_cache()
     try:
         e = RuleEvaluator(SmaCross, symbol="USDCHF", timeframe="H1", start="2016-05-02", end="2017-01-01")
-        sp = opt.SearchSpace([opt.IntParam("fast", 10, 20, 10)])
+        sp = opt.SearchSpace([opt.IntParam("fast", 10, 20, 10, plateau_scale="relative")])
         res = opt.run_study(e, sp, book="FBS", system="l1", issue=1, attempt=1, study_id="l1-usdchf",
                             n_jobs=1, wfo=None, min_trades=1, ledger_dir=tmp_path / "ledger",
                             studies_dir=tmp_path / "studies")
@@ -364,7 +364,7 @@ def test_xauusd_h4_gap_trade_does_not_cap_the_embargo(tmp_path):
         assert m["n_trades"] == 1 and m["trades_across_data_gap"] == 1.0
         assert m["hold_calendar_days_max"] > 130
         assert m["hold_days_max"] <= 10
-        sp = opt.SearchSpace([opt.IntParam("exit_day", 8, 10, 1)])
+        sp = opt.SearchSpace([opt.IntParam("exit_day", 8, 10, 1, plateau_scale="relative")])
         res = opt.run_study(e, sp, book="FBS", system="l4", issue=1, attempt=1, study_id="l4-xau",
                             n_jobs=1, wfo=None, min_trades=1, cv=opt.CPCVConfig(10, 2),
                             ledger_dir=tmp_path / "ledger", studies_dir=tmp_path / "studies")

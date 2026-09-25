@@ -76,6 +76,12 @@ def _band(sr: float, horizon, *, seed: int = 0, n_power: int = 600) -> S.Holdout
                           trades_per_day=0.4, seed=seed)
 
 
+def reg_band(src, horizon, study_id: str) -> dict:
+    """A band built the one registrable way (R2-3): fixed n_boot / n_power, seed from the study id."""
+    return S.holdout_band(src, horizon, 260.0, n_boot=S.HOLDOUT_BAND_N_BOOT, n_power=S.HOLDOUT_BAND_N_POWER,
+                          trades_per_day=0.4, seed=S.holdout_band_seed(study_id)).as_dict()
+
+
 # --------------------------------------------------------------------------- 1. horizon from the manifest
 def test_horizon_comes_from_manifest_metadata_only(manifest, monkeypatch):
     def _boom(*a, **k):
@@ -114,14 +120,14 @@ def test_horizon_multi_symbol_crypto_and_b3(manifest):
 def test_gates_band_uses_manifest_horizon_and_explicit_override(manifest):
     study, trades = make_study(seed=3)
     ev = None
-    rep = G.evaluate_gates(study, ev, periods_per_year=260.0, selected_trades=trades, n_boot=300,
+    rep = G.evaluate_gates(study, ev, periods_per_year=260.0, selected_trades=trades, 
                            ledger_dir=register(study), holdout_symbols="EURUSD")
     hb = rep.holdout_band
     assert hb["horizon_source"] == "manifest" and hb["horizon_days"] == 262
     assert hb["horizon_end"] == "2026-05-15 10:36:00" and hb["newer_data_included"] is False
     assert "2026-05-15 10:36:00" in rep.to_markdown()
     study2, trades2 = make_study(seed=3)
-    rep2 = G.evaluate_gates(study2, None, periods_per_year=260.0, selected_trades=trades2, n_boot=300,
+    rep2 = G.evaluate_gates(study2, None, periods_per_year=260.0, selected_trades=trades2, 
                             ledger_dir=register(study2), holdout_symbols="EURUSD", holdout_days=100)
     assert rep2.holdout_band["horizon_days"] == 100 and rep2.holdout_band["horizon_source"] == "explicit"
 
@@ -172,8 +178,7 @@ def _setup(tmp_path, sr: float):
     ledger.create_study(ledger_dir=tmp_path, study_id="fbs-0042-a1", book="FBS", system="probe", issue=42,
                         attempt=1, dev_window=["2016-05-02", "2025-05-14"], cost_model_version="t", cv_scheme="t")
     src = _WfoStudy(sr, seed=3)
-    band = S.holdout_band(src, data.holdout_horizon("FBS", "EURUSD"), 260.0, n_boot=1500, n_power=600,
-                          trades_per_day=0.4, seed=3).as_dict()
+    band = reg_band(src, data.holdout_horizon("FBS", "EURUSD"), "fbs-0042-a1")
     ledger.register_holdout_band(study_id="fbs-0042-a1", band=band, reason="S5 pre-registration", ledger_dir=tmp_path)
     return src, band
 
@@ -208,7 +213,7 @@ def test_fail_blocks_any_reexam(manifest, clean_tree, tmp_path):
 def test_band_rebuild_before_unlock_is_logged_and_after_unlock_raises(manifest, clean_tree, tmp_path):
     study, trades = make_study(seed=4)
     ld = register(study, tmp_path)
-    rep = G.evaluate_gates(study, None, periods_per_year=260.0, selected_trades=trades, n_boot=300,
+    rep = G.evaluate_gates(study, None, periods_per_year=260.0, selected_trades=trades, 
                            ledger_dir=ld, holdout_symbols="EURUSD")
     G.log_gates(rep, ledger_dir=ld)                                  # S5: band registered via the gates event
     assert ledger.registered_holdout_band(study.study_id, ledger_dir=ld)["horizon_days"] == 262
@@ -263,7 +268,7 @@ def test_not_decisive_waits_and_reexam_uses_full_longer_span(manifest, clean_tre
 
     manifest(TWO_YEARS_END)                                          # a year of newer data exported
     h2 = data.holdout_horizon("FBS", "EURUSD")
-    band2 = S.holdout_band(src, h2, 260.0, n_boot=1500, n_power=600, trades_per_day=0.4, seed=3).as_dict()
+    band2 = reg_band(src, h2, "fbs-0042-a1")
     assert band2["p_pass_zero_edge"] < band["p_pass_zero_edge"]      # longer horizon → more decisive
     ledger.register_holdout_band(study_id="fbs-0042-a1", band=band2, reason="renewing holdout: +1 y",
                                  ledger_dir=tmp_path)
@@ -299,7 +304,7 @@ def test_exam_record_rejects_foreign_band_or_forged_status(manifest, clean_tree,
 def test_unlock_requires_manifest_horizon(manifest, clean_tree, tmp_path):
     ledger.create_study(ledger_dir=tmp_path, study_id="fbs-0043-a1", book="FBS", system="p2", issue=43, attempt=1,
                         dev_window=["2016-05-02", "2025-05-14"], cost_model_version="t", cv_scheme="t")
-    band = _band(2.8, 262, n_power=100).as_dict()                    # explicit horizon (tests only)
+    band = reg_band(_WfoStudy(2.8), 262, "fbs-0043-a1")               # explicit horizon (tests only)
     band["horizon_end"] = "2026-05-15 10:36:00"
     ledger.register_holdout_band(study_id="fbs-0043-a1", band=band, reason="S5", ledger_dir=tmp_path)
     with pytest.raises(LedgerError, match="not taken from the data manifest"):
@@ -310,10 +315,13 @@ def test_unlock_requires_manifest_horizon(manifest, clean_tree, tmp_path):
 def test_load_bars_serves_holdout_only_up_to_the_exam_horizon(monkeypatch):
     """Until a decisive PASS, an unlocked system sees holdout bars only up to its band's horizon
     (data exported later stays locked until the band is rebuilt and a re-exam unlocked)."""
-    monkeypatch.setattr(ledger, "is_holdout_unlocked", lambda b, s, d=None: s == "probe")
-    monkeypatch.setattr(ledger, "holdout_access_end", lambda b, s, d=None: datetime(2025, 6, 2))
+    reads = []
+    monkeypatch.setattr(ledger, "log_holdout_read", lambda **kw: reads.append(kw))
+    acc = {"end": datetime(2025, 6, 2), "symbols": ["EURUSD"], "study_id": "fbs-0042-a1", "system": "probe"}
+    monkeypatch.setattr(ledger, "holdout_access", lambda b, s, d=None: acc if s == "probe" else None)
     bars = data.load_bars("EURUSD", "H1", end="2025-07-01", include_holdout=True, system="probe")
     assert bars["ts"].max() >= FBS.holdout_start and bars["ts"].max() < datetime(2025, 6, 2)
-    monkeypatch.setattr(ledger, "holdout_access_end", lambda b, s, d=None: None)     # after a PASS
+    assert reads and reads[-1]["symbol"] == "EURUSD" and reads[-1]["end"] == datetime(2025, 6, 2)
+    acc["end"] = None                                                               # after a PASS
     bars = data.load_bars("EURUSD", "H1", end="2025-07-01", include_holdout=True, system="probe")
     assert bars["ts"].max() >= datetime(2025, 6, 30)
