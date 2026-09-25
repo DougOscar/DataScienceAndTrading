@@ -1,0 +1,45 @@
+== H2: band re-roll at S5
+  3 gate runs: sharpe_lo per run [0.0188, 0.0188, 0.0188]; registered = first: True; events with holdout_band_diagnostic: 2
+  evaluate_gates(n_boot=60)                                              refused (GateError: n_boot=60: the holdout band's bootstrap size is fixed at 2000 (red-team R2-3); omit n_boot)
+  evaluate_gates(seed=7)                                                 refused (GateError: seed=7: the holdout band's seed is fixed per study (stats.holdout_band_seed = 4245834846, red-team R2-3); omit)
+  rebuild_holdout_band(symbols=['GBPUSD'])                               refused (TypeError: rebuild_holdout_band(symbols=) is refused (red-team R2-3): the rebuild uses the same construction, the fixed s)
+  evaluate_gates(holdout_symbols='GBPUSD') on an EURUSD study            refused (GateError: holdout_symbols='GBPUSD' differ from the study's symbols registered in the ledger ['EURUSD'] (R2-2 / R2-3: sym)
+== H2f: doctored band thresholds (right seed / n_boot / symbols)
+  honest band: sharpe_lo -0.312, p_pass_zero_edge 0.540; keys ['max_dd_mag_hi', 'ret_at_budget_lo', 'sharpe_lo', 'trades_hi', 'trades_lo']
+  register_holdout_band(doctored band) at S5                             ACCEPTED -> holdout_band_registered
+  record_holdout_unlock with the doctored band                           ACCEPTED -> 1
+  run_holdout_exam on a ZERO-edge holdout                                ACCEPTED -> PASS
+  same holdout against the honest band: FAIL
+== H3: family keying
+  probe/42 exam: FAIL
+  after FAIL: 'Probe' issue 42                                           refused (LedgerError: FBS/Probe failed its holdout (killed; family ['probe']); no band may be registered)
+  after FAIL: 'probe_v2' issue 42                                        refused (LedgerError: FBS/probe_v2 failed its holdout (killed; family ['probe']); no band may be registered)
+  after FAIL: 'probe_v2' issue 43                                        refused (LedgerError: FBS/probe_v2 failed its holdout (killed; family ['probe']); no band may be registered)
+  after FAIL: 'probe2' issue None                                        ACCEPTED -> 1
+  after FAIL: 'probe_fast' issue 45                                      ACCEPTED -> 1
+  clean ledger, after FAIL: 'probe_v2' on a NEW issue 43                 ACCEPTED -> 1
+  B3 'trend_win' on the same issue 100 as FBS 'trend_fx' (FAILed): killed=True family=['trend_fx']
+  unrelated FBS 'carry_basket' filed under issue 100: killed=True
+  'carry_basket' study on its own issue 200 (one earlier study on 100): killed=True
+  'mr_gold' on issue 200 (shared with carry_basket, not with trend_fx): killed=False family=[]
+  same, holdout_state WITHOUT study_id (as data.load_bars / holdout_access call it): killed=False
+== H5: load_bars scope + impersonation (synthetic M1 files)
+  passed_sys exam: PASS horizon_end 2026-09-29 23:00:00
+  load_bars(EURUSD, system='passed_sys'): served up to 2026-09-29 23:00:00
+  load_bars(GBPUSD, system='passed_sys'): HoldoutLocked (FBS/GBPUSD: the holdout unlock of 'passed_sys' (study fbs-0050-a1) cov)
+  load_bars(EURUSD, system='pending_sys'): served up to 2026-09-29 23:00:00
+  load_bars(GBPUSD, system='pending_sys'): HoldoutLocked (FBS/GBPUSD: the holdout unlock of 'pending_sys' (study fbs-0051-a1) co)
+  load_bars(EURUSD, system='PASSED-SYS'): served up to 2026-09-29 23:00:00
+  holdout_read events: 3; systems logged ['PASSED-SYS', 'passed_sys', 'pending_sys']
+  (the `system` argument is a free string: any code may read passed_sys's symbols by naming it; the read is
+   logged under that name, and no code compares holdout_read events with the caller's own study)
+== LOG: holdout_read volume and append cost
+  200 load_bars calls with 250 distinct (start, end) pairs -> 50 new holdout_read lines in 1.3s
+  holdout file with 1000 lines: 0.5 ms per append; holdout_state 6.2 ms; size 0.3 MB
+  holdout file with 10000 lines: 10.3 ms per append; holdout_state 212.8 ms; size 2.9 MB
+  holdout file with 50000 lines: 55.8 ms per append; holdout_state 465.2 ms; size 14.7 MB
+== H6 / H7
+  band horizon 262 d: realised span accepted within +-5.2 d (~7 calendar days)
+  band horizon 392 d: realised span accepted within +-7.8 d (~11 calendar days)
+  band horizon 522 d: realised span accepted within +-10.4 d (~15 calendar days)
+  band horizon 652 d: realised span accepted within +-13.0 d (~18 calendar days)

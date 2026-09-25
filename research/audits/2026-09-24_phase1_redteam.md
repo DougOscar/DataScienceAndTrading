@@ -381,3 +381,150 @@ The r2_p01 ID section and r2_p03:
 - **End to end, zero-edge worlds (r2_p06, 72 worlds):**
   - 0 PASS verdicts;
   - per-gate pass rates are as in r1, except the plateau (all worlds 0.17 / 0.17 / 0.33).
+
+## Re-verification round 3 (30b23b6)
+
+- Date: 2026-09-25. Branch `feat/quantlab-phase1` @ `30b23b6`. The library was not modified by this audit and nothing was committed.
+- Probes: `research/audits/probes/phase1/r3_p0{1..5}_*.py` + `.out`. Temporary ledgers and studies only, with ≤ 4 workers (r3_p04). `research/ledger/` is still empty.
+- Holdout probe (`r3_p03`): uses a hand-written manifest and synthetic M1 files. No real bar of any kind was read.
+- `tests/test_redteam_r2.py`: 21 passed.
+
+### Verdict on round-2 findings
+
+| # | Status | Evidence |
+|---|---|---|
+| R2-1 plateau scale chosen by the author | **PARTIAL** | r3_p02. **Closed:** G2 (k duplicates) now FAILs for every k (k = 4/5 → 0.50) because of the joint axis. Numeric unordered categoricals are refused. **Still PASS 1.0:** G1 (offset `d` with `relative`, or `plateau_step=0.01`), G1b (`thr` relative), G1c (`a` on [1,101] with `plateau_step=1`), G4 (ordered levels 48..52 or 40..60 step 1), and G6 (radius 0.10, user-approved). **New bypass of the categorical refusal:** string labels `'L10'..'L100'` and numeric strings `'10'..'100'` are accepted as unordered. With one harmless numeric param the spike PASSes 1.0; alone it is SKIPPED (INCOMPLETE). See R3-3. |
+| R2-2 holdout keyed on the exact `system` | **PARTIAL** | r3_p03 H3. **Blocked after a FAIL:** `Probe`/42 and `probe_v2`/42. **Still get a fresh exam-1 unlock:** `probe_v2` on a **new issue 43** (clean ledger; this is r2's exact case, whereas the r2 regression test uses issue 42), `probe2` with issue `None`, and `probe_fast`/45. H5: `load_bars` is scoped to the registered symbols (GBPUSD is refused for an EURUSD unlock), and every read is logged. The `system` argument is still a free string, so reads can be made under an alias (see R3-5). |
+| R2-3 band re-roll / rebuild overrides | **CLOSED for re-rolling; OPEN for content (R3-1)** | r3_p03 H2: three gate runs give identical bands (fixed seed), and the registered band is the first one; later runs are logged as `holdout_band_diagnostic`. These are all refused: `n_boot=60`, `seed=7`, `rebuild(symbols=)` and `holdout_symbols='GBPUSD'`. However, a band with the right seed, n_boot and symbols but **edited thresholds** is registered and unlocked, and it PASSes a zero-edge holdout (R3-1). |
+| R2-4 in-memory StudyResult / evaluator | **PARTIAL** | r3_p01. **Refused now:** (a) truncated trials or returns, (a′) truncated trials only, (c) TPE relabelled as `c-sobol`, (d) a different `describe()`. (b) The ledger count stays 441. **Still read from memory and unchecked** (R3-2): `cpcv_paths`, `wfo_oos`, `wfo_params`, `selection`/`selected_params`, `meta['trade_counts']` and the whole `GateReport` given to `log_gates`. (d2): same `describe()` but zero cost drag moves cost_stress 2.93 → 3.31 without detection. |
+| N2b creation-order prior | **CLOSED** | r3_p01: re-gating a1 after a2–a5 counts a prior of 196. |
+| Prior: new name + new issue | **OPEN (residual, not listed by the author)** | r3_p01: `sma_v2`/9 and `sma_cross_fast`/12 still count a prior of 0. `S.M.A`/10 counts 147. |
+| H7 horizon legs | **CLOSED** | test_redteam_r2 `test_minor_horizon_includes_conversion_legs`; legs are recorded at creation (`_SymEval('EURJPY')` → USDJPY). |
+| H6 tolerance / manifest re-check | **CLOSED** | The span tolerance is now ±5.2 / 7.8 / 10.4 / 13.0 trading days at 262 / 392 / 522 / 652 d, which is about 7–18 calendar days. At unlock the horizon must still equal the manifest's, and the SHA is recorded. |
+| H4 exam never recorded | **PARTIAL** | `exam_overdue` / `pending_days` are reported, but no skill reads them (grep `.claude/`), and a pending member still holds the family's data key. |
+| Cost-stress text | **CLOSED** | The row now shows the slippage in points and as a multiple of the median dev spread. The uneven severity across classes is unchanged and is by design. |
+| Plateau minors | **joint axis CLOSED; edge of an ordered categorical PARTIAL; G6 accepted** | r3_p02. |
+
+### New / residual findings
+
+**R3-1 — MAJOR. The band's numbers and the gate verdict are never verified: the holdout exam can be passed with a doctored band.**
+- `ledger.check_band_construction` checks only `seed`, `n_boot_requested`, `n_power_requested` and `symbols`.
+- `log_gates` writes whatever the in-memory `GateReport` says (rows, `verdict`, `holdout_band_run`).
+- `register_holdout_band` is a public ledger call.
+
+Evidence:
+- r3_p01 m5: a zero-edge study whose honest verdict is FAIL was edited to verdict PASS, `sharpe_lo = −9`, `p_pass_zero_edge = 0.05`. `log_gates` **accepted it**, and it became the registered band.
+- r3_p03 H2f: the same kind of doctored band (`sharpe_lo −9`, `max_dd_hi 1`, trades [0, 1e9], p0 0.05) was registered through `register_holdout_band` at S5 and unlocked. The exam on a **zero-edge holdout returned PASS**; the honest band gives FAIL on the same series.
+
+*Failure scenario:* this is not subtle p-hacking; it takes a deliberate edit. But it is the last gate before `/promote`, and the unlock pre-flight ("passed S5") reads the logged verdict, which is also unverified.
+
+*Cheapest fix:*
+1. Make `evaluate_gates(..., log=True)` write the `gates` event itself, so no edited report can reach the ledger. Or have `log_gates` take the study and re-run.
+2. The band is deterministic (r3_p01: identical across runs) and costs about 1.4 s (r3_p05). So `log_gates` and `record_holdout_unlock` can **recompute it from the verified study and compare canonical JSON**.
+3. Make `register_holdout_band` reachable only through `gates.rebuild_holdout_band`, which computes the band itself.
+4. Store a band hash in the `gates` event and check it at unlock.
+
+**R3-2 — MAJOR. `cpcv_paths`, `wfo_oos` and `selection` are taken from memory, so the two OOS gates can be shopped.** This confirms the author's residual and quantifies it.
+- **Outright forgery** (r3_p01 m1–m3), on a zero-edge study: setting the paths or the WFO series to the in-sample-best column moves `oos_sharpe` 0.75 → 1.17 and `wfo_oos` 0.43 → 1.47. Both go from FAIL to PASS, and nothing is flagged.
+- **Realistic path: recompute with a different scheme in a notebook and assign it back** (r3_p04, 12 worlds per family, using `opt.cpcv_paths` / `opt.walk_forward` on the *verified* returns matrix; 15 CPCV and 36 WFO schemes). The best-of-K pass rate against the pre-registered scheme:
+
+  | Family | `wfo_oos` pass (pre-registered → best-of-K) | Both OOS gates pass (pre-registered → best-of-K) |
+  |---|---|---|
+  | dead from 55 % | 0.50 → **0.83** | 0.50 → 0.83 |
+  | dead from 70 % | 0.50 → 0.67 | 0.50 → 0.67 |
+  | zero-edge | 0.08 → 0.17 | — |
+  | live control | 1.00 → 1.00 | — |
+
+  So the B2 dead-edge catch rate of `wfo_oos` falls by two thirds (dead from 55 %: it catches 0.17 of the dead edges instead of 0.50).
+- **Selection** (r3_p01 m4): `selection.trial_id` and `selected_params` can be moved to the IS-best trial (ledger `selection` event: trial 44; in memory: 30). The DSR goes 0.52 → 0.89 and nothing is flagged.
+
+*Cheapest fix:* recomputing through opt is **not exact**, because `trade_counts` and entry counts are not in the trial store. Instead:
+- have `run_study` write `cpcv_paths` / `wfo_oos` / `wfo_params` (and `trade_counts`) as parquet in the study's store dir, and log their sha256 in the `selection` event;
+- in `verify_trial_store`, hash the in-memory frames (sorted, cast, canonical) and compare. This is about 20 lines.
+- also compare `selection['trial_id']` and `selected_params` with the ledger `selection` event (3 lines).
+
+With these checks, R3-1's recompute has verified inputs.
+
+**R3-3 — MAJOR (residual R2-1). The perturbation scale is still a free author choice. A cheap floor catches every reproduced case; the categorical refusal is bypassable.**
+r3_p02 re-ran the judge with tolerance = max(declared, floor):
+
+| Case | Declared | Floor f = 0.02·range | Floor f = 0.05·range | Floor = grid step |
+|---|---|---|---|---|
+| G1 relative | 1.0 | 0.75 | **0.50** | 0.75 |
+| G1 `step = 0.01` | 1.0 | 0.75 | **0.50** | 0.75 |
+| G1c `step = 1` | 1.0 | 1.00 | **0.50** | 1.00 |
+| G1b | 1.0 | 1.00 | **0.50** | 1.00 |
+
+False-positive cost on honest broad lookback edges (log-scale bump, [5, 200], relative 0.20):
+- optimum 10 / 20 / 50 / 120 declared: 1.00 / 1.00 / 1.00 / 1.00;
+- with f = 0.05: 0.75 / 1.00 / 1.00 / 1.00, all still PASS.
+
+So a **floor of 0.05 × (declared high − low)** on the per-point tolerance catches every reproduced gaming case at no measured cost. It also couples the plateau to the search width: narrowing the range to shrink the floor also narrows the search. A 2 % floor or a grid-step floor catches nothing.
+
+Two further gaps:
+- **Ordered categoricals:** fine numeric levels (G4) pass. Refuse numeric *ordered* categoricals too (force a numeric param with a scale), or apply the same floor to level values.
+- **Unordered categoricals:** the "all numeric" refusal is bypassed by string labels (`'L50'`) and by numeric strings (`'50'`, since `_is_number` is false for strings). No mechanical rule can catch labels, so:
+  - list every unordered axis in the gate text as "not judged";
+  - require each one to be named in the card and reviewed at S2;
+  - at minimum, also refuse strings that parse as numbers.
+
+"Pre-registered + S2 review" is adequate only for the categorical case. For numeric scales, add the floor.
+
+**R3-4 — MINOR. Family keying: some legitimate systems are blocked, and some renames still escape.**
+Legitimate systems blocked (r3_p03 H3):
+- The issue clause ignores the book: a B3 system on the same issue as a failed FBS system is `killed`. DESIGN decision: should a FBS FAIL close the B3 exam of the same hypothesis? B3 has independent holdout data.
+- An unrelated system filed under a shared issue is killed, and that also kills its studies on its **own** issue 200.
+- The family is asymmetric: `carry_basket` on issue 200 is killed, while `mr_gold` on the same issue 200 is not.
+
+Renames that escape: a new issue, or `issue=None` (`create_study` accepts it). This is the same gap as the DSR prior, where new name + new issue counts a prior of 0.
+
+*Fix:* require a non-null issue, and key the issue clause on (book, issue) unless DESIGN says otherwise. The rest is S0 governance (a new card = a new issue, approved by the user).
+
+**R3-5 — MINOR. Holdout-read logging.**
+- `system` in `load_bars` is a free string. A read under `'PASSED-SYS'` is served and logged under that alias, and nothing compares the logged reader with the caller's study. No skill reads `holdout_reads()`, so the log is forensic only.
+- After a PASS, `end = None`: every later export of the registered symbols stays readable. This is by design (the decay review).
+- Volume: deduplication is per process and exact on (start, end). 200 calls with 250 distinct windows gave 50 lines.
+- Cost: `_append` re-reads the whole file, and every holdout `load_bars` runs `holdout_state`, which parses the full file including reads.
+
+  | Lines in the file | Per append | `holdout_state` | File size |
+  |---|---|---|---|
+  | 1 k | 0.6 ms | 7 ms | — |
+  | 10 k | 11.7 ms | 203 ms | — |
+  | 50 k | 61 ms | 568 ms | 14.7 MB (git-tracked) |
+
+  This is harmless at today's volume, but it grows O(n²) under a rolling decay review.
+
+*Fix:* move reads to their own append-only file, append without the full read (tail hash), and make `holdout_state` skip read events at parse time.
+
+**R3-6 — MINOR. The band seed is `hash(study_id)`, and `run_study` accepts any `study_id`.**
+Seed shopping is possible: run under id A, evaluate candidate ids offline, then re-run the identical study under the best id. The re-run doubles the prior N, and at n_boot 2000 the spread is small (r2 H2: `sharpe_lo` −0.10…+0.02). *Fix:* derive the seed from the trial-store content hash, or enforce `new_study_id()`.
+
+**R3-7 — MINOR. The evaluator identity check is `describe()`-deep.**
+A behaviour change that `describe()` omits goes through: r3_p01 d2, zero drag, cost stress 2.93 → 3.31. `RuleEvaluator.describe()` carries the strategy name, not a code hash, and the `study_created.git_commit` is not compared at the gates. *Fix:* add a source hash of the strategy module to `describe()`.
+Harness note: `run_study` records `cost` or `evaluator.cost_version`, while the gates read `evaluator.cost.version` first. They agree for `RuleEvaluator`, but a wrapper where they differ gets a spurious GateError.
+
+**Cost of the fixed 2000/1000 band (r3_p05):**
+- band build: 1.39 s (0.49 s at n_boot 500); n_power 1000 → 0 saves only about 0.15 s;
+- full `evaluate_gates` without an evaluator: 3.4 s; the probe gate runs with a synthetic evaluator took 4–9 s;
+- measured under load average 9 (calibration running).
+
+This is acceptable: it is dominated by plateau re-evaluations for real evaluators, and it adds about 1.4 s per gate run in the calibration.
+
+### Checks run that found nothing wrong
+
+- **Trial-store verification (r3_p01):** truncating trials or returns, adding foreign trials, or dropping the `source` column all raise. N_study = max(memory, store, ledger), and the ledger count cannot be lowered by a `gates` event.
+- **Band re-roll (r3_p03):** the band is deterministic and frozen at the first gate run, and the seed / n_boot / symbols overrides are all refused.
+- **Holdout scope:** a symbol outside the registered set raises `HoldoutLocked`; a never-unlocked system raises; reads are logged with the correct study id and range; the chain verifies after 50 k appended lines.
+- **Family (in-family cases):** after a FAIL, a same-normalised-name rename and a same-issue rename are both refused (killed), for both unlock and band.
+- **Plateau:** G2 duplicates now FAIL; the M5 honest spike FAILs; an honest lookback plateau PASSes at every optimum tested.
+- **`tests/test_redteam_r2.py`:** all pass.
+
+### BLOCKER / MAJOR summary (round 3)
+There are no BLOCKERs.
+
+MAJOR:
+- **R3-1:** the band and verdict content is unverified; a doctored band PASSes a zero-edge holdout.
+- **R3-2:** `cpcv_paths` / `wfo_oos` / `selection` come from memory; scheme shopping moves the dead-edge `wfo_oos` pass rate 0.50 → 0.83.
+- **R3-3:** the plateau scale has no floor, and the categorical refusal is bypassed by string labels.
+
+All three have cheap mechanical fixes (above).
