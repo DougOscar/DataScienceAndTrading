@@ -7,10 +7,12 @@ Everything in ``quantlab`` reaches raw data through this module.  It:
   in **naive broker server time** (:func:`load_bars`);
 * enforces the per-book holdout lock (DESIGN §4.1) — a dev-period read never
   needs anything special, a holdout-period read requires an explicit
-  ``system`` with a ledger unlock, or it raises :class:`contracts.HoldoutLocked`.  Until the
+  ``system`` with a ledger unlock, or it raises :class:`contracts.HoldoutLocked`.  An unlock
+  opens only the unlocked study's registered symbols (traded + conversion legs), and every
+  holdout read is logged (``ledger.holdout_access`` / ``log_holdout_read``, R2-2).  Until the
   system's holdout exam is a decisive PASS, an unlock only serves bars up to the horizon its
-  band was registered for (``ledger.holdout_access_end``; DESIGN §4.4), so data exported later
-  stays unseen until the band is rebuilt and a re-exam unlocked;
+  band was registered for (DESIGN §4.4), so data exported later stays unseen until the band is
+  rebuilt and a re-exam unlocked;
 * reports the holdout exam horizon from manifest metadata alone (:func:`holdout_horizon`);
 * infers the price increment and currency pair of a symbol, and converts an
   amount between currencies using an as-of (backward-looking) M1 close.
@@ -246,33 +248,64 @@ def holdout_trading_days(start: datetime, end: datetime, periods_per_year: float
     return int(round(n * min(1.0, periods_per_year / 260.0)))
 
 
+def conversion_legs(symbols: str | list[str] | tuple[str, ...], *, book: str,
+                    currencies: tuple[str, ...] | list[str] = ()) -> list[str]:
+    """Book symbols :func:`conversion_rate` reads to convert each symbol's quote currency — plus
+    any extra ``currencies`` (e.g. a swap currency) — into the book's account currency (R2-2 /
+    red-team H7).  Metadata only (catalog + currency codes); the traded symbols themselves are
+    not repeated.  EURJPY on FBS → ``["USDJPY"]``; EURUSD / BTCUSD / XAUUSD / WIN → ``[]``."""
+    b = config.get_book(book)
+    syms = [symbols] if isinstance(symbols, str) else list(symbols)
+    acct = b.account_currency
+    ccys: set[str] = {str(c).upper() for c in currencies if c}
+    for sym in syms:
+        ccys.add(symbol_currencies(sym)[1].upper())
+    out: list[str] = []
+    for c in sorted(ccys - {acct, "ACCOUNT"}):
+        for leg in conversion_symbols(c, acct, book=b.name):
+            if leg not in syms and leg not in out:
+                out.append(leg)
+    return out
+
+
 def holdout_horizon(book: str, symbols: str | list[str] | tuple[str, ...], *,
-                    periods_per_year: float | None = None) -> dict[str, Any]:
+                    periods_per_year: float | None = None, legs: tuple[str, ...] | list[str] = (),
+                    include_legs: bool = True) -> dict[str, Any]:
     """Horizon of the holdout exam (DESIGN §4.4, decided 2026-09-24): from the book's holdout
     start to the **end of the data currently available** — the locked year plus every newer
     export (the renewing holdout, §4.1).
 
     **Metadata only:** the end date is read from ``data/manifest.json`` (via :func:`catalog`,
     the M1 series that :func:`load_bars` would use — latest end per symbol).  No Parquet file is
-    opened, so no holdout bar or value is ever read.  Several symbols → the earliest end (the
-    exam can only cover the span every leg has).
+    opened, so no holdout bar or value is ever read.  The end is the earliest over the traded
+    ``symbols`` AND their conversion legs (:func:`conversion_legs` — quote currency → account
+    currency — plus the explicit ``legs``, e.g. a swap-currency leg registered for the study;
+    red-team H7): the exam can only cover the span every series it reads has.
 
     Returns ``horizon_days`` (see :func:`holdout_trading_days`), ``holdout_start``,
     ``horizon_end`` (last M1 bar, naive server time, ISO), ``locked_end``,
-    ``newer_data_included`` (data past the locked year exists), ``symbols``, ``periods_per_year``,
-    ``manifest_sha`` and ``horizon_source = "manifest"``."""
+    ``newer_data_included`` (data past the locked year exists), ``symbols`` (traded),
+    ``conversion_legs``, ``periods_per_year``, ``manifest_sha`` and ``horizon_source = "manifest"``."""
     b = config.get_book(book)
     syms = [symbols] if isinstance(symbols, str) else list(symbols)
     if not syms:
         raise ValueError("holdout_horizon needs at least one symbol")
     cat = catalog(b.name)
     ends, market = {}, None
-    for sym in syms:
+
+    def _end(sym: str) -> None:
         c = cat.filter((pl.col("symbol") == sym) & (pl.col("timeframe") == "M1"))
         if c.height == 0:
             raise ValueError(f"no M1 bars for {sym!r} in the {b.name} catalog (data/manifest.json)")
         ends[sym] = c["end"].max()
-        market = market or c["market"][0]
+
+    for sym in syms:
+        _end(sym)
+        market = market or cat.filter(pl.col("symbol") == sym)["market"][0]
+    leg_list = conversion_legs(syms, book=b.name) if include_legs else []
+    leg_list += [s for s in legs if s not in leg_list and s not in syms]
+    for sym in leg_list:
+        _end(sym)
     end = min(ends.values())
     if end is None or end <= b.holdout_start:
         raise ValueError(f"{b.name}/{syms}: the data ends {end}, before the holdout start {b.holdout_start}")
@@ -283,7 +316,7 @@ def holdout_horizon(book: str, symbols: str | list[str] | tuple[str, ...], *,
         "horizon_end": end.isoformat(sep=" "),
         "locked_end": b.locked_end.isoformat(sep=" "),
         "newer_data_included": bool(end.date() > b.locked_end.date()),
-        "symbols": syms, "periods_per_year": ppy,
+        "symbols": syms, "conversion_legs": leg_list, "periods_per_year": ppy,
         "manifest_sha": ledger.manifest_sha(), "horizon_source": "manifest",
     }
 
@@ -433,7 +466,10 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
     """Load bars for ``symbol`` at ``timeframe``, dev-period only unless unlocked.
 
     Returns exactly :data:`contracts.BAR_COLUMNS`, sorted by ``ts``.  See the
-    module docstring for the resampling and holdout-guard rules.
+    module docstring for the resampling and holdout-guard rules.  A holdout read needs
+    ``include_holdout=True`` and a ``system`` whose holdout family has an unlock; it is limited to
+    the unlocked study's registered symbols (traded + conversion legs) and horizon, and is
+    logged as a ``holdout_read`` event (``ledger.holdout_access`` / ``log_holdout_read``, R2-2).
     """
     _forbid_during_audit("load_bars")
     if timeframe not in _TF_MINUTES:
@@ -460,19 +496,30 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
     holdout_start = book_obj.holdout_start
     resolved_end = end_dt if end_dt is not None else holdout_start
     if resolved_end > holdout_start:
-        unlocked = system is not None and ledger.is_holdout_unlocked(book_obj.name, system)
-        if not (include_holdout and unlocked):
+        access = ledger.holdout_access(book_obj.name, system) if (system is not None and include_holdout) else None
+        if access is None:
             raise contracts.HoldoutLocked(
                 f"{book_obj.name}/{symbol}: requested window ends {resolved_end}, which reaches the "
                 f"holdout (starts {holdout_start}); pass include_holdout=True with a `system` that has "
                 f"an unlock recorded in the ledger to access it"
             )
+        # R2-2: an unlock opens the holdout only for the unlocked study's registered symbols
+        # (traded + conversion legs), not for every symbol in the book.
+        if symbol not in (access.get("symbols") or []):
+            raise contracts.HoldoutLocked(
+                f"{book_obj.name}/{symbol}: the holdout unlock of {system!r} (study {access.get('study_id')}) "
+                f"covers only {access.get('symbols') or 'no registered symbols'}; {symbol} stays locked"
+            )
         # DESIGN §4.4 horizon rule: until a decisive PASS, an unlock only opens the span its
         # pre-registered band was built for.  Data exported later stays locked until the band
-        # is rebuilt and a re-exam is unlocked (ledger.holdout_access_end).
-        access_end = ledger.holdout_access_end(book_obj.name, system)
+        # is rebuilt and a re-exam is unlocked (ledger.holdout_access).
+        access_end = access.get("end")
         if access_end is not None and resolved_end > access_end:
             resolved_end = access_end
+        ledger.log_holdout_read(book=book_obj.name, system=system, study_id=access.get("study_id"),
+                                symbol=symbol, timeframe=timeframe,
+                                start=max(start_dt, holdout_start) if start_dt is not None else holdout_start,
+                                end=resolved_end)
 
     span = _TF_TIMEDELTA[timeframe]
     src_path = Path(row["file"])

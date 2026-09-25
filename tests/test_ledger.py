@@ -24,14 +24,17 @@ def clean_tree(monkeypatch):
     monkeypatch.setattr(ledger, "git_commit", lambda: "abc1234")
 
 
-def _band(**over):
-    """A registered-band stand-in whose horizon comes from the real manifest (metadata only)."""
-    from quantlab import data
-    return {**data.holdout_horizon("FBS", "EURUSD"), "sharpe_lo": 0.4, "p_pass_zero_edge": 0.1, **over}
+def _band(sid="fbs-0007-a1", **over):
+    """A registered-band stand-in whose horizon comes from the real manifest (metadata only), with
+    the fixed construction fields a registrable band carries (R2-3)."""
+    from quantlab import data, stats
+    return {**data.holdout_horizon("FBS", "EURUSD"), "sharpe_lo": 0.4, "p_pass_zero_edge": 0.1,
+            "seed": stats.holdout_band_seed(sid), "n_boot_requested": stats.HOLDOUT_BAND_N_BOOT,
+            "n_power_requested": stats.HOLDOUT_BAND_N_POWER, **over}
 
 
 def _registered(tmp_path, sid="fbs-0007-a1", **over):
-    band = _band(**over)
+    band = _band(sid, **over)
     ledger.register_holdout_band(study_id=sid, band=band, reason="S5", ledger_dir=tmp_path)
     return band
 
@@ -190,7 +193,8 @@ def test_study_events_filters_by_study_and_event(tmp_path, clean_tree):
 
 
 def test_related_prior_trials_by_name_or_issue_in_ledger_order(tmp_path, clean_tree):
-    """N2: every OTHER study created earlier that shares the normalised system name or the issue."""
+    """N2: every OTHER study that shares the normalised system name or the issue — whenever it was
+    created (R2 minor N2b: re-gating an earlier attempt counts the later ones)."""
     ledger.create_study(ledger_dir=tmp_path, **_study(system="Donchian-20"))
     ledger.log_event("fbs-0007-a1", "trials", ledger_dir=tmp_path, n_trials=400)
     ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0009-a1", issue=9, system="donchian_20"))
@@ -201,8 +205,9 @@ def test_related_prior_trials_by_name_or_issue_in_ledger_order(tmp_path, clean_t
     tot, used, own = ledger.related_prior_trials("fbs-0007-a1b", ledger_dir=tmp_path)
     assert tot == 400 and used == ["fbs-0007-a1"] and own["system"] == "breakout"
     tot, used, _ = ledger.related_prior_trials("fbs-0009-a1", ledger_dir=tmp_path)
-    assert tot == 400 and used == ["fbs-0007-a1"]                 # the later-created one is not counted
-    assert ledger.related_prior_trials("fbs-0007-a1", ledger_dir=tmp_path)[0] == 0
+    assert tot == 400 and used == ["fbs-0007-a1"]
+    tot, used, _ = ledger.related_prior_trials("fbs-0007-a1", ledger_dir=tmp_path)
+    assert tot == 30 and used == ["fbs-0009-a1", "fbs-0007-a1b"]   # created later: counted too
     with pytest.raises(LedgerError, match="unknown study"):
         ledger.related_prior_trials("nope", ledger_dir=tmp_path)
 

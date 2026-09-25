@@ -339,21 +339,21 @@ class SignRandomSMA:
 def _space(task: dict[str, Any]) -> opt.SearchSpace:
     sp = task.get("space", "seedhold")
     if sp == "seedhold":
-        return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1),
+        return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1, plateau_step=0.2 * (N_SEEDS - 1)),
                                 opt.CategoricalParam("hold", SETUPS[task["setup"]]["holds"], ordered=True)))
     if sp == "exits":            # shared entry schedule; only exits vary (9 × 7 × 2 = 126; pilot ρ ≈ 0.79)
-        return opt.SearchSpace((opt.FloatParam("stop_mult", 2.0, 4.0, step=0.25),
-                                opt.FloatParam("target_mult", 3.0, 6.0, step=0.5),
-                                opt.IntParam("hold", 36, 48, step=12)))
+        return opt.SearchSpace((opt.FloatParam("stop_mult", 2.0, 4.0, step=0.25, plateau_scale="relative"),
+                                opt.FloatParam("target_mult", 3.0, 6.0, step=0.5, plateau_scale="relative"),
+                                opt.IntParam("hold", 36, 48, step=12, plateau_scale="relative")))
     if sp == "sma":              # 7 × 7 × 3 = 147 (pilot ρ ≈ 0.57, a typical SMA grid)
-        return opt.SearchSpace((opt.IntParam("fast", 10, 40, step=5), opt.IntParam("slow", 120, 240, step=20),
-                                opt.FloatParam("stop_mult", 2.0, 4.0, step=1.0)))
+        return opt.SearchSpace((opt.IntParam("fast", 10, 40, step=5, plateau_scale="relative"), opt.IntParam("slow", 120, 240, step=20, plateau_scale="relative"),
+                                opt.FloatParam("stop_mult", 2.0, 4.0, step=1.0, plateau_scale="relative")))
     if sp == "sobol4":
-        return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1), opt.IntParam("hold", 12, 48),
-                                opt.FloatParam("stop_mult", 1.5, 4.0), opt.FloatParam("target_mult", 1.5, 6.0)))
+        return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1, plateau_step=0.2 * (N_SEEDS - 1)), opt.IntParam("hold", 12, 48, plateau_scale="relative"),
+                                opt.FloatParam("stop_mult", 1.5, 4.0, plateau_scale="relative"), opt.FloatParam("target_mult", 1.5, 6.0, plateau_scale="relative")))
     if sp == "sobol4_oracle":
-        return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1), opt.IntParam("hold", 12, 48),
-                                opt.FloatParam("stop_mult", 2.0, 5.0), opt.FloatParam("target_mult", 2.0, 8.0)))
+        return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1, plateau_step=0.2 * (N_SEEDS - 1)), opt.IntParam("hold", 12, 48, plateau_scale="relative"),
+                                opt.FloatParam("stop_mult", 2.0, 5.0, plateau_scale="relative"), opt.FloatParam("target_mult", 2.0, 8.0, plateau_scale="relative")))
     raise ValueError(sp)
 
 
@@ -468,8 +468,8 @@ def _run_real_study(task: dict[str, Any], work: Path) -> tuple[dict[str, Any], A
                           ledger_dir=work / "ledger", studies_dir=work / "studies")
     t_study = time.perf_counter() - t0
     t1 = time.perf_counter()
-    rep = gates.evaluate_gates(study, ev, periods_per_year=ev.periods_per_year, n_boot=2000,
-                               seed=task["salt"], ledger_dir=work / "ledger", holdout_days=260)
+    rep = gates.evaluate_gates(study, ev, periods_per_year=ev.periods_per_year,
+                               ledger_dir=work / "ledger", holdout_days=260)   # band seed / n_boot fixed (R2-3)
     t_gates = time.perf_counter() - t1
     srs = _trial_sharpes(study)
     row: dict[str, Any] = {}
@@ -595,11 +595,13 @@ def _synthetic_evaluator(task: dict[str, Any]) -> evaluators.SyntheticEvaluator:
 
 def _run_synthetic(task: dict[str, Any], work: Path) -> dict[str, Any]:
     ev = _synthetic_evaluator(task)
-    space = opt.SearchSpace((opt.IntParam("x", 0, 11), opt.IntParam("y", 0, 11)))
+    space = opt.SearchSpace((opt.IntParam("x", 0, 11, plateau_step=2.2), opt.IntParam("y", 0, 11, plateau_step=2.2)))
     t0 = time.perf_counter()
+    # cost=CostModel(): a SyntheticEvaluator ignores it, but it is the base cost the gates stress
+    # below, and the gates require the study's recorded cost model version (R2-4)
     study = opt.run_study(ev, space, book="FBS", system=f"calib_syn_{task['scenario']}", issue=0, attempt=1,
                           method="grid", n_jobs=1, seed=task["salt"], study_id=task["task_id"],
-                          cv=opt.CPCVConfig(10, 2), wfo=opt.WFOConfig(),
+                          cv=opt.CPCVConfig(10, 2), wfo=opt.WFOConfig(), cost=CostModel(),
                           ledger_dir=work / "ledger", studies_dir=work / "studies")
     t_study = time.perf_counter() - t0
     # SyntheticEvaluator has no cost model: pass a neutral CostModel so the cost-stress gate runs
@@ -613,8 +615,8 @@ def _run_synthetic(task: dict[str, Any], work: Path) -> dict[str, Any]:
     ei = np.searchsorted(dd, o.trades["entry_ts"].dt.date().to_numpy().astype("datetime64[D]"))
     xi = np.searchsorted(dd, o.trades["exit_ts"].dt.date().to_numpy().astype("datetime64[D]"))
     tr = o.trades.with_columns(pl.Series("ret", g[xi] / g[ei] - 1.0))
-    rep = gates.evaluate_gates(study, ev, periods_per_year=260.0, base_cost=CostModel(), n_boot=2000,
-                               seed=task["salt"], selected_trades=tr, ledger_dir=work / "ledger",
+    rep = gates.evaluate_gates(study, ev, periods_per_year=260.0, base_cost=CostModel(),
+                               selected_trades=tr, ledger_dir=work / "ledger",
                                holdout_days=260)  # pseudo-holdout: 1 y after SPLIT_CAL_END, not the manifest
     sel = study.selected_params
     return {**_summarise_report(rep), "selected_params": sel,

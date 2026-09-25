@@ -28,7 +28,7 @@ def _study(ev, space, tmp_path, sid, **kw):
 
 
 def _space2(constraint=None):
-    return opt.SearchSpace([opt.IntParam("a", 0, 10), opt.IntParam("b", 0, 10)], constraint=constraint)
+    return opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2), opt.IntParam("b", 0, 10, plateau_step=2)], constraint=constraint)
 
 
 def _no_five(p):
@@ -44,7 +44,7 @@ PLATEAU_EV = SyntheticEvaluator(
 
 # --------------------------------------------------------------------------- search space
 def test_search_space_grid_and_units():
-    sp = opt.SearchSpace([opt.IntParam("n", 5, 20, 5), opt.FloatParam("x", 0.5, 1.5, 0.25),
+    sp = opt.SearchSpace([opt.IntParam("n", 5, 20, 5, plateau_scale="relative"), opt.FloatParam("x", 0.5, 1.5, 0.25, plateau_scale="relative"),
                           opt.CategoricalParam("mode", ["a", "b"])])
     g = sp.grid()
     assert len(g) == sp.grid_size() == 4 * 5 * 2
@@ -53,11 +53,13 @@ def test_search_space_grid_and_units():
     U = sp.unit_coords([{"n": 20, "x": 1.0, "mode": "b"}])
     np.testing.assert_allclose(U, [[1.0, 0.5, 1.0]])
     assert sp.is_discrete
-    assert not opt.SearchSpace([opt.FloatParam("x", 0, 1)]).is_discrete
+    assert not opt.SearchSpace([opt.FloatParam("x", 0, 1, plateau_step=0.2)]).is_discrete
     with pytest.raises(ValueError):
-        opt.SearchSpace([opt.FloatParam("x", 0, 1)]).grid()
+        opt.SearchSpace([opt.FloatParam("x", 0, 1, plateau_step=0.2)]).grid()
     js = sp.to_json()
-    assert js["params"][0] == {"name": "n", "kind": "int", "low": 5, "high": 20, "step": 5}
+    assert js["params"][0] == {"name": "n", "kind": "int", "low": 5, "high": 20, "step": 5, "plateau_scale": "relative"}
+    assert js["params"][1]["plateau_scale"] == "relative" and "plateau_scale" not in js["params"][2]
+    assert opt.space_from_json(js).to_json() == js
 
 
 # --------------------------------------------------------------------------- logging
@@ -93,7 +95,7 @@ def test_every_trial_logged_including_invalid_and_error(tmp_path):
 def test_low_trades_status_and_never_selected(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, trades_per_year=5,
                             bumps=({"center": {"a": 5}, "height": 2.0, "width": 0.2},), rho=0.9)
-    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-low", min_trades=1000, wfo=None)
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "s-low", min_trades=1000, wfo=None)
     assert set(res.trials["status"]) == {"low_trades"}
     assert res.trials["m_objective"].is_infinite().all()
     assert res.selected_params == {} and res.selection["status"] == "no_eligible"
@@ -122,7 +124,7 @@ class _BoomEvaluator:
 
 def test_aborted_study_still_logs_trials(tmp_path):
     with pytest.raises(_Abort):
-        _study(_BoomEvaluator(), opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-abort",
+        _study(_BoomEvaluator(), opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "s-abort",
                checkpoint_every=2)
     s = ledger.studies(tmp_path / "ledger")["s-abort"]
     assert s["status"] == "aborted" and s["n_trials"] == 3
@@ -134,15 +136,15 @@ def test_requires_refit_and_grid_budget(tmp_path):
         requires_refit = True
 
     with pytest.raises(NotImplementedError):
-        _study(ML(bounds={"a": (0, 1)}), opt.SearchSpace([opt.IntParam("a", 0, 1)]), tmp_path, "s-ml")
-    big = opt.SearchSpace([opt.IntParam(n, 0, 1) for n in "abcd"])
+        _study(ML(bounds={"a": (0, 1)}), opt.SearchSpace([opt.IntParam("a", 0, 1, plateau_step=0.2)]), tmp_path, "s-ml")
+    big = opt.SearchSpace([opt.IntParam(n, 0, 1, plateau_step=0.2) for n in "abcd"])
     with pytest.raises(ValueError, match="<= 3"):
         _study(SyntheticEvaluator(bounds={"a": (0, 1)}), big, tmp_path, "s-big", method="grid")
     # B3: the default ("auto") for > 3 params is Sobol, which needs a trial budget
     with pytest.raises(ValueError, match="'sobol' needs n_trials"):
         _study(SyntheticEvaluator(bounds={"a": (0, 1)}), big, tmp_path, "s-big2")
     with pytest.raises(ValueError, match="book"):
-        _study(SyntheticEvaluator(bounds={"a": (0, 1)}, book="B3"), opt.SearchSpace([opt.IntParam("a", 0, 1)]),
+        _study(SyntheticEvaluator(bounds={"a": (0, 1)}, book="B3"), opt.SearchSpace([opt.IntParam("a", 0, 1, plateau_step=0.2)]),
                tmp_path, "s-book")
 
 
@@ -167,7 +169,7 @@ def test_grid_determinism_across_n_jobs(tmp_path):
 def test_tpe_determinism_across_n_jobs_and_resume(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10), "x": (0.0, 1.0)}, rho=0.8,
                             bumps=({"center": {"a": 3, "x": 0.3}, "height": 1.5, "width": 0.2},))
-    sp = opt.SearchSpace([opt.IntParam("a", 0, 10), opt.FloatParam("x", 0.0, 1.0)],
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2), opt.FloatParam("x", 0.0, 1.0, plateau_step=0.2)],
                          constraint=lambda p: not (p["a"] == 9 and p["x"] > 0.5))
     r1 = _study(ev, sp, tmp_path, "t1", method="tpe", n_trials=40, seed=7, n_jobs=1)
     r3 = _study(ev, sp, tmp_path, "t3", method="tpe", n_trials=40, seed=7, n_jobs=3)
@@ -185,7 +187,7 @@ def test_tpe_determinism_across_n_jobs_and_resume(tmp_path):
 def test_tpe_rdb_storage(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.8)
     url = f"sqlite:///{tmp_path / 'optuna.db'}"
-    r = _study(ev, opt.SearchSpace([opt.FloatParam("a", 0, 10)]), tmp_path, "t-rdb", method="tpe",
+    r = _study(ev, opt.SearchSpace([opt.FloatParam("a", 0, 10, plateau_step=2)]), tmp_path, "t-rdb", method="tpe",
                n_trials=12, storage=url)
     import optuna
     st = optuna.load_study(study_name="t-rdb", storage=url)
@@ -237,7 +239,7 @@ def test_cpcv_purge_and_embargo_respected():
 def test_cpcv_paths_in_study(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.8, hold_days=4,
                             bumps=({"center": {"a": 6}, "height": 1.5, "width": 0.2},))
-    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "c1",
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "c1",
                  cv=opt.CPCVConfig(n_groups=6, k_test=2))
     p = res.cpcv_paths
     phi = math.comb(5, 1)
@@ -256,7 +258,7 @@ def test_cpcv_paths_in_study(tmp_path):
 def test_plateau_select_prefers_broad_region_over_spike():
     # 1-D: a spike of 3.0 at index 2, a plateau of 1.5 at 6..10
     s = np.array([0, 0, 3.0, 0, 0, 0, 1.5, 1.5, 1.5, 1.5, 1.5, 0, 0])
-    sp = opt.SearchSpace([opt.IntParam("a", 0, 12)])
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 12, plateau_step=2.4)])
     nb = opt.neighbourhoods(sp, [{"a": i} for i in range(13)], opt.PlateauConfig(neighbourhood="grid"))
     sel = opt.plateau_select(s, nb)
     assert sel["raw_index"] == 2
@@ -267,7 +269,7 @@ def test_plateau_select_prefers_broad_region_over_spike():
 
 def test_plateau_rejects_hole_surrounded_by_good_neighbours():
     s = np.array([0.0, 1.0, 1.0, -2.0, 1.0, 1.0, 0.0])
-    sp = opt.SearchSpace([opt.IntParam("a", 0, 6)])
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 6, plateau_step=1.2)])
     nb = opt.neighbourhoods(sp, [{"a": i} for i in range(7)], opt.PlateauConfig(neighbourhood="grid", radius=2))
     assert opt.plateau_select(s, nb)["index"] != 3
 
@@ -285,7 +287,7 @@ def test_study_selects_plateau_not_spike(tmp_path):
 
 
 def test_knn_neighbourhood():
-    sp = opt.SearchSpace([opt.FloatParam("x", 0, 1), opt.CategoricalParam("m", ["p", "q"])])
+    sp = opt.SearchSpace([opt.FloatParam("x", 0, 1, plateau_step=0.2), opt.CategoricalParam("m", ["p", "q"])])
     pts = [{"x": v, "m": m} for m in "pq" for v in (0.0, 0.1, 0.2, 0.9)]
     nb = opt.neighbourhoods(sp, pts, opt.PlateauConfig(neighbourhood="knn", knn=2))
     assert nb.sum(axis=1).tolist() == [2] * 8
@@ -302,7 +304,7 @@ def _wfo_inputs(M=9, T=1560, seed=1):
     R = 0.004 * rng.standard_normal((T, M)) + mu
     returns = pl.DataFrame({"date": dates, **{f"t{j}": R[:, j] for j in range(M)}}).with_columns(pl.col("date").cast(pl.Date))
     trials = pl.DataFrame({"trial_id": np.arange(M), "status": ["ok"] * M, "param_a": np.arange(M)})
-    return returns, trials, opt.SearchSpace([opt.IntParam("a", 0, M - 1)])
+    return returns, trials, opt.SearchSpace([opt.IntParam("a", 0, M - 1, plateau_step=1)])
 
 
 def test_walk_forward_causality_poisoning_future():
@@ -349,7 +351,7 @@ def test_wfo_parameter_drift_on_regime_change(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.9,
                             bumps=({"center": {"a": 2}, "height": 2.0, "width": 0.1},),
                             regimes=({"from": 0.6, "bumps": ({"center": {"a": 8}, "height": 2.0, "width": 0.1},)},))
-    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "w1",
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "w1",
                  wfo=opt.WFOConfig(window="rolling", window_length="1y", min_train="1y"))
     p = res.wfo_params
     assert p["param_a"][0] in (1, 2, 3) and p["param_a"][-1] in (7, 8, 9)
@@ -365,7 +367,7 @@ def test_benchmark_200_trial_grid_eurusd_h1(tmp_path):
 
     warnings.filterwarnings("ignore")
     ev = RuleEvaluator(SmaCross, symbol="EURUSD", timeframe="H1", start="2016-05-02", end="2025-05-14")
-    sp = opt.SearchSpace([opt.IntParam("fast", 5, 50, 5), opt.IntParam("slow", 60, 250, 10)])
+    sp = opt.SearchSpace([opt.IntParam("fast", 5, 50, 5, plateau_scale="relative"), opt.IntParam("slow", 60, 250, 10, plateau_scale="relative")])
     t0 = time.perf_counter()
     res = opt.run_study(ev, sp, book="FBS", system="sma_bench", issue=999, attempt=1, study_id="bench-sma",
                         n_jobs="auto", cv=opt.CPCVConfig(10, 2), wfo=opt.WFOConfig(), min_trades=100,
@@ -418,7 +420,7 @@ _B3_BIAS = 0.08    # paired mean (candidate set − full grid) CPCV path-median 
 
 
 def _null_bias(tmp_path, methods, n_seeds, step=0.1, n_sobol=40):
-    space = opt.SearchSpace([opt.FloatParam("x", 0.0, 1.0, step), opt.FloatParam("y", 0.0, 1.0, step)])
+    space = opt.SearchSpace([opt.FloatParam("x", 0.0, 1.0, step, plateau_step=0.2), opt.FloatParam("y", 0.0, 1.0, step, plateau_step=0.2)])
     out = {m: [] for m in methods}
     for s in range(n_seeds):
         ev = _SmoothNull(seed=s)
@@ -447,9 +449,9 @@ def test_tpe_candidate_set_bias_is_detected_by_the_same_check(tmp_path):
 
 
 def test_candidate_set_sobol_mapping_distinct_and_prefix_stable():
-    sp = opt.SearchSpace([opt.IntParam("n", 5, 50, 5), opt.IntParam("k", 2, 200, log=True),
-                          opt.FloatParam("x", 0.1, 10.0, log=True), opt.FloatParam("z", -1.0, 1.0),
-                          opt.FloatParam("s", 0.0, 1.0, 0.25), opt.CategoricalParam("m", ["a", "b", "c"])])
+    sp = opt.SearchSpace([opt.IntParam("n", 5, 50, 5, plateau_scale="relative"), opt.IntParam("k", 2, 200, log=True, plateau_scale="relative"),
+                          opt.FloatParam("x", 0.1, 10.0, log=True, plateau_scale="relative"), opt.FloatParam("z", -1.0, 1.0, plateau_step=0.4),
+                          opt.FloatParam("s", 0.0, 1.0, 0.25, plateau_step=0.2), opt.CategoricalParam("m", ["a", "b", "c"])])
     a = opt.candidate_set(sp, 200, method="sobol", seed=3)
     assert len(a) == 200 and len({opt._pjson(p) for p in a}) == 200
     assert a == opt.candidate_set(sp, 200, method="sobol", seed=3)              # seeded
@@ -464,7 +466,7 @@ def test_candidate_set_sobol_mapping_distinct_and_prefix_stable():
     assert {p["n"] for p in a} == set(range(5, 51, 5)) and {p["m"] for p in a} == {"a", "b", "c"}
     assert 0.5 < float(np.median([p["x"] for p in a])) < 2.0
     # a discrete space smaller than n: every configuration once, with a warning
-    small = opt.SearchSpace([opt.IntParam("a", 0, 3), opt.CategoricalParam("b", ["u", "v"])])
+    small = opt.SearchSpace([opt.IntParam("a", 0, 3, plateau_step=0.6), opt.CategoricalParam("b", ["u", "v"])])
     with pytest.warns(UserWarning, match="only 8 distinct"):
         c = opt.candidate_set(small, 20, method="sobol", seed=0, max_draws=4096)
     assert len(c) == 8
@@ -473,7 +475,7 @@ def test_candidate_set_sobol_mapping_distinct_and_prefix_stable():
 
 
 def _space4(constraint=None):
-    return opt.SearchSpace([opt.IntParam("a", 0, 10), opt.IntParam("b", 0, 10), opt.FloatParam("x", 0.0, 1.0),
+    return opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2), opt.IntParam("b", 0, 10, plateau_step=2), opt.FloatParam("x", 0.0, 1.0, plateau_step=0.2),
                             opt.CategoricalParam("m", ["p", "q"])], constraint=constraint)
 
 
@@ -522,12 +524,12 @@ def test_sobol_resume_extends_the_same_candidate_set(tmp_path):
 def test_embargo_cap_is_recorded(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.8, hold_days=80, trades_per_year=20)
     with pytest.warns(UserWarning, match="capped"):
-        res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "cap", wfo=None)
+        res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "cap", wfo=None)
     cap = (ev.n_days // 10) // 4
     assert res.meta["embargo_capped"] is True and res.meta["embargo_days_uncapped"] == 80
     assert res.meta["cpcv"]["embargo_days"] == cap and res.meta["cpcv"]["embargo_cap"] == cap
     assert ledger.studies(tmp_path / "ledger")["cap"]["embargo_capped"] is True
-    res2 = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "nocap", wfo=None,
+    res2 = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "nocap", wfo=None,
                   cv=opt.CPCVConfig(n_groups=4, k_test=1))
     assert res2.meta["embargo_capped"] is False and res2.meta["cpcv"]["embargo_days"] == 80
 
@@ -542,7 +544,7 @@ def test_wfo_oos_n_trades_are_the_active_configs_entries(tmp_path):
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.9, hold_days=4, trades_per_year=60,
                             bumps=({"center": {"a": 2}, "height": 2.0, "width": 0.1},),
                             regimes=({"from": 0.6, "bumps": ({"center": {"a": 8}, "height": 2.0, "width": 0.1},)},))
-    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "wn",
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "wn",
                  wfo=opt.WFOConfig(window="rolling", window_length="1y", min_train="1y"))
     w = res.wfo_oos
     assert w["n_trades"].dtype == pl.Int64 and w["n_trades"].null_count() == 0
@@ -555,11 +557,11 @@ def test_wfo_oos_n_trades_are_the_active_configs_entries(tmp_path):
     assert got == expected and sum(got) > 0
     assert res.wfo_params["param_a"].n_unique() > 1                 # the active config really switches
     # no entry timestamps in the evaluator's trades -> null, not a made-up zero
-    res2 = _study(_NoEntryTs(bounds={"a": (0, 10)}, rho=0.9), opt.SearchSpace([opt.IntParam("a", 0, 10)]),
+    res2 = _study(_NoEntryTs(bounds={"a": (0, 10)}, rho=0.9), opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]),
                   tmp_path, "wn2")
     assert res2.wfo_oos.height and res2.wfo_oos["n_trades"].null_count() == res2.wfo_oos.height
     # resume restores the entry counts from the opt_aux sidecar
-    res3 = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "wn", resume=True,
+    res3 = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "wn", resume=True,
                   wfo=opt.WFOConfig(window="rolling", window_length="1y", min_train="1y"))
     assert res3.wfo_oos.equals(res.wfo_oos)
 
@@ -579,7 +581,7 @@ def test_worker_processes_start_with_thread_caps(tmp_path):
     assert {i["polars_threads"] for i in infos} == {1}
     assert all(i["POLARS_MAX_THREADS"] == "1" and i["NUMBA_NUM_THREADS"] == "1" for i in infos)
     assert {k: os.environ.get(k) for k in opt.WORKER_THREAD_ENV} == before
-    res = _study(SyntheticEvaluator(bounds={"a": (0, 10)}), opt.SearchSpace([opt.IntParam("a", 0, 10)]),
+    res = _study(SyntheticEvaluator(bounds={"a": (0, 10)}), opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]),
                  tmp_path, "thr", n_jobs=2, wfo=None)
     assert res.meta["mp_start_method"] == "spawn" and res.meta["worker_threads"]["polars_threads"] == 1
 
@@ -626,7 +628,7 @@ def test_resume_cannot_change_method_seed_space_or_identity(tmp_path):
 def test_legacy_trials_without_source_take_the_ledger_method(tmp_path):
     """N1: trials recorded before sources existed get the method of the ledger's created row."""
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.8)
-    sp = opt.SearchSpace([opt.FloatParam("a", 0.0, 10.0)])
+    sp = opt.SearchSpace([opt.FloatParam("a", 0.0, 10.0, plateau_step=2)])
     _study(ev, sp, tmp_path, "leg", method="tpe", n_trials=8, wfo=None)
     d = tmp_path / "studies" / "leg"
     for f in d.glob("trials-*.parquet"):
@@ -654,7 +656,8 @@ def test_sobol_resume_logs_n_trials_change_and_keeps_flag_false(tmp_path):
 def test_plateau_radius_is_pre_registered_in_the_ledger(tmp_path):
     """N3: run_study(plateau_radius=) is stored in study_created and meta; floor 0.10; names checked."""
     ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10)}, rho=0.8)
-    sp = opt.SearchSpace([opt.IntParam("a", 0, 3), opt.IntParam("b", 0, 3)])
+    sp = opt.SearchSpace([opt.IntParam("a", 1, 4, plateau_scale="relative"),
+                          opt.IntParam("b", 1, 4, plateau_scale="relative")])
     r = _study(ev, sp, tmp_path, "rad", wfo=None, plateau_radius={"b": 0.3, "a": 0.25})
     row = ledger.created_row("rad", ledger_dir=tmp_path / "ledger")
     assert row["plateau_radius"] == {"a": 0.25, "b": 0.3} == r.meta["plateau_radius"]
@@ -665,6 +668,10 @@ def test_plateau_radius_is_pre_registered_in_the_ledger(tmp_path):
         _study(ev, sp, tmp_path, "rad1", wfo=None, plateau_radius=1e-6)
     with pytest.raises(ValueError, match="unknown parameter"):
         _study(ev, sp, tmp_path, "rad2", wfo=None, plateau_radius={"zz": 0.2})
+    # R2-1: a per-param radius cannot name a param with an absolute plateau_step (it would not apply)
+    sp_abs = opt.SearchSpace([opt.IntParam("a", 0, 3, plateau_step=1), opt.IntParam("b", 1, 4, plateau_scale="relative")])
+    with pytest.raises(ValueError, match="absolute plateau_step"):
+        _study(ev, sp_abs, tmp_path, "rad3", wfo=None, plateau_radius={"a": 0.3})
     # resume without a radius takes the ledger's; the same radius is accepted
     _study(ev, sp, tmp_path, "rad", wfo=None, resume=True)
     _study(ev, sp, tmp_path, "rad", wfo=None, resume=True, plateau_radius={"a": 0.25, "b": 0.3})
@@ -681,13 +688,13 @@ class _DataBroken(SyntheticEvaluator):
 def test_uniform_first_batch_errors_abort_the_study(tmp_path):
     ev = _DataBroken(bounds={"a": (0, 10)})
     with pytest.raises(opt.StudyError, match="same error"):
-        _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-uni", wfo=None)
+        _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "s-uni", wfo=None)
     s = ledger.studies(tmp_path / "ledger")["s-uni"]
     assert s["status"] == "aborted" and s["n_trials"] == 2 and s["n_error"] == 2   # max(n_jobs, 2)
     assert ledger.load_trials("s-uni", tmp_path / "studies").height == 2
     # opt-out grinds through the whole grid (then fails: nothing evaluated)
     with pytest.raises(opt.StudyError, match="no configuration could be evaluated"):
-        _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-uni2", wfo=None,
+        _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "s-uni2", wfo=None,
                abort_on_uniform_errors=False)
     assert ledger.studies(tmp_path / "ledger")["s-uni2"]["n_trials"] == 11
 
@@ -695,6 +702,6 @@ def test_uniform_first_batch_errors_abort_the_study(tmp_path):
 def test_non_uniform_first_batch_errors_do_not_abort(tmp_path):
     # first two trials fail with *different* messages (parameter-specific) → no abort
     ev = SyntheticEvaluator(bounds={"a": (0, 10)}, error_when=({"a": 0}, {"a": 1}), rho=0.9)
-    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-mixed", wfo=None)
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "s-mixed", wfo=None)
     assert res.meta["n_error"] == 2 and res.meta["n_ok"] == 9
     assert res.meta["eval_start_effective"] is None and res.meta["data_gaps"] == []

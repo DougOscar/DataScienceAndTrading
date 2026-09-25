@@ -10,6 +10,7 @@ study's identity, prior trials, plateau radius and candidate-set flag from its l
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import tempfile
@@ -30,19 +31,53 @@ from quantlab.costs import CostModel, load_instrument, pip_points
 from quantlab.evaluators import SyntheticEvaluator
 
 PPY = 260.0
-GRID_SPACE = opt.SearchSpace([opt.IntParam("a", 1, 5), opt.IntParam("b", 1, 5)]).to_json()
+GRID_SPACE = opt.SearchSpace([opt.IntParam("a", 1, 5, plateau_scale="relative"), opt.IntParam("b", 1, 5, plateau_scale="relative")]).to_json()
+
+
+def write_store(study: StudyResult, studies_dir: Path) -> Path:
+    """Write ``study``'s trials + returns as its trial store (the parquet parts ``opt.run_study``
+    writes through ``ledger.TrialRecorder``), unless one exists — the gates load and check the
+    in-memory study against it (red-team R2-4)."""
+    d = Path(studies_dir) / study.study_id
+    if list(d.glob("trials-*.parquet")):
+        return Path(studies_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    t = study.trials
+    pcols = [c for c in t.columns if c.startswith("param_")]
+    rows = []
+    for r in t.iter_rows(named=True):
+        row = {"trial_id": int(r["trial_id"]), "status": r.get("status", "ok"),
+               "params": json.dumps({c[6:]: r[c] for c in pcols}, sort_keys=True, default=str)}
+        row.update({c: r[c] for c in t.columns if c.startswith("m_")})
+        if "source" in t.columns:
+            row["source"] = r["source"]
+        rows.append(row)
+    pl.DataFrame(rows, infer_schema_length=None).write_parquet(d / "trials-00000.parquet")
+    cols = [c for c in study.returns.columns if c != "date"]
+    if cols:
+        long = pl.concat([study.returns.select(pl.col("date").cast(pl.Date), pl.col(c).cast(pl.Float64).alias("ret"))
+                          .drop_nulls("ret").with_columns(pl.lit(c).alias("trial")) for c in cols])
+        long.write_parquet(d / "returns-00000.parquet")
+    return Path(studies_dir)
+
+
+FAKE_DESC = {"evaluator": "FakeEvaluator"}
 
 
 def register(study: StudyResult, ledger_dir: Path | None = None, **over) -> Path:
     """Create the study's ``study_created`` ledger row from its meta (identity, method, space,
-    candidate-set flag, radius) in ``ledger_dir`` (default: a fresh temporary ledger)."""
+    candidate-set flag, radius) in ``ledger_dir`` (default: a fresh temporary ledger), with the
+    evaluator description (default: FakeEvaluator's) and a trial store under ``<ledger_dir>/studies``
+    (recorded in the row) — as ``opt.run_study`` would (R2-4)."""
     ld = Path(ledger_dir) if ledger_dir is not None else Path(tempfile.mkdtemp(prefix="ql_gates_ledger_"))
     m = study.meta or {}
     idm = re.search(r"-(\d+)-a(\d+)$", study.study_id)
+    sd = write_store(study, ld / "studies")
     row = dict(study_id=study.study_id, book=m.get("book", "FBS"), system=m.get("system", "toy"),
                issue=m.get("issue", int(idm.group(1)) if idm else 99),
                attempt=m.get("attempt", int(idm.group(2)) if idm else 1),
-               dev_window=["2016-05-02", "2025-05-14"], cost_model_version="fbs-test", cv_scheme="CPCV(n=6,k=2)")
+               dev_window=["2016-05-02", "2025-05-14"], cost_model_version="fbs-test", cv_scheme="CPCV(n=6,k=2)",
+               evaluator=FAKE_DESC, studies_dir=str(sd.resolve()))
     for k_meta, k_led in (("method", "method"), ("space", "search_space"), ("seed", "seed"),
                           ("plateau_radius", "plateau_radius"),
                           ("candidate_set_data_dependent", "candidate_set_data_dependent")):
@@ -189,9 +224,11 @@ def _mech_ok(study, evaluator):
 def run(study, trades, evaluator="fake", **kw):
     ev = FakeEvaluator(study, trades) if evaluator == "fake" else evaluator
     kw.setdefault("mechanism_check", _mech_ok)
-    kw.setdefault("n_boot", 400)
     if "ledger_dir" not in kw:
         kw["ledger_dir"] = register(study)
+    if "studies_dir" not in kw and "studies_dir" not in (ledger.created_row(study.study_id, ledger_dir=kw["ledger_dir"])
+                                                           or {}):
+        kw["studies_dir"] = write_store(study, Path(kw["ledger_dir"]) / "studies")
     return G.evaluate_gates(study, ev, periods_per_year=PPY, selected_trades=trades, **kw), ev
 
 
@@ -240,8 +277,12 @@ def test_all_pass(good):
     md = rep.to_markdown()
     assert "| Deflated Sharpe probability |" in md and "Verdict: **PASS**" in md
     assert "Pre-registered holdout pass band" in md and "N used = raw 25 trials" in md
-    assert "1 pip slippage on all market and stop fills" in rep.row("cost_stress_sharpe").interpretation
-    assert "1 pip = 10 points for EURUSD" in rep.row("cost_stress_sharpe").interpretation
+    cs = rep.row("cost_stress_sharpe").interpretation
+    assert "1 stress unit of slippage" in cs and "on all market and stop fills" in cs
+    # minor (cost-stress text): the real slippage in points and as a multiple of the median spread
+    assert "slippage 10 points per fill for EURUSD" in cs and "× the median dev spread of" in cs
+    d = rep.diagnostics["cost_stress_pip_points"]
+    assert d["added_slippage_points"] == 10 and 0 < d["slippage_x_median_spread"] < 5
     assert hb["trades_source"] == "wfo_oos.n_trades" and hb["trades_joint"] is True
     assert rep.effective_trials["n_trials_study"] == 25 and rep.effective_trials["n_trials_prior"] == 0
     assert "pbo" in rep.diagnostics["pbo_detail"]
@@ -340,7 +381,7 @@ def test_cscv_gate_not_gamed_by_bleeder_padding():
     study = StudyResult("fbs-0098-a1", ("a",), trials, returns, {"a": j}, {"trial_id": j},
                         pl.DataFrame(schema={"date": pl.Date, "path_id": pl.Int64, "ret": pl.Float64}),
                         pl.DataFrame(), pl.DataFrame(), {"method": "grid"})
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=register(study))
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, ledger_dir=register(study))
     assert rep.row("cscv_oos_loss").status == "FAIL"
     assert rep.diagnostics["pbo_detail"]["pbo"] < 0.30
 
@@ -451,7 +492,7 @@ def test_cost_stress_pip_conversion_from_spec(good):
         warnings.simplefilter("ignore")
         rep, _ = run(study, trades, evaluator=ev)
         gold = pip_points(load_instrument("XAUUSD", book="FBS"))
-    assert f"1 pip = {gold:g} points for XAUUSD" in rep.row("cost_stress_sharpe").interpretation
+    assert f"slippage {gold:g} points per fill for XAUUSD" in rep.row("cost_stress_sharpe").interpretation
     assert rep.diagnostics["cost_stress_pip_points"]["pip_points"] == gold
     ev = FakeEvaluator(study, trades, spec=None)
     ev.is_synthetic = True
@@ -474,7 +515,7 @@ def test_trade_criterion_unavailable_when_wfo_counts_missing(good):
 def test_no_evaluator_skips_cost_stress_and_blocks_pass(good):
     study, trades = good
     rep = G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades,
-                           mechanism_check=_mech_ok, n_boot=300, ledger_dir=register(study))
+                           mechanism_check=_mech_ok, ledger_dir=register(study))
     assert rep.row("cost_stress_sharpe").status == "SKIPPED"
     assert rep.verdict == "INCOMPLETE"
 
@@ -533,7 +574,7 @@ def test_plateau_narrow_bump_fails_at_every_grid_resolution(step):
     study = _bump_study(step)
     info = G.plateau_score(study, PPY)
     assert info["plateau_score"] < 0.6, info
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=register(study))
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, ledger_dir=register(study))
     assert rep.row("plateau").status == "FAIL" and "Matrix-based fallback" in rep.row("plateau").interpretation
     assert rep.diagnostics["plateau_optimizer"]["score"] == 1.0
 
@@ -564,7 +605,7 @@ def test_plateau_2d_spike_with_generous_optimizer_config():
                         {"a": 5, "b": 5}, {"trial_id": sel, "plateau_score": 1.0}, pl.DataFrame(), pl.DataFrame(),
                         pl.DataFrame(), {"method": "grid"})
     assert G.plateau_score(study, PPY)["plateau_score"] < 0.6
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, n_boot=200, ledger_dir=register(study))
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, ledger_dir=register(study))
     assert rep.row("plateau").status == "FAIL"
 
 
@@ -628,7 +669,7 @@ def test_trade_count_fails_with_too_few_noisy_trades():
 
 def test_trade_count_skipped_without_trades(good):
     study, _ = good
-    rep = G.evaluate_gates(study, None, periods_per_year=PPY, mechanism_check=_mech_ok, n_boot=300,
+    rep = G.evaluate_gates(study, None, periods_per_year=PPY, mechanism_check=_mech_ok, 
                            ledger_dir=register(study))
     row = rep.row("trade_count")
     assert row.status == "SKIPPED" and "No per-trade data" in row.interpretation
@@ -689,6 +730,7 @@ def test_holdout_band_reports_power_and_decisiveness():
 def _create(tmp, sid, attempt, system="toy", issue=99, n_trials=None, **extra):
     extra.setdefault("search_space", GRID_SPACE)
     extra.setdefault("method", "grid")
+    extra.setdefault("evaluator", FAKE_DESC)
     ledger.create_study(ledger_dir=tmp, study_id=sid, book="FBS", system=system, issue=issue, attempt=attempt,
                         dev_window=["2016-05-02", "2025-05-14"], cost_model_version="fbs-test",
                         cv_scheme="CPCV(n=6,k=2)", **extra)
@@ -708,19 +750,20 @@ def test_prior_trials_read_from_ledger_and_raise_when_missing(tmp_path, good):
     tmp2 = tmp_path / "l2"
     _create(tmp2, "fbs-0099-a1", 1, n_trials=400)
     _create(tmp2, "fbs-0099-a2", 2)
-    _create(tmp2, "fbs-0099-a3", 3, n_trials=9999)              # created later: must not count
+    _create(tmp2, "fbs-0099-a3", 3, n_trials=9999)              # created later: counts too (R2 minor N2b)
     rep, _ = run(a2, trades, ledger_dir=tmp2)
     et = rep.effective_trials
-    assert et["n_trials_prior"] == 400 and et["n_trials"] == 425 and "fbs-0099-a1" in et["prior_source"]
+    assert et["n_trials_prior"] == 400 + 9999 and et["n_trials"] == 25 + 400 + 9999
+    assert "fbs-0099-a1" in et["prior_source"] and "fbs-0099-a3" in et["prior_source"]
     # N2: explicit prior may only raise N
-    assert run(a2, trades, ledger_dir=tmp2, prior_trials=1000)[0].effective_trials["n_trials_prior"] == 1000
+    assert run(a2, trades, ledger_dir=tmp2, prior_trials=20000)[0].effective_trials["n_trials_prior"] == 20000
     with pytest.raises(G.GateError, match="below the ledger"):
-        run(a2, trades, ledger_dir=tmp2, prior_trials=10)
+        run(a2, trades, ledger_dir=tmp2, prior_trials=1000)
     with pytest.raises(TypeError, match="prior_trials"):
         run(a2, trades, ledger_dir=tmp2, prior_effective_trials=7.0)
     # identity comes from the ledger row when meta lacks it
     bare = replace(study, study_id="fbs-0099-a2", meta={"n_trials": 25, "method": "grid", "space": GRID_SPACE})
-    assert run(bare, trades, ledger_dir=tmp2)[0].effective_trials["n_trials_prior"] == 400
+    assert run(bare, trades, ledger_dir=tmp2)[0].effective_trials["n_trials_prior"] == 400 + 9999
 
 
 def test_gates_require_the_ledger_row_and_matching_meta(tmp_path, good):
@@ -739,7 +782,7 @@ def test_gates_require_the_ledger_row_and_matching_meta(tmp_path, good):
     with pytest.raises(G.GateError, match="disagrees with the ledger"):
         run(relabel, trades, ledger_dir=tmp_path)
     for bad in ({"issue": 8}, {"book": "B3"}, {"method": "sobol"}, {"plateau_radius": 0.3},
-                {"space": opt.SearchSpace([opt.IntParam("a", 1, 9), opt.IntParam("b", 1, 5)]).to_json()}):
+                {"space": opt.SearchSpace([opt.IntParam("a", 1, 9, plateau_scale="relative"), opt.IntParam("b", 1, 5, plateau_scale="relative")]).to_json()}):
         with pytest.raises(G.GateError, match="disagrees"):
             run(replace(s3, meta={**s3.meta, **bad}), trades, ledger_dir=tmp_path)
 
@@ -816,7 +859,7 @@ def test_log_gates_counts_own_trials_and_flags_reruns(tmp_path, good):
     assert state["holdout_band"]["sharpe_lo"] == pytest.approx(rep.holdout_band["sharpe_lo"])
     # N4: the judge-run plateau evaluations are logged (count + params + Sharpe) and not in N
     pl_log = state["plateau"]
-    assert pl_log["kind"] == "judge-run" and pl_log["n_evaluations"] == 9 and len(pl_log["points"]) == 8
+    assert pl_log["kind"] == "judge-run" and pl_log["n_evaluations"] == 17 and len(pl_log["points"]) == 16
     assert all({"params", "sharpe", "status", "pass"} <= set(q) for q in pl_log["points"])
     assert state["n_trials_dsr"] == 25 and state["ledger_context"]["system"] == "toy"
     # attempt 2: prior = 25 (a1's own); after logging, attempt 3's prior = 25 + 25, not 25 + 50
@@ -854,10 +897,10 @@ def test_zero_edge_fails_95pct_and_planted_edge_passes():
     fails = 0
     for seed in range(n):
         study, trades = make_study(seed=1000 + seed, peak_sr=0.0, slope=0.0, oos_sr=0.0, wfo_sr=0.0)
-        rep, _ = run(_as_argmax(study), trades, n_boot=200)
+        rep, _ = run(_as_argmax(study), trades)
         fails += rep.verdict == "FAIL"
     assert fails / n >= 0.95
-    passes = sum(run(*make_study(seed=2000 + s), n_boot=200)[0].verdict == "PASS" for s in range(10))
+    passes = sum(run(*make_study(seed=2000 + s))[0].verdict == "PASS" for s in range(10))
     assert passes >= 8
 
 
@@ -870,7 +913,7 @@ def _study_run(ev, space, tmp, sid, **kw):
 
 
 def _gate(study, ev, tmp, **kw):
-    return G.evaluate_gates(study, ev, periods_per_year=PPY, n_boot=100, ledger_dir=tmp / "ledger",
+    return G.evaluate_gates(study, ev, periods_per_year=PPY, ledger_dir=tmp / "ledger",
                             mechanism_check=_mech_ok, **kw)
 
 
@@ -880,7 +923,7 @@ def test_judge_plateau_spike_fails_broad_passes_at_every_grid_step(tmp_path, ste
     """N4 regression (red-team p10 surface, SyntheticEvaluator, real run_study): with an evaluator
     the gate perturbs the selected config itself, so the verdict no longer depends on the grid
     step: the 2 %-wide spike FAILs and a broad bump PASSes at steps 1 / 2 / 5 / 10."""
-    sp = opt.SearchSpace([opt.IntParam("a", 0, 100, step)])
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 100, step, plateau_step=20)])
     out = {}
     for width in (0.02, 0.30):
         ev = SyntheticEvaluator(bounds={"a": (0, 100)}, bumps=({"center": {"a": 50}, "height": 2.0, "width": width},),
@@ -897,9 +940,9 @@ def test_judge_plateau_spike_fails_broad_passes_at_every_grid_step(tmp_path, ste
 
 
 def _sobol5():
-    return opt.SearchSpace([opt.IntParam("look", 10, 200), opt.FloatParam("mult", 1.0, 4.0),
-                            opt.IntParam("hold", 1, 20), opt.FloatParam("thr", 0.0, 2.0),
-                            opt.IntParam("slow", 20, 300)])
+    return opt.SearchSpace([opt.IntParam("look", 10, 200, plateau_scale="relative"), opt.FloatParam("mult", 1.0, 4.0, plateau_scale="relative"),
+                            opt.IntParam("hold", 1, 20, plateau_scale="relative"), opt.FloatParam("thr", 0.0, 2.0, plateau_step=0.4),
+                            opt.IntParam("slow", 20, 300, plateau_scale="relative")])
 
 
 def test_judge_plateau_on_d5_sobol_study(tmp_path):
@@ -922,10 +965,11 @@ def test_judge_plateau_on_d5_sobol_study(tmp_path):
         judged = replace(res, selected_params=dict(centre), selection={**res.selection, "trial_id": k})
         rep = _gate(judged, ev, tmp_path)
         pdl = rep.plateau_detail
-        assert pdl["kind"] == "judge-run" and len(pdl["points"]) == 20 and pdl["n_evaluations"] <= 21
+        assert pdl["kind"] == "judge-run" and len(pdl["points"]) == 28 and pdl["n_evaluations"] <= 29   # 5×4 + 8 joint
+        assert sum(q["param"] == "joint" for q in pdl["points"]) == 8
         assert pdl["peak_sharpe"] > 1.5
         got[width] = rep.row("plateau").status
-        fb = G.evaluate_gates(judged, None, periods_per_year=PPY, n_boot=100, ledger_dir=tmp_path / "ledger")
+        fb = G.evaluate_gates(judged, None, periods_per_year=PPY, ledger_dir=tmp_path / "ledger")
         assert fb.row("plateau").status != "PASS" and "Matrix-based fallback" in fb.row("plateau").interpretation
     assert got == {0.02: "FAIL", 0.35: "PASS"}, got
 
@@ -934,7 +978,7 @@ def test_judge_plateau_validity_and_search_bounds(tmp_path):
     """N4 + round 2b: points rejected by space.is_valid or by natural validity (lookback int
     ≥ 1, positive params > 0) fail; points outside the SEARCH bounds are evaluated and reported;
     ints that round back to x move to the next distinct int; score = min over axes."""
-    sp = opt.SearchSpace([opt.IntParam("a", 1, 10), opt.FloatParam("x", 0.0, 1.0)],
+    sp = opt.SearchSpace([opt.IntParam("a", 1, 10, plateau_scale="relative"), opt.FloatParam("x", 0.0, 1.0, plateau_step=0.2)],
                          constraint=lambda p: p["x"] < 0.75)
     ev = SyntheticEvaluator(bounds={"a": (1, 10), "x": (0.0, 1.0)}, base_sharpe=1.5, rho=1.0, seed=2)
     pts = G.plateau_perturbations(sp, {"a": 2, "x": 0.6}, 0.2)
@@ -945,21 +989,26 @@ def test_judge_plateau_validity_and_search_bounds(tmp_path):
     judged = replace(res, selected_params={"a": 2, "x": 0.6},
                      selection={**res.selection, "trial_id": int(res.trials["trial_id"][0])})
     pj = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
-    st = {(q["param"], q["value"]): q["status"] for q in pj["points"]}
+    st = {(q["param"], q["value"]): q["status"] for q in pj["points"] if q["param"] != "joint"}
     assert st[("a", 0)] == "invalid_natural" and st[("x", 0.8)] == "invalid"
-    assert pj["pass_share_by_param"] == {"a": 0.75, "x": 0.75} and pj["plateau_score"] == 0.75
-    assert pj["n_evaluations"] == 7 and pj["outside_search_bounds_points"] == [("a", 0)]   # invalid anyway
+    # joint axis (R2-1): (a, x) = (0, .4) and (0, .8) naturally invalid, (4, .8) rejected by the constraint
+    js = {q["offset"]: (q["value"]["a"], q["value"]["x"], q["status"]) for q in pj["points"] if q["param"] == "joint"}
+    assert js["all -r"] == (0, 0.4, "invalid_natural") and js["all +r"] == (4, 0.8, "invalid")
+    assert js["alt- r"] == (0, 0.8, "invalid_natural") and js["alt+ r"] == (4, 0.4, "ok")
+    assert pj["pass_share_by_param"] == {"a": 0.75, "x": 0.75, "joint": 0.625} and pj["plateau_score"] == 0.625
+    assert pj["n_evaluations"] == 12
+    assert [p for p in pj["outside_search_bounds_points"] if p[0] != "joint"] == [("a", 0)]   # invalid anyway
     # outside the search bounds but naturally valid → evaluated, reported, and the edge is flagged
     pj = G.judge_plateau(replace(judged, selected_params={"a": 10, "x": 0.0}), ev, space=sp, radius=0.2,
                          periods_per_year=PPY)
-    out = {(q["param"], q["value"]) for q in pj["points"] if q["outside_search_bounds"]}
+    out = {(q["param"], q["value"]) for q in pj["points"] if q["outside_search_bounds"] and q["param"] != "joint"}
     assert out == {("a", 11), ("a", 12), ("x", -0.2), ("x", -0.1)}
     assert all(q["status"] == "ok" for q in pj["points"]) and pj["plateau_score"] == 1.0
     assert pj["selected_at_edge"] == ["a", "x"]
 
 
 def _n8_study(tmp, nd, sid):
-    sp = opt.SearchSpace([opt.IntParam("a", 0, 10)] + [opt.IntParam(f"z{i}", 0, 20) for i in range(nd)])
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)] + [opt.IntParam(f"z{i}", 0, 20, plateau_step=4) for i in range(nd)])
     ev0 = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=1.0, seed=5)
     res = _study_run(ev0, sp, tmp, sid, method="sobol", n_trials=8, seed=0, cv=opt.CPCVConfig(4, 1))
     sel = {"a": 5, **{f"z{i}": 10 for i in range(nd)}}
@@ -979,11 +1028,12 @@ def test_plateau_min_over_axes_is_not_lifted_by_irrelevant_params(tmp_path):
                                     rho=1.0, seed=5)
             pj = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
             assert all(pj["pass_share_by_param"][f"z{i}"] == 1.0 for i in range(nd))
-            got[name] = (pj["plateau_score"], pj["pooled_share"])
+            axis_pts = [q["pass"] for q in pj["points"] if q["param"] != "joint"]
+            got[name] = (pj["plateau_score"], float(np.mean(axis_pts)))
         assert got["spike"][0] == 0.0 and got["partial"][0] == 0.5 and got["broad"][0] == 1.0, (nd, got)
         assert [G._cmp(">=", got[k][0], 0.6) for k in ("spike", "partial", "broad")] == [False, False, True]
         if nd >= 2:
-            assert got["spike"][1] >= 0.6            # the pooled share (diagnostic) would have passed
+            assert got["spike"][1] >= 0.6            # the pooled per-axis share would have passed
 
 
 def test_broad_plateau_selected_at_search_space_edge_passes(tmp_path):
@@ -991,7 +1041,8 @@ def test_broad_plateau_selected_at_search_space_edge_passes(tmp_path):
     space is judged on its real neighbourhood (points beyond the bound are evaluated), in both
     relative (low > 0) and range mode, and the edge is reported."""
     for lo, hi, x in ((10, 50, 50), (0, 10, 10)):
-        sp = opt.SearchSpace([opt.IntParam("look", lo, hi)])
+        sp = opt.SearchSpace([opt.IntParam("look", lo, hi, **({"plateau_scale": "relative"} if lo > 0
+                                                             else {"plateau_step": 0.2 * (hi - lo)}))])
         ev = SyntheticEvaluator(bounds={"look": (lo, hi)},
                                 bumps=({"center": {"look": x}, "height": 2.0, "width": 0.4},), rho=1.0, seed=4)
         res = _study_run(ev, sp, tmp_path, f"edge-{lo}")

@@ -57,6 +57,21 @@ EULER_GAMMA = 0.5772156649015329
 DECISIVE_MAX_ZERO_EDGE_PASS = 0.30
 HOLDOUT_STATUSES = ("PASS", "FAIL", "NOT_DECISIVE")
 
+# Red-team R2-3: the registered holdout band has ONE construction — these bootstrap sizes and a
+# seed derived from the study id (holdout_band_seed).  Read-only: the ledger refuses a band built
+# otherwise (ledger.check_band_construction), so a band cannot be re-rolled or thinned.
+HOLDOUT_BAND_N_BOOT = 2000
+HOLDOUT_BAND_N_POWER = 1000
+# The realised holdout series must span the band's horizon within ±max(5 days, 2 %) (H6).
+HOLDOUT_SPAN_TOL_DAYS = 5.0
+HOLDOUT_SPAN_TOL_FRAC = 0.02
+
+
+def holdout_band_seed(study_id: str) -> int:
+    """The fixed bootstrap seed of a study's holdout band: a stable hash of its id (R2-3)."""
+    import hashlib
+    return int(hashlib.sha256(f"holdout-band|{study_id}".encode()).hexdigest()[:8], 16)
+
 __all__ = [
     "sharpe_per_period", "psr", "expected_max_sharpe", "dsr", "dsr_from_matrix", "DSRResult",
     "effective_n_trials", "min_trl", "power_check", "pbo_cscv", "PBOResult",
@@ -66,6 +81,7 @@ __all__ = [
     "volatility_regimes", "trend_regimes", "cusum_threshold", "cusum_decay",
     "sequential_sharpe_test", "holdout_band", "HoldoutBand", "holdout_check", "joint_tail_level",
     "holdout_status", "DECISIVE_MAX_ZERO_EDGE_PASS", "HOLDOUT_STATUSES",
+    "HOLDOUT_BAND_N_BOOT", "HOLDOUT_BAND_N_POWER", "holdout_band_seed",
     "random_selectivity_null", "random_entry_null", "empirical_pvalue", "ablation_compare",
 ]
 
@@ -975,6 +991,9 @@ class HoldoutBand:
     symbols: Any = None
     periods_per_year: float | None = None
     manifest_sha: str | None = None
+    conversion_legs: Any = None
+    n_boot_requested: int | None = None    # the n_boot / n_power asked for (R2-3: must be the fixed
+    n_power_requested: int | None = None   # HOLDOUT_BAND_N_BOOT / _N_POWER for a registered band)
 
     def as_dict(self) -> dict[str, Any]:
         out = {k: (float(v) if isinstance(v, (np.floating,)) else v) for k, v in asdict(self).items()}
@@ -1030,7 +1049,7 @@ def joint_tail_level(sh, rab, ddm, tsum=None, target: float = 0.90, iters: int =
 
 
 _HORIZON_META = ("horizon_source", "horizon_end", "holdout_start", "locked_end", "newer_data_included",
-                 "symbols", "manifest_sha")
+                 "symbols", "manifest_sha", "conversion_legs")
 
 
 def holdout_band(study, horizon_days: int | Mapping[str, Any], periods_per_year: float = 260.0,
@@ -1125,6 +1144,7 @@ def holdout_band(study, horizon_days: int | Mapping[str, Any], periods_per_year:
         target_coverage=float(target_coverage), joint_coverage=float(cov),
         trades_source=trades_source or tsrc, trades_joint=bool(aligned),
         max_zero_edge_pass=DECISIVE_MAX_ZERO_EDGE_PASS, periods_per_year=float(periods_per_year),
+        n_boot_requested=int(n_boot), n_power_requested=int(n_power),
         **{k: v for k, v in hmeta.items() if v is not None})
     # ---- power against a zero-edge holdout (de-meaned series through holdout_check)
     if n_power > 0:
@@ -1170,8 +1190,9 @@ def holdout_check(band: HoldoutBand | Mapping[str, Any], holdout_daily, n_trades
     ``decisive``, ``p_pass_zero_edge``, ``checks``, ``values``, the band's horizon
     (``horizon_days``, ``horizon_end``, ``newer_data_included``), ``n_days`` and the ``band`` used.
 
-    ``check_horizon``: the realised series must span the band's horizon (±max(10 days, 5 %)),
-    else ValueError — a band built for one horizon says nothing about another."""
+    ``check_horizon``: the realised series must span the band's horizon (±max(5 days, 2 %) —
+    :data:`HOLDOUT_SPAN_TOL_DAYS` / :data:`HOLDOUT_SPAN_TOL_FRAC`, red-team H6), else ValueError —
+    a band built for one horizon says nothing about another."""
     bd = band.as_dict() if isinstance(band, HoldoutBand) else dict(band)
     orig = dict(bd)
     for new, old in _BAND_KEYS.items():
@@ -1180,7 +1201,7 @@ def holdout_check(band: HoldoutBand | Mapping[str, Any], holdout_daily, n_trades
     a = _ret_array(holdout_daily)
     hd = bd.get("horizon_days")
     if check_horizon and hd:
-        tol = max(10.0, 0.05 * float(hd))
+        tol = max(HOLDOUT_SPAN_TOL_DAYS, HOLDOUT_SPAN_TOL_FRAC * float(hd))
         if abs(a.size - float(hd)) > tol:
             raise ValueError(f"holdout series has {a.size} daily returns but the band was built for "
                              f"{hd} (horizon end {bd.get('horizon_end')}); judge the span the band was "
