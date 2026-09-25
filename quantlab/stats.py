@@ -52,6 +52,11 @@ from . import metrics
 
 EULER_GAMMA = 0.5772156649015329
 
+# DESIGN §4.4 (decided 2026-09-24): a band whose zero-edge pass probability exceeds this cannot
+# tell a real edge from a dead one; an all-criteria pass under it is NOT_DECISIVE.  Read-only.
+DECISIVE_MAX_ZERO_EDGE_PASS = 0.30
+HOLDOUT_STATUSES = ("PASS", "FAIL", "NOT_DECISIVE")
+
 __all__ = [
     "sharpe_per_period", "psr", "expected_max_sharpe", "dsr", "dsr_from_matrix", "DSRResult",
     "effective_n_trials", "min_trl", "power_check", "pbo_cscv", "PBOResult",
@@ -60,6 +65,7 @@ __all__ = [
     "spa_test", "white_reality_check", "bh_fdr", "time_stability", "regime_split",
     "volatility_regimes", "trend_regimes", "cusum_threshold", "cusum_decay",
     "sequential_sharpe_test", "holdout_band", "HoldoutBand", "holdout_check", "joint_tail_level",
+    "holdout_status", "DECISIVE_MAX_ZERO_EDGE_PASS", "HOLDOUT_STATUSES",
     "random_selectivity_null", "random_entry_null", "empirical_pvalue", "ablation_compare",
 ]
 
@@ -929,8 +935,16 @@ class HoldoutBand:
     of the *joint* draws pass all four at once (red-team M3 / calibration R4).
 
     ``p_pass_zero_edge``: probability that a zero-edge holdout (the same series de-meaned,
-    bootstrapped, run through :func:`holdout_check`) passes — the band's false-pass rate.
-    ``decisive`` is False when it exceeds ``max_zero_edge_pass`` (0.30)."""
+    bootstrapped, run through :func:`holdout_check`'s criteria) passes — the band's false-pass
+    rate.  ``decisive`` is False when it exceeds :data:`DECISIVE_MAX_ZERO_EDGE_PASS` (0.30); an
+    all-criteria pass is then NOT_DECISIVE (:func:`holdout_status`).
+
+    Horizon (DESIGN §4.4, 2026-09-24): ``horizon_days`` runs from the holdout start to the end of
+    the data available when the band is built (locked year + newer exports), read from the data
+    manifest by ``data.holdout_horizon`` (``horizon_source="manifest"``; ``"explicit"`` for an
+    integer override, which the ledger refuses at unlock).  ``horizon_end``, ``holdout_start``,
+    ``locked_end``, ``newer_data_included``, ``symbols`` and ``manifest_sha`` record where it
+    came from."""
 
     sharpe_lo: float               # annualised
     ret_at_budget_lo: float        # mean monthly return of leverage·r
@@ -951,8 +965,16 @@ class HoldoutBand:
     trades_joint: bool = False     # trade sums drawn with the same bootstrap indices as returns
     p_pass_zero_edge: float = float("nan")
     n_power: int = 0
-    max_zero_edge_pass: float = 0.30
+    max_zero_edge_pass: float = DECISIVE_MAX_ZERO_EDGE_PASS
     decisive: bool | None = None
+    horizon_source: str = "explicit"
+    horizon_end: str | None = None
+    holdout_start: str | None = None
+    locked_end: str | None = None
+    newer_data_included: bool | None = None
+    symbols: Any = None
+    periods_per_year: float | None = None
+    manifest_sha: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out = {k: (float(v) if isinstance(v, (np.floating,)) else v) for k, v in asdict(self).items()}
@@ -1007,12 +1029,22 @@ def joint_tail_level(sh, rab, ddm, tsum=None, target: float = 0.90, iters: int =
     return lo, cov(lo)
 
 
-def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_boot: int = 4000, *,
+_HORIZON_META = ("horizon_source", "horizon_end", "holdout_start", "locked_end", "newer_data_included",
+                 "symbols", "manifest_sha")
+
+
+def holdout_band(study, horizon_days: int | Mapping[str, Any], periods_per_year: float = 260.0,
+                 n_boot: int = 4000, *,
                  trades_per_day=None, dd_budget: float = 0.10, seed: int = 12345,
                  extra_series: np.ndarray | None = None, source: str = "wfo",
                  target_coverage: float = 0.90, trades_source: str | None = None,
-                 n_power: int = 1000, max_zero_edge_pass: float = 0.30) -> HoldoutBand:
+                 n_power: int = 1000, max_zero_edge_pass: float | None = None) -> HoldoutBand:
     """Predictive distribution for a holdout of ``horizon_days`` (DESIGN §4.4 v1.2).
+
+    ``horizon_days``: an int (explicit override, tests) or the mapping returned by
+    ``data.holdout_horizon`` (the exam horizon: holdout start → end of available data per the
+    manifest, whose metadata is copied onto the band).  ``max_zero_edge_pass`` is read-only:
+    anything other than :data:`DECISIVE_MAX_ZERO_EDGE_PASS` raises.
 
     Each source path contributes an equal share of ``n_boot`` stationary-bootstrap samples of
     length ``horizon_days``.  The budget leverage k is solved on full-length bootstrap samples
@@ -1030,6 +1062,16 @@ def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_bo
 
     Power: ``n_power`` de-meaned (zero-edge) bootstrap draws of the same paths are run through
     :func:`holdout_check`; ``p_pass_zero_edge`` is their pass rate."""
+    if max_zero_edge_pass is not None and max_zero_edge_pass != DECISIVE_MAX_ZERO_EDGE_PASS:
+        raise ValueError(f"max_zero_edge_pass is fixed at {DECISIVE_MAX_ZERO_EDGE_PASS} (DESIGN §4.4); "
+                         f"got {max_zero_edge_pass}")
+    hmeta: dict[str, Any] = {"horizon_source": "explicit"}
+    if isinstance(horizon_days, Mapping):
+        hmeta = {k: horizon_days.get(k) for k in _HORIZON_META}
+        horizon_days = int(horizon_days["horizon_days"])
+    horizon_days = int(horizon_days)
+    if horizon_days < 2:
+        raise ValueError(f"holdout horizon must be ≥ 2 days, got {horizon_days}")
     rng = np.random.default_rng(seed)
     if extra_series is not None:
         paths, src = [np.asarray(extra_series, float)], "extra_series"
@@ -1082,7 +1124,8 @@ def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_bo
         sharpe_median=float(np.nanmedian(sh)), seed=seed, tail_level=float(alpha),
         target_coverage=float(target_coverage), joint_coverage=float(cov),
         trades_source=trades_source or tsrc, trades_joint=bool(aligned),
-        max_zero_edge_pass=float(max_zero_edge_pass))
+        max_zero_edge_pass=DECISIVE_MAX_ZERO_EDGE_PASS, periods_per_year=float(periods_per_year),
+        **{k: v for k, v in hmeta.items() if v is not None})
     # ---- power against a zero-edge holdout (de-meaned series through holdout_check)
     if n_power > 0:
         npw = max(1, n_power // len(paths))
@@ -1093,38 +1136,74 @@ def holdout_band(study, horizon_days: int, periods_per_year: float = 260.0, n_bo
             ts_pw = (tp[ix].sum(axis=1) if aligned else
                      (tsum[rng.integers(0, tsum.size, npw)] if tsum is not None else np.full(npw, np.nan)))
             for r in range(npw):
-                passes += holdout_check(band, z[ix[r]], float(ts_pw[r]), periods_per_year)["pass"]
+                passes += holdout_check(band, z[ix[r]], float(ts_pw[r]), periods_per_year,
+                                        check_horizon=False)["criteria_pass"]
                 tot += 1
         band.p_pass_zero_edge = passes / tot
         band.n_power = tot
-        band.decisive = bool(band.p_pass_zero_edge <= max_zero_edge_pass)
+        band.decisive = bool(band.p_pass_zero_edge <= DECISIVE_MAX_ZERO_EDGE_PASS)
     return band
 
 
 _BAND_KEYS = {"sharpe_lo": "sharpe_p10", "ret_at_budget_lo": "ret_at_budget_p10", "max_dd_mag_hi": "max_dd_mag_p95"}
 
 
+def holdout_status(criteria_pass: bool, p_pass_zero_edge: float | None) -> str:
+    """DESIGN §4.4 verdict: FAIL if any criterion fails; NOT_DECISIVE if all pass but the band's
+    zero-edge pass probability is above :data:`DECISIVE_MAX_ZERO_EDGE_PASS` (or unknown); PASS
+    otherwise.  NOT_DECISIVE is neither a pass nor a fail: the system waits for more data."""
+    if not criteria_pass:
+        return "FAIL"
+    p = float("nan") if p_pass_zero_edge is None else float(p_pass_zero_edge)
+    if not np.isfinite(p) or p > DECISIVE_MAX_ZERO_EDGE_PASS:
+        return "NOT_DECISIVE"
+    return "PASS"
+
+
 def holdout_check(band: HoldoutBand | Mapping[str, Any], holdout_daily, n_trades: float,
-                  periods_per_year: float = 260.0) -> dict[str, Any]:
+                  periods_per_year: float = 260.0, *, check_horizon: bool = True) -> dict[str, Any]:
     """Apply a pre-registered band to realised holdout returns (only after checkpoint B).
-    Accepts v1.2 bands and v1.1 dicts (``sharpe_p10`` / ``ret_at_budget_p10`` / ``max_dd_mag_p95``)."""
+    Accepts v1.2 bands and v1.1 dicts (``sharpe_p10`` / ``ret_at_budget_p10`` / ``max_dd_mag_p95``).
+
+    Returns ``status`` ∈ {PASS, FAIL, NOT_DECISIVE} (:func:`holdout_status`), ``criteria_pass``
+    (all four criteria met), ``pass`` (= status == "PASS"; never True when NOT_DECISIVE),
+    ``decisive``, ``p_pass_zero_edge``, ``checks``, ``values``, the band's horizon
+    (``horizon_days``, ``horizon_end``, ``newer_data_included``), ``n_days`` and the ``band`` used.
+
+    ``check_horizon``: the realised series must span the band's horizon (±max(10 days, 5 %)),
+    else ValueError — a band built for one horizon says nothing about another."""
     bd = band.as_dict() if isinstance(band, HoldoutBand) else dict(band)
+    orig = dict(bd)
     for new, old in _BAND_KEYS.items():
         if new not in bd and old in bd:
             bd[new] = bd[old]
     a = _ret_array(holdout_daily)
+    hd = bd.get("horizon_days")
+    if check_horizon and hd:
+        tol = max(10.0, 0.05 * float(hd))
+        if abs(a.size - float(hd)) > tol:
+            raise ValueError(f"holdout series has {a.size} daily returns but the band was built for "
+                             f"{hd} (horizon end {bd.get('horizon_end')}); judge the span the band was "
+                             f"registered for")
     sh = metrics.sharpe(a, periods_per_year)
     dpm = max(1, int(round(periods_per_year / 12.0)))
     rab = float(_rows_mean_monthly((bd["leverage"] * a)[None, :], dpm)[0])
     dd = -metrics.max_drawdown(a)
     tl, th = bd.get("trades_lo", float("nan")), bd.get("trades_hi", float("nan"))
     tl = float("nan") if tl is None else tl
-    checks = {"sharpe": sh >= bd["sharpe_lo"],
-              "ret_at_budget": (not np.isfinite(bd["ret_at_budget_lo"])) or rab >= bd["ret_at_budget_lo"],
-              "max_dd": dd <= bd["max_dd_mag_hi"],
-              "trades": (not np.isfinite(tl)) or bool(tl <= n_trades <= th)}
-    return {"pass": bool(all(checks.values())), "checks": checks,
-            "values": {"sharpe": sh, "ret_at_budget": rab, "max_dd_mag": dd, "trades": n_trades}}
+    checks = {"sharpe": bool(sh >= bd["sharpe_lo"]),
+              "ret_at_budget": bool((not np.isfinite(bd["ret_at_budget_lo"])) or rab >= bd["ret_at_budget_lo"]),
+              "max_dd": bool(dd <= bd["max_dd_mag_hi"]),
+              "trades": bool((not np.isfinite(tl)) or bool(tl <= n_trades <= th))}
+    crit = bool(all(checks.values()))
+    pz = bd.get("p_pass_zero_edge")
+    status = holdout_status(crit, pz)
+    return {"status": status, "pass": status == "PASS", "criteria_pass": crit,
+            "decisive": holdout_status(True, pz) == "PASS",
+            "p_pass_zero_edge": pz, "checks": checks,
+            "values": {"sharpe": sh, "ret_at_budget": rab, "max_dd_mag": dd, "trades": n_trades},
+            "horizon_days": hd, "horizon_end": bd.get("horizon_end"),
+            "newer_data_included": bd.get("newer_data_included"), "n_days": int(a.size), "band": orig}
 
 
 # =========================================================================== component tests

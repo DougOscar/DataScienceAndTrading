@@ -24,6 +24,18 @@ def clean_tree(monkeypatch):
     monkeypatch.setattr(ledger, "git_commit", lambda: "abc1234")
 
 
+def _band(**over):
+    """A registered-band stand-in whose horizon comes from the real manifest (metadata only)."""
+    from quantlab import data
+    return {**data.holdout_horizon("FBS", "EURUSD"), "sharpe_lo": 0.4, "p_pass_zero_edge": 0.1, **over}
+
+
+def _registered(tmp_path, sid="fbs-0007-a1", **over):
+    band = _band(**over)
+    ledger.register_holdout_band(study_id=sid, band=band, reason="S5", ledger_dir=tmp_path)
+    return band
+
+
 def test_study_id_format_and_attempt_limit():
     assert ledger.new_study_id("fbs", 7, 2) == "fbs-0007-a2"
     with pytest.raises(LedgerError):
@@ -83,21 +95,26 @@ def test_holdout_is_one_shot(tmp_path, clean_tree):
     with pytest.raises(LedgerError, match="pass band"):
         ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1",
                                      pass_band={}, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
+    with pytest.raises(LedgerError, match="registered band"):     # nothing registered yet
+        ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1", pass_band=_band(),
+                                     user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
+    band = _registered(tmp_path)
     ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1",
-                                 pass_band={"sharpe_p10": 0.4}, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
+                                 pass_band=band, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
     assert ledger.is_holdout_unlocked("fbs", "donchian", tmp_path)
     assert not ledger.is_holdout_unlocked("B3", "donchian", tmp_path)
     with pytest.raises(LedgerError, match="cannot be unlocked twice"):
         ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1",
-                                     pass_band={"sharpe_p10": 0.4}, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
+                                     pass_band=band, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
 
 
 def test_unlock_refused_on_dirty_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(ledger, "git_commit", lambda: "abc1234-dirty")
     ledger.create_study(ledger_dir=tmp_path, **_study())
+    band = _registered(tmp_path)
     with pytest.raises(LedgerError, match="dirty"):
         ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1",
-                                     pass_band={"x": 1}, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
+                                     pass_band=band, user_confirmation="UNLOCK HOLDOUT FBS/donchian", ledger_dir=tmp_path)
 
 
 def test_trial_recorder_counts_every_trial_and_builds_return_matrix(tmp_path):
@@ -121,12 +138,13 @@ def test_trial_recorder_counts_every_trial_and_builds_return_matrix(tmp_path):
 
 def test_unlock_requires_exact_user_phrase(tmp_path, clean_tree):
     ledger.create_study(ledger_dir=tmp_path, **_study())
+    band = _registered(tmp_path)
     for bad in ("", "unlock holdout FBS/donchian", "UNLOCK HOLDOUT FBS/other"):
         with pytest.raises(LedgerError, match="type exactly"):
             ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1",
-                                         pass_band={"x": 1}, user_confirmation=bad, ledger_dir=tmp_path)
+                                         pass_band=band, user_confirmation=bad, ledger_dir=tmp_path)
     row = ledger.record_holdout_unlock(book="FBS", system="donchian", study_id="fbs-0007-a1",
-                                       pass_band={"x": 1}, user_confirmation=ledger.unlock_phrase("fbs", "donchian"),
+                                       pass_band=band, user_confirmation=ledger.unlock_phrase("fbs", "donchian"),
                                        ledger_dir=tmp_path)
     assert row["user_confirmation"] == "UNLOCK HOLDOUT FBS/donchian"
 

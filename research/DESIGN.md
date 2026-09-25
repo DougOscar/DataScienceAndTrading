@@ -174,9 +174,11 @@ Build the predictive distribution from the **walk-forward procedure's OOS series
 - its max drawdown is **within** its upper band;
 - its trade count is **within the predicted range** (from the procedure's own trade counts).
 
-v1.2: the four bands are set **jointly**, so that about 90% of bootstrap draws of a real edge pass all four at once. The band also reports its power against a zero-edge holdout; a one-year holdout has little power, so the report says when it isn't decisive on its own.
+v1.2: the four bands are set **jointly**, so that about 90% of bootstrap draws of a real edge pass all four at once.
 
-Fail → `killed`, with no re-tries on the same holdout.
+**Horizon and decisiveness (decided 2026-09-24).** The exam uses the locked year **plus all newer data** available at the unlock (the renewing holdout, §4.1). The band is built for that horizon *before* unlocking; if more data arrives before the unlock, the band is rebuilt and re-registered first. The band also reports how often a zero-edge holdout would pass it. If that probability is above 0.30, the exam cannot tell a real edge from a dead one, so an all-criteria pass is recorded as **NOT_DECISIVE**: the system waits (`holdout_pending`) and is re-examined on the full, longer holdout once more data exists, with the band rebuilt beforehand. Calibration: one year is decisive for ~55% of true edges, two years for ~82%.
+
+Fail → `killed`, with no re-tries on the same holdout. NOT_DECISIVE is not a fail and not a pass; a system can only be promoted after a decisive PASS.
 
 ### 4.5 Classification (descriptive; goes on the card)
 
@@ -338,4 +340,4 @@ Rules:
 | 5 | Commands | Old commands retired; new skills and agents as in §9 |
 | 6 | Naming | `quantlab/`, `research/systems/<book>/…` |
 | 7 | Gate recalibration (2026-09-24) | Adopted R1 (DSR hurdle from null variance + raw trial count) and R2 (CSCV P(OOS loss) < 0.10 replaces PBO < 0.30), plus the red-team fixes: WFO procedure gate, judge-computed plateau, 1-pip stress slippage on all fills, joint holdout band. See `research/audits/2026-09-24_phase1_fix_plan.md` |
-| 8 | Open (2026-09-24) | WFO-gate thresholds, holdout length / renewing-holdout policy (band power), time-stability replacement (R3): pending the recalibration results |
+| 8 | Recalibration decisions (2026-09-24) | WFO gate recency threshold stays "> 0" (dead-edge pass 3.3%, power 80% point SR 1.57); holdout = locked year + newer data, NOT_DECISIVE blocks promotion (§4.4); plateau radius floor 0.10. Still open: time-stability replacement (R3) |

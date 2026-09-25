@@ -5,7 +5,9 @@ Two git-tracked JSONL files under ``research/ledger/``:
 * ``studies.jsonl`` — one *event* per line (``study_created``, ``gates``,
   ``decision``, ``note`` …).  A study's current state is the fold of its events;
   nothing is ever rewritten.
-* ``holdout_access.jsonl`` — one ``holdout_unlock`` event per system, ever.
+* ``holdout_access.jsonl`` — ``holdout_unlock`` and ``holdout_exam`` events.  One unlock per
+  system, except that a NOT_DECISIVE exam may be followed by a re-exam on a longer horizon
+  (DESIGN §4.4; see the "holdout" section below).  A FAIL is final.
 
 Every line carries ``seq`` and ``prev`` (SHA-256 of the previous raw line), so
 edits or deletions anywhere in the file are detectable with :func:`verify_chain`.
@@ -23,7 +25,7 @@ import json
 import re
 import subprocess
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -285,44 +287,261 @@ def candidate_set_data_dependent(study_id: str, *, ledger_dir: Path | None = Non
 
 
 # --------------------------------------------------------------------------- holdout
+# DESIGN §4.4 (decided 2026-09-24).  The holdout exam covers the locked year PLUS all newer data
+# available at the unlock, with a band pre-registered for exactly that horizon.  Each exam ends
+# PASS, FAIL or NOT_DECISIVE (all criteria pass but P(pass | zero edge) of the band > 0.30).
+#
+# Life cycle of one system (all rows are chained, append-only):
+#
+#   S5 gates → band registered (``gates`` event, or ``holdout_band_registered``)
+#   [newer data exported] → band REBUILT for the longer horizon and re-registered
+#                           (``holdout_band_registered``, reason logged) — only before an unlock
+#   /unlock-holdout      → ``holdout_unlock`` (exam 1; the user's typed phrase; the band must be
+#                           the registered one and not stale versus the manifest)
+#   judge                → ``holdout_exam`` (status + horizon) in holdout_access.jsonl, mirrored
+#                           as a ``holdout_exam`` event on the study
+#   FAIL                 → killed: no band rebuild, no unlock, no exam can ever follow
+#   PASS                 → final (promotion may proceed)
+#   NOT_DECISIVE         → the system waits (``holdout_pending``).  When more data is exported the
+#                           band is rebuilt for the new, longer horizon (strictly later
+#                           ``horizon_end``) BEFORE any of the new data is read, then the user
+#                           unlocks exam n+1, which re-judges the FULL holdout span (holdout start
+#                           → new end).  This is not a retry: nothing overturns a FAIL, and the
+#                           new exam is judged on a band fixed before its new data was visible.
+#
+# Until a PASS, ``quantlab.data`` only serves holdout bars up to the latest unlock's
+# ``horizon_end`` (:func:`holdout_access_end`), so newer exports stay unseen until re-registered.
+HOLDOUT_STATUSES = ("PASS", "FAIL", "NOT_DECISIVE")
+SYSTEM_STATE_AFTER_EXAM = {"PASS": "holdout_passed", "FAIL": "killed", "NOT_DECISIVE": "holdout_pending"}
+
+
+def _canon_json(obj: Any) -> str:
+    return json.dumps(obj, sort_keys=True, default=str)
+
+
 def holdout_unlocks(ledger_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Every row of ``holdout_access.jsonl`` (``holdout_unlock`` and ``holdout_exam`` events)."""
     return _read(_ledger_dir(ledger_dir) / HOLDOUT_FILE)
 
 
-def is_holdout_unlocked(book: str, system: str, ledger_dir: Path | None = None) -> bool:
+def holdout_history(book: str, system: str, ledger_dir: Path | None = None) -> list[dict[str, Any]]:
+    """The holdout rows of one system, in order."""
     b = config.get_book(book).name
-    return any(r["book"] == b and r["system"] == system for r in holdout_unlocks(ledger_dir))
+    return [r for r in holdout_unlocks(ledger_dir) if r.get("book") == b and r.get("system") == system]
+
+
+def is_holdout_unlocked(book: str, system: str, ledger_dir: Path | None = None) -> bool:
+    return any(r.get("event", "holdout_unlock") == "holdout_unlock"
+               for r in holdout_history(book, system, ledger_dir))
+
+
+def holdout_state(book: str, system: str, ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Fold of a system's holdout rows.
+
+    ``n_unlocks`` / ``n_exams``; ``pending`` (unlocked, exam not yet recorded); ``last_status``
+    (None / PASS / FAIL / NOT_DECISIVE); ``killed`` (any FAIL); ``passed`` (a PASS);
+    ``last_horizon_end`` (of the latest exam); ``study_id`` (of the first unlock);
+    ``last_unlock`` (row)."""
+    rows = holdout_history(book, system, ledger_dir)
+    unlocks = [r for r in rows if r.get("event", "holdout_unlock") == "holdout_unlock"]
+    exams = [r for r in rows if r.get("event") == "holdout_exam"]
+    last = exams[-1] if exams else None
+    return {"n_unlocks": len(unlocks), "n_exams": len(exams), "pending": len(unlocks) > len(exams),
+            "last_status": last.get("status") if last else None,
+            "killed": any(e.get("status") == "FAIL" for e in exams),
+            "passed": any(e.get("status") == "PASS" for e in exams),
+            "last_horizon_end": last.get("horizon_end") if last else None,
+            "study_id": unlocks[0].get("study_id") if unlocks else None,
+            "last_unlock": unlocks[-1] if unlocks else None, "exams": exams}
+
+
+def holdout_access_end(book: str, system: str, ledger_dir: Path | None = None) -> datetime | None:
+    """Latest holdout timestamp ``quantlab.data`` may serve to an unlocked system (exclusive).
+
+    None = no extra limit (not unlocked — the ordinary guard applies — or a decisive PASS was
+    recorded, after which newer data belongs to the decay review, §4.6, or a legacy unlock row
+    without a horizon).  Otherwise the latest unlock's ``horizon_end`` + 1 minute: data exported
+    after the band was built stays locked until the band is rebuilt and a re-exam unlocked."""
+    st = holdout_state(book, system, ledger_dir)
+    if st["n_unlocks"] == 0 or st["passed"]:
+        return None
+    he = (st["last_unlock"] or {}).get("horizon_end")
+    if not he:
+        return None
+    return datetime.fromisoformat(str(he)) + timedelta(minutes=1)
 
 
 def unlock_phrase(book: str, system: str) -> str:
     return f"UNLOCK HOLDOUT {config.get_book(book).name}/{system}"
 
 
+def registered_holdout_band(study_id: str, *, ledger_dir: Path | None = None) -> dict[str, Any] | None:
+    """The study's current pre-registered holdout band: the latest ``holdout_band_registered``
+    event, else the band logged by the latest ``gates`` event (S5), else None."""
+    reg = study_events(study_id, "holdout_band_registered", ledger_dir=ledger_dir)
+    if reg:
+        return reg[-1]["band"]
+    for r in reversed(study_events(study_id, "gates", ledger_dir=ledger_dir)):
+        if r.get("holdout_band"):
+            return r["holdout_band"]
+    return None
+
+
+def _study_system(study_id: str, ledger_dir: Path | None) -> tuple[str, str]:
+    row = created_row(study_id, ledger_dir=ledger_dir)
+    if row is None:
+        raise LedgerError(f"unknown study {study_id}")
+    return config.get_book(row["book"]).name, row["system"]
+
+
+def register_holdout_band(*, study_id: str, band: dict[str, Any], reason: str,
+                          ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Pre-register (or re-register) the holdout pass band of a study — event
+    ``holdout_band_registered`` with ``band_version``, horizon and ``reason``.
+
+    Use it at S5 or, via ``gates.rebuild_holdout_band``, when newer data was exported before the
+    unlock.  Refuses (:class:`LedgerError`) when:
+
+    * the system's holdout is unlocked and its exam not yet recorded — a band can never be
+      rebuilt after the unlock it is judged by;
+    * the system already has a FAIL (killed) or a PASS (final);
+    * after a NOT_DECISIVE exam, the band does not reach **past** that exam's ``horizon_end``;
+    * the band does not end strictly later than the currently registered band (a rebuild needs
+      new data — re-rolling the bootstrap on the same horizon is band shopping);
+    * the band has no ``horizon_days`` / ``horizon_end`` / ``horizon_source``."""
+    b, system = _study_system(study_id, ledger_dir)
+    missing = [k for k in ("horizon_days", "horizon_end", "horizon_source") if band.get(k) in (None, "")]
+    if missing:
+        raise LedgerError(f"band is missing its horizon fields {missing}; build it with a horizon from "
+                          f"data.holdout_horizon (DESIGN §4.4)")
+    st = holdout_state(b, system, ledger_dir)
+    if st["killed"]:
+        raise LedgerError(f"{b}/{system} failed its holdout (killed); no band may be registered")
+    if st["passed"]:
+        raise LedgerError(f"{b}/{system} already passed its holdout; the band is final")
+    if st["pending"]:
+        raise LedgerError(f"{b}/{system}: the holdout is unlocked and its exam is not recorded; a band can "
+                          f"never be rebuilt after the unlock")
+    new_end = datetime.fromisoformat(str(band["horizon_end"]))
+    if st["last_horizon_end"] and new_end <= datetime.fromisoformat(str(st["last_horizon_end"])):
+        raise LedgerError(f"{b}/{system}: the last exam (NOT_DECISIVE) already covered up to "
+                          f"{st['last_horizon_end']}; a re-exam band must reach newer data (ends {new_end})")
+    cur = registered_holdout_band(study_id, ledger_dir=ledger_dir)
+    if cur and cur.get("horizon_end") and new_end <= datetime.fromisoformat(str(cur["horizon_end"])):
+        raise LedgerError(f"{study_id}: the registered band already covers up to {cur['horizon_end']}; "
+                          f"rebuild only when newer data exists (new end {new_end})")
+    version = len(study_events(study_id, "holdout_band_registered", ledger_dir=ledger_dir)) + 1
+    return log_event(study_id, "holdout_band_registered", ledger_dir=ledger_dir, band=band,
+                     band_version=version, reason=str(reason),
+                     horizon_days=band["horizon_days"], horizon_end=band["horizon_end"],
+                     newer_data_included=band.get("newer_data_included"),
+                     p_pass_zero_edge=band.get("p_pass_zero_edge"),
+                     replaces_horizon_end=(cur or {}).get("horizon_end"))
+
+
+def _check_band_current(b: str, band: dict[str, Any]) -> None:
+    """The band's horizon must be manifest-sourced and still reach the end of available data."""
+    if band.get("horizon_source") != "manifest" or not band.get("symbols"):
+        raise LedgerError("the pass band's horizon was not taken from the data manifest "
+                          f"(horizon_source={band.get('horizon_source')!r}); rebuild it with "
+                          "gates.rebuild_holdout_band before unlocking (DESIGN §4.4)")
+    from . import data  # lazy: data imports ledger
+    now = data.holdout_horizon(b, band["symbols"], periods_per_year=band.get("periods_per_year"))
+    if datetime.fromisoformat(now["horizon_end"]) > datetime.fromisoformat(str(band["horizon_end"])):
+        raise LedgerError(f"newer data was exported (manifest ends {now['horizon_end']}, band built to "
+                          f"{band['horizon_end']}); rebuild and re-register the band with "
+                          f"gates.rebuild_holdout_band BEFORE unlocking")
+
+
 def record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: dict[str, Any],
                           user_confirmation: str, ledger_dir: Path | None = None) -> dict[str, Any]:
-    """One-shot unlock (DESIGN §4.4).  Only ``/unlock-holdout`` should call this.
+    """Unlock a holdout exam (DESIGN §4.4).  Only ``/unlock-holdout`` should call this.
 
     ``user_confirmation`` must be the exact :func:`unlock_phrase` **typed by the user** in the
     conversation; the skill passes it through verbatim and it is stored in the chained log.
     Code cannot tell a human from an agent, so this makes every unlock explicit and auditable
     rather than impossible to fake — agents must never compose the phrase themselves.
-    """
+
+    ``pass_band`` must be the study's registered band (:func:`registered_holdout_band`), with a
+    manifest-sourced horizon that still reaches the end of the available data (else rebuild it
+    first).  Exam 1 is the first unlock.  A further unlock (exam n+1) is allowed **only** after a
+    NOT_DECISIVE exam, for the same study, with a band re-registered for a strictly later
+    ``horizon_end``; it re-judges the full holdout span.  After a FAIL or a PASS, or while an exam
+    is pending, it raises."""
     b = config.get_book(book).name
     if user_confirmation != unlock_phrase(b, system):
         raise LedgerError(f"unlock requires the user to type exactly: {unlock_phrase(b, system)!r}")
-    if is_holdout_unlocked(b, system, ledger_dir):
-        raise LedgerError(f"holdout already used for {b}/{system}; it cannot be unlocked twice")
     if study_id not in studies(ledger_dir):
         raise LedgerError(f"unknown study {study_id}")
+    st = holdout_state(b, system, ledger_dir)
+    if st["killed"]:
+        raise LedgerError(f"{b}/{system} failed its holdout (killed); a FAIL can never be re-examined")
+    if st["passed"]:
+        raise LedgerError(f"holdout already passed for {b}/{system}; it cannot be unlocked again")
+    if st["pending"]:
+        raise LedgerError(f"holdout already used for {b}/{system} (exam {st['n_unlocks']} pending); it cannot "
+                          f"be unlocked twice")
+    if st["n_unlocks"] and st["study_id"] != study_id:
+        raise LedgerError(f"a re-exam must use the frozen study {st['study_id']}, not {study_id}")
     if not pass_band:
         raise LedgerError("a pre-registered pass band is required before unlocking")
+    reg = registered_holdout_band(study_id, ledger_dir=ledger_dir)
+    if reg is None or _canon_json(reg) != _canon_json(pass_band):
+        raise LedgerError("pass_band is not the study's registered band (ledger.registered_holdout_band); "
+                          "register it first (S5 gates / ledger.register_holdout_band)")
+    if st["n_unlocks"] and (not pass_band.get("horizon_end") or datetime.fromisoformat(str(pass_band["horizon_end"]))
+                            <= datetime.fromisoformat(str(st["last_horizon_end"]))):
+        raise LedgerError(f"re-exam band must reach past the last exam's horizon {st['last_horizon_end']}")
+    _check_band_current(b, pass_band)
     commit = git_commit()
     if commit.endswith("-dirty"):
         raise LedgerError("commit the system's code before unlocking (tree is dirty)")
+    exam = st["n_unlocks"] + 1
     return _append(_ledger_dir(ledger_dir) / HOLDOUT_FILE, {
         "event": "holdout_unlock", "book": b, "system": system, "study_id": study_id,
         "git_commit": commit, "pass_band": pass_band, "user_confirmation": user_confirmation,
+        "exam": exam, "kind": "initial" if exam == 1 else "re-exam after NOT_DECISIVE",
+        "horizon_days": pass_band.get("horizon_days"), "horizon_end": pass_band.get("horizon_end"),
+        "newer_data_included": pass_band.get("newer_data_included"),
     })
+
+
+def record_holdout_exam(*, book: str, system: str, study_id: str, result: dict[str, Any],
+                        ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Record the verdict of the pending exam (``holdout_exam`` in holdout_access.jsonl, mirrored
+    on the study).  ``result`` is ``stats.holdout_check``'s output; its ``band`` must be the band
+    of the pending unlock, and its status is re-derived here from the criteria and the band's
+    ``p_pass_zero_edge`` (``stats.holdout_status``) — a mismatch raises."""
+    from .stats import holdout_status  # lazy: keep the ledger import-light
+    b = config.get_book(book).name
+    st = holdout_state(b, system, ledger_dir)
+    if not st["pending"]:
+        raise LedgerError(f"{b}/{system}: no unlocked exam is pending")
+    unlock = st["last_unlock"]
+    if unlock.get("study_id") != study_id:
+        raise LedgerError(f"the pending exam belongs to study {unlock.get('study_id')}, not {study_id}")
+    band = result.get("band")
+    if band is None or _canon_json(band) != _canon_json(unlock.get("pass_band")):
+        raise LedgerError("the exam was not judged against the band stored with the unlock")
+    status = result.get("status")
+    if status not in HOLDOUT_STATUSES:
+        raise LedgerError(f"status must be one of {HOLDOUT_STATUSES}, got {status!r}")
+    expect = holdout_status(bool(all(result["checks"].values())), band.get("p_pass_zero_edge"))
+    if status != expect:
+        raise LedgerError(f"status {status!r} does not follow from the criteria and the band ({expect!r})")
+    exam = unlock.get("exam", st["n_unlocks"])
+    payload = {"exam": exam, "status": status, "horizon_days": unlock.get("horizon_days"),
+               "horizon_end": unlock.get("horizon_end"), "newer_data_included": unlock.get("newer_data_included"),
+               "checks": result.get("checks"), "values": result.get("values"),
+               "p_pass_zero_edge": band.get("p_pass_zero_edge"), "n_days": result.get("n_days"),
+               "system_state": SYSTEM_STATE_AFTER_EXAM[status]}
+    row = _append(_ledger_dir(ledger_dir) / HOLDOUT_FILE,
+                  {"event": "holdout_exam", "book": b, "system": system, "study_id": study_id, **payload})
+    log_event(study_id, "holdout_exam", ledger_dir=ledger_dir,
+              **{("holdout_" + k if k in ("exam", "status", "horizon_days", "horizon_end") else k): v
+                 for k, v in payload.items() if k in ("exam", "status", "horizon_days", "horizon_end",
+                                                      "newer_data_included", "system_state")})
+    return row
 
 
 # --------------------------------------------------------------------------- trials

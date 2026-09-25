@@ -7,7 +7,11 @@ Everything in ``quantlab`` reaches raw data through this module.  It:
   in **naive broker server time** (:func:`load_bars`);
 * enforces the per-book holdout lock (DESIGN §4.1) — a dev-period read never
   needs anything special, a holdout-period read requires an explicit
-  ``system`` with a ledger unlock, or it raises :class:`contracts.HoldoutLocked`;
+  ``system`` with a ledger unlock, or it raises :class:`contracts.HoldoutLocked`.  Until the
+  system's holdout exam is a decisive PASS, an unlock only serves bars up to the horizon its
+  band was registered for (``ledger.holdout_access_end``; DESIGN §4.4), so data exported later
+  stays unseen until the band is rebuilt and a re-exam unlocked;
+* reports the holdout exam horizon from manifest metadata alone (:func:`holdout_horizon`);
 * infers the price increment and currency pair of a symbol, and converts an
   amount between currencies using an as-of (backward-looking) M1 close.
 
@@ -137,7 +141,7 @@ from typing import Any
 
 import polars as pl
 
-from . import config, contracts, ledger
+from . import config, contracts, ledger, metrics
 
 # --------------------------------------------------------------------------- look-ahead audit guard
 # Set (and reset) by quantlab.testing around an audited strategy.signals() call (or, via the
@@ -225,6 +229,63 @@ def catalog(book: str | None = None, *, include_ticks: bool = False) -> pl.DataF
         want = config.get_book(book).name
         df = df.filter(pl.col("book") == want)
     return df.sort(["market", "symbol", "timeframe"])
+
+
+def holdout_trading_days(start: datetime, end: datetime, periods_per_year: float) -> int:
+    """Daily-return periods from ``start``'s date to ``end``'s date, both inclusive.
+
+    ``periods_per_year`` ≥ 365 (crypto): calendar days.  Otherwise weekdays (FX: 260/year),
+    scaled by ``periods_per_year / 260`` when below 260 (B3: 252, to discount exchange holidays)."""
+    import numpy as np
+    d0, d1 = start.date(), end.date()
+    if d1 < d0:
+        return 0
+    if periods_per_year >= 365.0:
+        return (d1 - d0).days + 1
+    n = int(np.busday_count(d0, d1 + timedelta(days=1)))
+    return int(round(n * min(1.0, periods_per_year / 260.0)))
+
+
+def holdout_horizon(book: str, symbols: str | list[str] | tuple[str, ...], *,
+                    periods_per_year: float | None = None) -> dict[str, Any]:
+    """Horizon of the holdout exam (DESIGN §4.4, decided 2026-09-24): from the book's holdout
+    start to the **end of the data currently available** — the locked year plus every newer
+    export (the renewing holdout, §4.1).
+
+    **Metadata only:** the end date is read from ``data/manifest.json`` (via :func:`catalog`,
+    the M1 series that :func:`load_bars` would use — latest end per symbol).  No Parquet file is
+    opened, so no holdout bar or value is ever read.  Several symbols → the earliest end (the
+    exam can only cover the span every leg has).
+
+    Returns ``horizon_days`` (see :func:`holdout_trading_days`), ``holdout_start``,
+    ``horizon_end`` (last M1 bar, naive server time, ISO), ``locked_end``,
+    ``newer_data_included`` (data past the locked year exists), ``symbols``, ``periods_per_year``,
+    ``manifest_sha`` and ``horizon_source = "manifest"``."""
+    b = config.get_book(book)
+    syms = [symbols] if isinstance(symbols, str) else list(symbols)
+    if not syms:
+        raise ValueError("holdout_horizon needs at least one symbol")
+    cat = catalog(b.name)
+    ends, market = {}, None
+    for sym in syms:
+        c = cat.filter((pl.col("symbol") == sym) & (pl.col("timeframe") == "M1"))
+        if c.height == 0:
+            raise ValueError(f"no M1 bars for {sym!r} in the {b.name} catalog (data/manifest.json)")
+        ends[sym] = c["end"].max()
+        market = market or c["market"][0]
+    end = min(ends.values())
+    if end is None or end <= b.holdout_start:
+        raise ValueError(f"{b.name}/{syms}: the data ends {end}, before the holdout start {b.holdout_start}")
+    ppy = float(periods_per_year) if periods_per_year else metrics.PERIODS_PER_YEAR.get(market, 260.0)
+    return {
+        "horizon_days": holdout_trading_days(b.holdout_start, end, ppy),
+        "holdout_start": b.holdout_start.isoformat(sep=" "),
+        "horizon_end": end.isoformat(sep=" "),
+        "locked_end": b.locked_end.isoformat(sep=" "),
+        "newer_data_included": bool(end.date() > b.locked_end.date()),
+        "symbols": syms, "periods_per_year": ppy,
+        "manifest_sha": ledger.manifest_sha(), "horizon_source": "manifest",
+    }
 
 
 def _resolve_source(cat: pl.DataFrame, symbol: str, source_file: str | Path | None) -> dict[str, Any]:
@@ -406,6 +467,12 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
                 f"holdout (starts {holdout_start}); pass include_holdout=True with a `system` that has "
                 f"an unlock recorded in the ledger to access it"
             )
+        # DESIGN §4.4 horizon rule: until a decisive PASS, an unlock only opens the span its
+        # pre-registered band was built for.  Data exported later stays locked until the band
+        # is rebuilt and a re-exam is unlocked (ledger.holdout_access_end).
+        access_end = ledger.holdout_access_end(book_obj.name, system)
+        if access_end is not None and resolved_end > access_end:
+            resolved_end = access_end
 
     span = _TF_TIMEDELTA[timeframe]
     src_path = Path(row["file"])

@@ -469,7 +469,7 @@ def _run_real_study(task: dict[str, Any], work: Path) -> tuple[dict[str, Any], A
     t_study = time.perf_counter() - t0
     t1 = time.perf_counter()
     rep = gates.evaluate_gates(study, ev, periods_per_year=ev.periods_per_year, n_boot=2000,
-                               seed=task["salt"], ledger_dir=work / "ledger")
+                               seed=task["salt"], ledger_dir=work / "ledger", holdout_days=260)
     t_gates = time.perf_counter() - t1
     srs = _trial_sharpes(study)
     row: dict[str, Any] = {}
@@ -523,6 +523,11 @@ def _grid_matrices(ev, trials: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame
             sink[k] = grid.join(cnt, on="date", how="left").fill_null(0)["n"].to_numpy().astype(float)
     return (pl.DataFrame({"date": dates, **cols}), pl.DataFrame({"date": dates, **xcols}),
             pl.DataFrame({"date": dates, **ecols}))
+
+
+def _crit(chk: dict[str, Any]) -> bool:
+    """All four band criteria met (``pass`` before 2026-09-24; ``pass`` now means a decisive PASS)."""
+    return bool(chk.get("criteria_pass", chk.get("pass")))
 
 
 def _exam(R, X, E, trials, space, bands: dict[str, dict], ends: dict[str, str]) -> dict[str, Any]:
@@ -609,7 +614,8 @@ def _run_synthetic(task: dict[str, Any], work: Path) -> dict[str, Any]:
     xi = np.searchsorted(dd, o.trades["exit_ts"].dt.date().to_numpy().astype("datetime64[D]"))
     tr = o.trades.with_columns(pl.Series("ret", g[xi] / g[ei] - 1.0))
     rep = gates.evaluate_gates(study, ev, periods_per_year=260.0, base_cost=CostModel(), n_boot=2000,
-                               seed=task["salt"], selected_trades=tr, ledger_dir=work / "ledger")
+                               seed=task["salt"], selected_trades=tr, ledger_dir=work / "ledger",
+                               holdout_days=260)  # pseudo-holdout: 1 y after SPLIT_CAL_END, not the manifest
     sel = study.selected_params
     return {**_summarise_report(rep), "selected_params": sel,
             "true_sharpe_selected": ev.true_sharpe(sel) if sel else None,
@@ -970,11 +976,11 @@ def summarise(results: list[dict[str, Any]]) -> str:
                 bk = "holdout_band" if h == "1y" else "holdout_band_2y"
                 ck = [r["exam_live"][h]["check"] for r in rr if r["exam_live"][h]["check"]]
                 c = lambda k: sum(x["checks"][k] for x in ck)  # noqa: E731
-                dd = [r["exam_dead"][h]["check"]["pass"] for r in rr if r.get("exam_dead") and r["exam_dead"][h]["check"]]
+                dd = [_crit(r["exam_dead"][h]["check"]) for r in rr if r.get("exam_dead") and r["exam_dead"][h]["check"]]
                 L.append(f"| {'null' if p is None else f'p={p}'} | {h} | {len(rr)} | "
                          f"{np.median([r[bk]['tail_level'] for r in rr]):.3f} | "
                          f"{np.median([r[bk]['p_pass_zero_edge'] for r in rr]):.2f} | "
-                         f"{sum(bool(r[bk]['decisive']) for r in rr)}/{len(rr)} | {_rate_k(sum(x['pass'] for x in ck), len(ck))} | "
+                         f"{sum(bool(r[bk]['decisive']) for r in rr)}/{len(rr)} | {_rate_k(sum(_crit(x) for x in ck), len(ck))} | "
                          f"{c('sharpe')} | {c('ret_at_budget')} | {c('max_dd')} | {c('trades')} | "
                          f"{_rate_k(sum(dd), len(dd)) if dd else '—'} | "
                          f"{np.mean([r['exam_live'][h]['sharpe'] for r in rr]):.2f} |")

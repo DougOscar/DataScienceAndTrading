@@ -679,7 +679,7 @@ def test_holdout_band_reports_power_and_decisiveness():
     rep, _ = run(weak, tr)
     hb = rep.holdout_band
     assert hb["p_pass_zero_edge"] > 0.30 and hb["decisive"] is False
-    assert "Not decisive on its own" in rep.to_markdown()
+    assert "Not decisive at this horizon" in rep.to_markdown() and "NOT_DECISIVE" in rep.to_markdown()
     strong, tr = make_study(seed=12, wfo_sr=4.0)
     hb = run(strong, tr)[0].holdout_band
     assert hb["p_pass_zero_edge"] < 0.30 and hb["decisive"] is True

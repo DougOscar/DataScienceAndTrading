@@ -58,6 +58,18 @@ Book, system, issue, attempt, method, seed, search space, plateau radius and the
 data-dependence flag are read from the study's ``study_created`` ledger row (and its later
 events).  A study that is not in the ledger raises :class:`GateError`; so does a
 ``study.meta`` value that disagrees with the ledger (meta is only a cache).
+
+Holdout exam (DESIGN §4.4, decided 2026-09-24)
+----------------------------------------------
+The band's horizon is the holdout start → the end of the data available now (locked year +
+newer exports), from the data manifest (:func:`resolve_holdout_horizon`).  Before an unlock,
+newer exports require :func:`rebuild_holdout_band` (rebuilds for the new horizon and
+re-registers it in the ledger, logged).  :func:`run_holdout_exam` judges the realised holdout
+against the band stored with the unlock and records PASS / FAIL / NOT_DECISIVE with its
+horizon.  NOT_DECISIVE = every criterion passed but P(pass | zero edge) >
+:data:`HOLDOUT_MAX_ZERO_EDGE_PASS`: the system waits for more data and is re-examined on the
+full, longer span with a band rebuilt beforehand.  A FAIL is final (the ledger refuses anything
+after it).
 """
 
 from __future__ import annotations
@@ -73,7 +85,7 @@ from typing import Any, Callable, Mapping
 import numpy as np
 import polars as pl
 
-from . import config, ledger, metrics
+from . import config, data, ledger, metrics
 from . import stats as st
 from .contracts import Evaluator, Outcome, StudyResult
 
@@ -97,7 +109,7 @@ PLATEAU_RADIUS_MIN = 0.10                   # floor for a pre-registered radius 
 WFO_RECENT_FRACTION = 1.0 / 3.0
 MINTRL_PROB = 0.95
 HOLDOUT_TARGET_COVERAGE = 0.90
-HOLDOUT_MAX_ZERO_EDGE_PASS = 0.30
+HOLDOUT_MAX_ZERO_EDGE_PASS = st.DECISIVE_MAX_ZERO_EDGE_PASS   # read-only (DESIGN §4.4)
 GATE_ORDER = ("dsr", "cscv_oos_loss", "oos_sharpe", "wfo_oos", "cost_stress_sharpe", "plateau",
               "positive_years", "max_year_share", "trade_count", "mechanism")
 GATE_LABELS = {
@@ -215,8 +227,13 @@ class GateReport:
             hb = self.holdout_band
             a = hb.get("tail_level", nan)
             L += ["## Pre-registered holdout pass band (DESIGN §4.4 v1.2)", "",
+                  f"Horizon: {hb.get('horizon_days')} trading days, {hb.get('holdout_start') or 'holdout start'} → "
+                  f"{hb.get('horizon_end') or 'n/a'} (source: {hb.get('horizon_source', 'explicit')}; newer-than-locked "
+                  f"data included: {_yn(hb.get('newer_data_included'))}). The exam uses the locked year plus all "
+                  f"newer data available at the unlock; if more data is exported first, the band is rebuilt "
+                  f"(gates.rebuild_holdout_band) and re-registered before unlocking.", "",
                   f"Source: {hb.get('source')} + stationary bootstrap (mean block {hb.get('mean_block', 0):.1f} d), "
-                  f"horizon {hb.get('horizon_days')} days, {hb.get('n_boot')} samples, seed {hb.get('seed')}. "
+                  f"{hb.get('n_boot')} samples, seed {hb.get('seed')}. "
                   f"Joint band: common tail level α = {a:.3f} (one-sided limits at α, trade range at α/2 each "
                   f"side); {hb.get('joint_coverage', nan):.0%} of the joint draws pass all four "
                   f"(target {hb.get('target_coverage', nan):.0%}).", "",
@@ -230,9 +247,12 @@ class GateReport:
                   f"passes this band with probability {hb.get('p_pass_zero_edge', nan):.0%} "
                   f"({hb.get('n_power', 0)} draws)."]
             if hb.get("decisive") is False:
-                L.append(f"**Not decisive on its own:** P(pass | zero edge) > "
-                         f"{hb.get('max_zero_edge_pass', HOLDOUT_MAX_ZERO_EDGE_PASS):.0%}; a holdout pass is weak "
-                         f"evidence (holdout length / renewing-holdout policy: DESIGN §11 #8).")
+                L.append(f"**Not decisive at this horizon:** P(pass | zero edge) > "
+                         f"{HOLDOUT_MAX_ZERO_EDGE_PASS:.0%}. If every criterion passes, the exam is recorded "
+                         f"NOT_DECISIVE: the system stays `holdout_pending` and is re-examined on the full, "
+                         f"longer holdout once more data is exported (DESIGN §4.4). A FAIL still kills it.")
+            else:
+                L.append(f"Decisive at this horizon (≤ {HOLDOUT_MAX_ZERO_EDGE_PASS:.0%}): the exam ends PASS or FAIL.")
             L.append("")
         if self.diagnostics:
             L += ["## Diagnostics (not gates)", ""]
@@ -256,6 +276,10 @@ def _fmt(v) -> str:
     if isinstance(v, (list, tuple)):
         return "[" + ", ".join(_fmt(x) for x in v) + "]"
     return str(v)
+
+
+def _yn(v) -> str:
+    return "n/a" if v is None else ("yes" if v else "no")
 
 
 def _fmt_range(lo, hi) -> str:
@@ -820,7 +844,8 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
                    ledger_dir: Path | None = None, holdout_days: int | None = None, pbo_splits: int = 16,
                    n_boot: int = 2000, seed: int = 12345, spec: Any = None, space: Any = None,
                    n_jobs: Any = 1, plateau_radius: Any = _REMOVED,
-                   prior_effective_trials: Any = _REMOVED) -> GateReport:
+                   prior_effective_trials: Any = _REMOVED,
+                   holdout_symbols: str | list[str] | None = None) -> GateReport:
     """Run every DESIGN §4.2 v1.2 gate on a study.  See the module docstring for series choices.
 
     ``evaluator``: needed for the cost-stress gate (else SKIPPED) and, when
@@ -836,7 +861,11 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     ``space``: the study's SearchSpace object (for ``is_valid`` in the judge-run plateau; else
     ``meta['search_space_obj']``, else rebuilt from the ledger).  ``n_jobs``: workers for the
     judge-run plateau evaluations (1 = in-process).
-    ``holdout_days``: holdout horizon for the pass band (default: one year of periods).
+    ``holdout_days``: explicit horizon override for the pass band (tests).  Default (DESIGN §4.4,
+    2026-09-24): holdout start → end of the data available now, read from the data manifest for
+    ``holdout_symbols`` (else ``evaluator.symbol`` for a real evaluator, else ``meta['symbol(s)']``)
+    by :func:`quantlab.data.holdout_horizon`; with no resolvable symbol, one year of periods
+    (``horizon_source="default"`` — such a band must be rebuilt before any unlock).
     Removed: ``plateau_radius`` (pre-registered via ``opt.run_study(plateau_radius=)`` and read
     from the ledger, N3) and ``prior_effective_trials`` (use ``prior_trials``) raise TypeError."""
     if plateau_radius is not _REMOVED:
@@ -1127,20 +1156,13 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     except Exception as e:  # noqa: BLE001
         diag["return_at_budget_error"] = repr(e)
     band = None
+    horizon, hnote = resolve_holdout_horizon(ctx.get("book"), ppy, holdout_days=holdout_days,
+                                             symbols=holdout_symbols, evaluator=evaluator, meta=meta)
+    if hnote:
+        diag["holdout_horizon_note"] = hnote
     try:
-        tpd, tsrc = wfo_trades_per_day(study)
-        has_wfo = study.wfo_oos is not None and study.wfo_oos.height > 0
-        if tpd is None and has_wfo:
-            # F4: the band is built on the WFO procedure; the dev-selected trial's trade rate is the
-            # wrong series, so the trade criterion is left "not available".
-            tsrc = f"not available: {tsrc} (WFO n_trades null/absent and no trade_counts to rebuild)"
-        elif tpd is None:
-            tpd = _trades_per_day(selected_trades, sel_daily["date"])
-            tsrc = "dev-selected trial's trades (no WFO series)" if tpd is not None else "none"
-        hb = st.holdout_band(study, int(holdout_days or round(ppy)), ppy, n_boot=n_boot, trades_per_day=tpd,
-                             seed=seed, trades_source=tsrc, target_coverage=HOLDOUT_TARGET_COVERAGE,
-                             max_zero_edge_pass=HOLDOUT_MAX_ZERO_EDGE_PASS)
-        band = hb.as_dict()
+        band = _build_holdout_band(study, horizon, ppy, n_boot=n_boot, seed=seed,
+                                   selected_trades=selected_trades, sel_daily=sel_daily).as_dict()
     except ValueError as e:
         diag["holdout_band_error"] = str(e)
 
@@ -1186,3 +1208,101 @@ def log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: Pa
                             effective_trials_study=float(et.get("n_eff", float("nan"))),
                             plateau=plateau, ledger_context=report.ledger_context,
                             holdout_band=report.holdout_band)
+
+
+# --------------------------------------------------------------------------- holdout horizon / exam (§4.4)
+def resolve_holdout_horizon(book: str | None, periods_per_year: float, *, holdout_days: int | None = None,
+                            symbols: str | list[str] | None = None, evaluator: Any = None,
+                            meta: Mapping[str, Any] | None = None) -> tuple[int | dict[str, Any], str | None]:
+    """Horizon for the holdout band (DESIGN §4.4, 2026-09-24) and a note (None when clean).
+
+    ``holdout_days`` given → that int (explicit override, tests).  Else symbols =
+    ``symbols`` or ``evaluator.symbol`` (real evaluators only) or ``meta['symbols'|'symbol']``,
+    and the horizon is :func:`quantlab.data.holdout_horizon` (manifest metadata only: holdout
+    start → end of the available data).  Without a symbol or book: one year of periods, labelled
+    ``horizon_source="default"``; the ledger refuses such a band at unlock."""
+    if holdout_days is not None:
+        return int(holdout_days), None
+    meta = meta or {}
+    syms = symbols
+    if syms is None and evaluator is not None and not _is_synthetic(evaluator):
+        syms = getattr(evaluator, "symbol", None)
+    if syms is None:
+        syms = meta.get("symbols") or meta.get("symbol")
+    default = {"horizon_days": int(round(periods_per_year)), "horizon_source": "default"}
+    if not syms or not book:
+        return default, ("no symbol resolved for the holdout horizon: one year of periods used; rebuild the "
+                         "band from the manifest (gates.rebuild_holdout_band) before any unlock")
+    try:
+        return data.holdout_horizon(book, syms, periods_per_year=periods_per_year), None
+    except (ValueError, KeyError) as e:
+        return default, f"holdout horizon from the manifest failed ({e}); one year of periods used"
+
+
+def _build_holdout_band(study: StudyResult, horizon: int | Mapping[str, Any], ppy: float, *, n_boot: int,
+                        seed: int, selected_trades: pl.DataFrame | None = None,
+                        sel_daily: pl.DataFrame | None = None) -> st.HoldoutBand:
+    """The band construction shared by :func:`evaluate_gates` and :func:`rebuild_holdout_band`."""
+    tpd, tsrc = wfo_trades_per_day(study)
+    has_wfo = study.wfo_oos is not None and study.wfo_oos.height > 0
+    if tpd is None and has_wfo:
+        # F4: the band is built on the WFO procedure; the dev-selected trial's trade rate is the
+        # wrong series, so the trade criterion is left "not available".
+        tsrc = f"not available: {tsrc} (WFO n_trades null/absent and no trade_counts to rebuild)"
+    elif tpd is None:
+        if sel_daily is None:
+            sel_daily = study.returns.select("date", pl.col(f"t{selected_trial_id(study)}").fill_null(0.0).alias("ret"))
+        tpd = _trades_per_day(selected_trades, sel_daily["date"])
+        tsrc = "dev-selected trial's trades (no WFO series)" if tpd is not None else "none"
+    return st.holdout_band(study, horizon, ppy, n_boot=n_boot, trades_per_day=tpd, seed=seed, trades_source=tsrc,
+                           target_coverage=HOLDOUT_TARGET_COVERAGE)
+
+
+def rebuild_holdout_band(study: StudyResult, *, periods_per_year: float, reason: str,
+                         symbols: str | list[str] | None = None, selected_trades: pl.DataFrame | None = None,
+                         n_boot: int | None = None, seed: int | None = None,
+                         ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Rebuild the pre-registered holdout band for the horizon available NOW and re-register it
+    (DESIGN §4.4).  Call it when data newer than the registered band's ``horizon_end`` has been
+    exported, **before** ``/unlock-holdout`` — and, after a NOT_DECISIVE exam, before the re-exam
+    unlock (never after reading the new data).
+
+    Symbols / ``n_boot`` / ``seed`` default to the registered band's (same construction, only the
+    horizon changes).  The horizon comes from the manifest (:func:`quantlab.data.holdout_horizon`,
+    metadata only).  The event is logged as ``holdout_band_registered`` with ``reason``,
+    ``band_version`` and the horizon it replaces; the ledger refuses a rebuild after an unlock
+    whose exam is pending, after a FAIL or PASS, or without newer data
+    (:func:`quantlab.ledger.register_holdout_band`).  Returns the new band (dict)."""
+    ctx = ledger_context(study, ledger_dir)
+    cur = ledger.registered_holdout_band(study.study_id, ledger_dir=ledger_dir) or {}
+    syms = symbols or cur.get("symbols") or (study.meta or {}).get("symbols") or (study.meta or {}).get("symbol")
+    if not syms:
+        raise GateError("no symbol for the holdout horizon: pass symbols=")
+    horizon = data.holdout_horizon(ctx["book"], syms, periods_per_year=periods_per_year)
+    from datetime import datetime as _dt
+    if cur.get("horizon_end") and _dt.fromisoformat(horizon["horizon_end"]) <= _dt.fromisoformat(str(cur["horizon_end"])):
+        raise GateError(f"no newer data: the manifest ends {horizon['horizon_end']}, the registered band already "
+                        f"covers up to {cur['horizon_end']}")
+    band = _build_holdout_band(study, horizon, float(periods_per_year),
+                               n_boot=int(n_boot or cur.get("n_boot") or 2000),
+                               seed=int(seed if seed is not None else cur.get("seed", 12345)),
+                               selected_trades=selected_trades).as_dict()
+    ledger.register_holdout_band(study_id=study.study_id, band=band, reason=reason, ledger_dir=ledger_dir)
+    return band
+
+
+def run_holdout_exam(*, book: str, system: str, study_id: str, holdout_daily, n_trades: float,
+                     periods_per_year: float, ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Judge the pending holdout exam and record it (DESIGN §4.4).  Only after ``/unlock-holdout``.
+
+    Uses the band stored with the unlock row (never a band passed in), applies
+    :func:`quantlab.stats.holdout_check` to the realised holdout (the FULL span holdout start →
+    the unlock's ``horizon_end``) and appends the ``holdout_exam`` event.  Returns the check
+    result (``status`` ∈ PASS / FAIL / NOT_DECISIVE, criteria, values, horizon)."""
+    stt = ledger.holdout_state(book, system, ledger_dir)
+    if not stt["pending"]:
+        raise GateError(f"{book}/{system}: no unlocked exam is pending")
+    band = stt["last_unlock"]["pass_band"]
+    res = st.holdout_check(band, holdout_daily, n_trades, periods_per_year)
+    ledger.record_holdout_exam(book=book, system=system, study_id=study_id, result=res, ledger_dir=ledger_dir)
+    return res

@@ -402,7 +402,7 @@ def test_holdout_band_is_jointly_calibrated():
     assert band.trades_lo < rate * 260 < band.trades_hi
     assert band.max_dd_mag_hi > 0 and band.leverage > 0
     assert 0.0 < band.tail_level < 0.10 and band.joint_coverage == pytest.approx(0.90, abs=0.01)
-    passes = [S.holdout_check(band, rng.normal(mu, sd, 260), rng.poisson(rate * 260))["pass"] for _ in range(400)]
+    passes = [S.holdout_check(band, rng.normal(mu, sd, 260), rng.poisson(rate * 260))["criteria_pass"] for _ in range(400)]
     assert 0.84 < np.mean(passes) < 0.96
     assert 0.0 <= band.p_pass_zero_edge <= 1.0 and band.n_power == 300
 
@@ -444,7 +444,9 @@ def test_holdout_check_accepts_v11_band_keys():
            "trades_hi": 20, "leverage": 1.0}
     rng = np.random.default_rng(1)
     out = S.holdout_check(old, rng.normal(0.001, 0.005, 260), 15)
-    assert out["pass"] is True
+    assert out["criteria_pass"] is True
+    # a v1.1 band has no zero-edge power figure: it can never be decisive (DESIGN §4.4)
+    assert out["status"] == "NOT_DECISIVE" and out["pass"] is False
 # ------------------------------------------------------------------ component nulls
 def test_random_selectivity_null_draws_exact_selectivity():
     rng = np.random.default_rng(24)

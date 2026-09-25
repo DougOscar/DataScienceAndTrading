@@ -112,5 +112,5 @@ def dead_holdout_pass_rate(res, rep, vol=0.005, n_sim=400, seed=0, trades_per_ye
     for _ in range(n_sim):
         h = rng.standard_normal(260) * vol
         n_tr = rng.poisson(trades_per_year)
-        ok += st.holdout_check(band, h, n_tr)["pass"]
+        ok += st.holdout_check(band, h, n_tr, check_horizon=False)["criteria_pass"]   # all four criteria
     return ok / n_sim

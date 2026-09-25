@@ -7,6 +7,10 @@ disable-model-invocation: true
 
 # Alpha-decay review
 
+0. Scope: promoted systems only, and only data **after the horizon_end of their passing holdout
+   exam** (the exam already used everything up to that date, DESIGN §4.4). Systems in
+   `holdout_pending` (NOT_DECISIVE) are not reviewed here: their newer data goes to their next
+   `/unlock-holdout` re-exam, after the band is rebuilt.
 1. Ask **data-auditor** to audit any data newer than the last review (new MT5 exports converted
    with `tools/mt5_csv_to_parquet.py`).
 2. For each system in scope: **optimization-architect** executes the frozen re-optimisation
