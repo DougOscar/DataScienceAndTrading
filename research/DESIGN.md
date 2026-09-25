@@ -143,7 +143,7 @@ D1 MQL5/ONNX port + parity test ─► MT5
 | OOS Sharpe (CPCV path median) | ≥ 1.0 annualised | The minimum edge needed to enter a book |
 | Walk-forward procedure OOS | Sharpe ≥ 0.5 over the whole WFO OOS span, and > 0 over its most recent third | The re-optimisation procedure (§4.6) still works, and recently (v1.2, new) |
 | Cost stress | Sharpe > 0.5 at 1.5× spread + 1 pip adverse slippage on every market and stop fill | The edge must survive worse fills |
-| Parameter plateau | ≥ 60% of neighbours within 50% of the peak Sharpe; neighbours = ±20% of each parameter (pre-registrable on the card), computed by the judge, not the optimizer | Rejects sharp, fragile optima |
+| Parameter plateau | The judge re-runs the system at ±r/2 and ±r on each parameter axis and on a joint axis (all parameters together); on the **weakest axis** ≥ 60% of points keep ≥ 50% of the peak Sharpe (and > 0). Each numeric parameter pre-registers its scale (relative, r = 0.20 default, floor 0.10; or an absolute step), reviewed by the red team at S2 | Rejects sharp, fragile optima, independent of grid resolution and parametrisation tricks |
 | Time stability | Positive in ≥ 60% of years, and no single year > 40% of total PnL | Your own finding: past edges were concentrated in 2016–18 and 2021–22 |
 | Trade count | ≥ MinTRL | Enough evidence for the claimed Sharpe |
 | Mechanism check | Component ablation matches the hypothesis | The system must make money *for the stated reason* |
