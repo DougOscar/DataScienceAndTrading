@@ -179,12 +179,12 @@ def _setup(tmp_path, sr: float):
                         attempt=1, dev_window=["2016-05-02", "2025-05-14"], cost_model_version="t", cv_scheme="t")
     src = _WfoStudy(sr, seed=3)
     band = reg_band(src, data.holdout_horizon("FBS", "EURUSD"), "fbs-0042-a1")
-    ledger.register_holdout_band(study_id="fbs-0042-a1", band=band, reason="S5 pre-registration", ledger_dir=tmp_path)
+    ledger._register_holdout_band(study_id="fbs-0042-a1", band=band, reason="S5 pre-registration", ledger_dir=tmp_path)
     return src, band
 
 
 def _unlock(tmp_path, band):
-    return ledger.record_holdout_unlock(book="FBS", system="probe", study_id="fbs-0042-a1", pass_band=band,
+    return ledger._record_holdout_unlock(book="FBS", system="probe", study_id="fbs-0042-a1", pass_band=band,
                                        user_confirmation=ledger.unlock_phrase("FBS", "probe"), ledger_dir=tmp_path)
 
 
@@ -202,7 +202,7 @@ def test_fail_blocks_any_reexam(manifest, clean_tree, tmp_path):
     assert st["killed"] and not st["pending"] and ledger.studies(tmp_path)["fbs-0042-a1"]["system_state"] == "killed"
     manifest(TWO_YEARS_END)                                          # even with new data …
     with pytest.raises(LedgerError, match="killed"):
-        ledger.register_holdout_band(study_id="fbs-0042-a1", band={**band, "horizon_end": "2027-05-14 23:59:00"},
+        ledger._register_holdout_band(study_id="fbs-0042-a1", band={**band, "horizon_end": "2027-05-14 23:59:00"},
                                      reason="more data", ledger_dir=tmp_path)
     with pytest.raises(LedgerError, match="FAIL can never be re-examined"):
         _unlock(tmp_path, band)
@@ -213,9 +213,8 @@ def test_fail_blocks_any_reexam(manifest, clean_tree, tmp_path):
 def test_band_rebuild_before_unlock_is_logged_and_after_unlock_raises(manifest, clean_tree, tmp_path):
     study, trades = make_study(seed=4)
     ld = register(study, tmp_path)
-    rep = G.evaluate_gates(study, None, periods_per_year=260.0, selected_trades=trades, 
-                           ledger_dir=ld, holdout_symbols="EURUSD")
-    G.log_gates(rep, ledger_dir=ld)                                  # S5: band registered via the gates event
+    rep = G.evaluate_gates(study, None, periods_per_year=260.0, selected_trades=trades,
+                           ledger_dir=ld, holdout_symbols="EURUSD", log=True)   # S5: band registered
     assert ledger.registered_holdout_band(study.study_id, ledger_dir=ld)["horizon_days"] == 262
     with pytest.raises(G.GateError, match="no newer data"):          # same horizon: no band shopping
         G.rebuild_holdout_band(study, periods_per_year=260.0, reason="x", ledger_dir=ld)
@@ -223,7 +222,7 @@ def test_band_rebuild_before_unlock_is_logged_and_after_unlock_raises(manifest, 
     manifest(TWO_YEARS_END)                                          # newer data exported before the unlock
     old = rep.holdout_band
     with pytest.raises(LedgerError, match="newer data was exported"):   # stale band cannot be unlocked
-        ledger.record_holdout_unlock(book="FBS", system="toy", study_id=study.study_id, pass_band=old,
+        ledger._record_holdout_unlock(book="FBS", system="toy", study_id=study.study_id, pass_band=old,
                                      user_confirmation=ledger.unlock_phrase("FBS", "toy"), ledger_dir=ld)
     new = G.rebuild_holdout_band(study, periods_per_year=260.0, reason="EURUSD export to 2027-05-14",
                                  ledger_dir=ld)
@@ -233,9 +232,9 @@ def test_band_rebuild_before_unlock_is_logged_and_after_unlock_raises(manifest, 
     assert new["horizon_days"] > 500 and new["seed"] == old["seed"]
     assert ledger.registered_holdout_band(study.study_id, ledger_dir=ld) == ev[0]["band"]
     with pytest.raises(LedgerError, match="registered band"):        # the old band is no longer valid
-        ledger.record_holdout_unlock(book="FBS", system="toy", study_id=study.study_id, pass_band=old,
+        ledger._record_holdout_unlock(book="FBS", system="toy", study_id=study.study_id, pass_band=old,
                                      user_confirmation=ledger.unlock_phrase("FBS", "toy"), ledger_dir=ld)
-    row = ledger.record_holdout_unlock(book="FBS", system="toy", study_id=study.study_id,
+    row = ledger._record_holdout_unlock(book="FBS", system="toy", study_id=study.study_id,
                                        pass_band=ev[0]["band"], user_confirmation=ledger.unlock_phrase("FBS", "toy"),
                                        ledger_dir=ld)
     assert row["exam"] == 1 and row["horizon_end"] == "2027-05-14 23:59:00" and row["newer_data_included"] is True
@@ -264,13 +263,13 @@ def test_not_decisive_waits_and_reexam_uses_full_longer_span(manifest, clean_tre
     with pytest.raises(LedgerError, match="past the last exam|re-exam band must"):
         _unlock(tmp_path, band)
     with pytest.raises(LedgerError, match="already covered"):
-        ledger.register_holdout_band(study_id="fbs-0042-a1", band=band, reason="again", ledger_dir=tmp_path)
+        ledger._register_holdout_band(study_id="fbs-0042-a1", band=band, reason="again", ledger_dir=tmp_path)
 
     manifest(TWO_YEARS_END)                                          # a year of newer data exported
     h2 = data.holdout_horizon("FBS", "EURUSD")
     band2 = reg_band(src, h2, "fbs-0042-a1")
     assert band2["p_pass_zero_edge"] < band["p_pass_zero_edge"]      # longer horizon → more decisive
-    ledger.register_holdout_band(study_id="fbs-0042-a1", band=band2, reason="renewing holdout: +1 y",
+    ledger._register_holdout_band(study_id="fbs-0042-a1", band=band2, reason="renewing holdout: +1 y",
                                  ledger_dir=tmp_path)
     row = _unlock(tmp_path, band2)
     assert row["exam"] == 2 and row["kind"].startswith("re-exam")
@@ -306,9 +305,9 @@ def test_unlock_requires_manifest_horizon(manifest, clean_tree, tmp_path):
                         dev_window=["2016-05-02", "2025-05-14"], cost_model_version="t", cv_scheme="t")
     band = reg_band(_WfoStudy(2.8), 262, "fbs-0043-a1")               # explicit horizon (tests only)
     band["horizon_end"] = "2026-05-15 10:36:00"
-    ledger.register_holdout_band(study_id="fbs-0043-a1", band=band, reason="S5", ledger_dir=tmp_path)
+    ledger._register_holdout_band(study_id="fbs-0043-a1", band=band, reason="S5", ledger_dir=tmp_path)
     with pytest.raises(LedgerError, match="not taken from the data manifest"):
-        ledger.record_holdout_unlock(book="FBS", system="p2", study_id="fbs-0043-a1", pass_band=band,
+        ledger._record_holdout_unlock(book="FBS", system="p2", study_id="fbs-0043-a1", pass_band=band,
                                      user_confirmation=ledger.unlock_phrase("FBS", "p2"), ledger_dir=tmp_path)
 
 

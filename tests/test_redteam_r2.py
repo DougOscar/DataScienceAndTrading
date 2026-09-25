@@ -122,12 +122,12 @@ def test_r2_1b_numeric_unordered_categorical_refused_and_ordered_levels_pm2():
         opt.CategoricalParam("a", tuple(range(10, 101, 10)), ordered=False)            # G3
     opt.CategoricalParam("mode", ("fast", "slow"))                                    # non-numeric: fine
     with pytest.raises(ValueError, match="numeric parameters only"):
-        opt.Param("m", "categorical", choices=(1, 2), ordered=True, plateau_step=1.0)
-    sp = opt.SearchSpace([opt.CategoricalParam("a", (10, 20, 30, 40, 50), ordered=True)])
-    pts = G.plateau_perturbations(sp, {"a": 30}, 0.2)
-    assert [(q["offset"], q["value"]) for q in pts] == [("level -2", 10), ("level -1", 20), ("level +1", 40),
-                                                         ("level +2", 50)]
-    edge = G.plateau_perturbations(sp, {"a": 50}, 0.2)                # 2 real levels + 2 missing (listed)
+        opt.Param("m", "categorical", choices=("x", "y"), ordered=True, plateau_step=1.0)
+    sp = opt.SearchSpace([opt.CategoricalParam("a", ("vl", "l", "m", "h", "vh"), ordered=True)])
+    pts = G.plateau_perturbations(sp, {"a": "m"}, 0.2)
+    assert [(q["offset"], q["value"]) for q in pts] == [("level -2", "vl"), ("level -1", "l"), ("level +1", "h"),
+                                                         ("level +2", "vh")]
+    edge = G.plateau_perturbations(sp, {"a": "vh"}, 0.2)              # 2 real levels + 2 missing (listed)
     assert len(edge) == 4 and [q.get("missing_level", False) for q in edge] == [False, False, True, True]
 
 
@@ -135,13 +135,14 @@ def test_r2_1b_ordered_categorical_judged_on_two_levels_each_side(tmp_path):
     """G4-type edge case (red-team minor): at an edge an ordered categorical had ONE point (share
     0 or 1).  Now ±1 and ±2 levels are used: at the edge both inner levels must pass, and a
     spike that survives only the adjacent level FAILs; missing levels are listed, not scored."""
-    sp = opt.SearchSpace([opt.CategoricalParam("a", (30, 40, 50), ordered=True)])
-    ev = MapEval(_spike(0.30), lambda p: p["a"], name="ord-broad")
-    pj = _judge_at(_study(ev, sp, tmp_path, "ord-broad"), ev, sp, {"a": 50})
+    lv = {"low": 30, "mid": 40, "high": 50}                            # labels (numeric levels are refused, R3-3)
+    sp = opt.SearchSpace([opt.CategoricalParam("a", tuple(lv), ordered=True)])
+    ev = MapEval(_spike(0.30), lambda p: lv[p["a"]], name="ord-broad")
+    pj = _judge_at(_study(ev, sp, tmp_path, "ord-broad"), ev, sp, {"a": "high"})
     assert [q["status"] for q in pj["points"]].count("missing_level") == 2 and pj["n_missing_levels"] == 2
     assert pj["pass_count_by_param"]["a"] == (2, 2) and pj["plateau_score"] == 1.0
-    narrow = MapEval(_spike(0.08), lambda p: p["a"], name="ord-narrow")      # 40 passes, 30 does not
-    pj = _judge_at(_study(narrow, sp, tmp_path, "ord-narrow"), narrow, sp, {"a": 50})
+    narrow = MapEval(_spike(0.08), lambda p: lv[p["a"]], name="ord-narrow")   # mid passes, low does not
+    pj = _judge_at(_study(narrow, sp, tmp_path, "ord-narrow"), narrow, sp, {"a": "high"})
     assert pj["pass_count_by_param"]["a"] == (1, 2) and pj["plateau_score"] == 0.5
 
 
@@ -224,12 +225,12 @@ def _new(ld, sid, system, issue, *, sr=2.8, symbols=None):
     ledger.create_study(ledger_dir=ld, study_id=sid, book="FBS", system=system, issue=issue, attempt=1,
                         dev_window=["2016-05-02", "2025-05-14"], cost_model_version="t", cv_scheme="t", **extra)
     b = _reg_band(sid, sr, symbols or ("EURUSD",))
-    ledger.register_holdout_band(study_id=sid, band=b, reason="S5", ledger_dir=ld)
+    ledger._register_holdout_band(study_id=sid, band=b, reason="S5", ledger_dir=ld)
     return b
 
 
 def _unlock(ld, sid, system, band):
-    return ledger.record_holdout_unlock(book="FBS", system=system, study_id=sid, pass_band=band,
+    return ledger._record_holdout_unlock(book="FBS", system=system, study_id=sid, pass_band=band,
                                         user_confirmation=ledger.unlock_phrase("FBS", system), ledger_dir=ld)
 
 
@@ -337,16 +338,16 @@ def test_r2_3_band_is_frozen_at_the_first_gates_run_and_construction_is_fixed(ma
                           holdout_symbols="EURUSD")
     assert r1.holdout_band["seed"] == S.holdout_band_seed(study.study_id)
     assert r1.holdout_band["n_boot_requested"] == S.HOLDOUT_BAND_N_BOOT
-    G.log_gates(r1, ledger_dir=ld)
+    assert r1.ledger_row is None                                  # not logged unless log=True
+    r1 = G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades, ledger_dir=ld,
+                          holdout_symbols="EURUSD", log=True)
     reg = ledger.registered_holdout_band(study.study_id, ledger_dir=ld)
     assert reg == r1.holdout_band
-    # a later gate run (same inputs → same band here; a hand-edited one below) never replaces it
-    r2 = G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades, ledger_dir=ld,
-                          holdout_symbols="EURUSD")
-    r2.holdout_band_run = {**r2.holdout_band_run, "sharpe_lo": -9.0}
-    G.log_gates(r2, ledger_dir=ld)
+    # a later gate run never replaces it: its band is logged as a diagnostic
+    G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades, ledger_dir=ld,
+                     holdout_symbols="EURUSD", log=True)
     ev2 = ledger.study_events(study.study_id, "gates", ledger_dir=ld)[-1]
-    assert "holdout_band" not in ev2 and ev2["holdout_band_diagnostic"]["sharpe_lo"] == -9.0
+    assert "holdout_band" not in ev2 and ev2["holdout_band_diagnostic"]["sharpe_lo"] == reg["sharpe_lo"]
     assert ledger.registered_holdout_band(study.study_id, ledger_dir=ld) == reg
     # a thinned / re-seeded band can neither be registered nor unlocked
     for forged in ({**reg, "seed": 7}, {**reg, "n_boot_requested": 60}, {**reg, "n_power_requested": 50}):
@@ -361,8 +362,8 @@ def test_r2_3_band_is_frozen_at_the_first_gates_run_and_construction_is_fixed(ma
 def test_r2_3_rebuild_refuses_overrides_and_takes_symbols_from_the_ledger(manifest, clean_tree, tmp_path):
     study, trades = make_study(seed=4)
     ld = register(study, tmp_path / "led")
-    G.log_gates(G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades, ledger_dir=ld,
-                                 holdout_symbols="EURUSD"), ledger_dir=ld)
+    G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades, ledger_dir=ld,
+                     holdout_symbols="EURUSD", log=True)
     manifest({"EURUSD": datetime(2026, 9, 30, 23, 59), "GBPUSD": datetime(2027, 3, 1, 23, 59)})
     for kw in ({"seed": 999}, {"n_boot": 40}, {"symbols": ["GBPUSD"]}):
         with pytest.raises(TypeError, match="refused"):
@@ -389,10 +390,9 @@ def test_r2_4a_truncated_study_raises_and_n_never_below_the_ledger(tmp_path):
     # the optimizer logged more trials than the store holds (e.g. a partially lost store): N uses the max
     ledger.log_event(study.study_id, "trials", ledger_dir=ld, n_trials=441, n_invalid=0)
     rep = G.evaluate_gates(study, FakeEvaluator(study, trades), periods_per_year=PPY, selected_trades=trades,
-                           ledger_dir=ld)
+                           ledger_dir=ld, log=True)
     et = rep.effective_trials
     assert et["n_trials_study"] == 441 and et["n_trials_in_memory"] == 25 and et["n_trials_store"] == 25
-    G.log_gates(rep, ledger_dir=ld)
     state = ledger.studies(ld)[study.study_id]
     assert state["n_trials_study"] == 441 and ledger.study_trial_count(state) == 441
     # b) a gates event can never lower the optimizer's count seen by later attempts

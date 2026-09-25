@@ -64,6 +64,19 @@ def write_store(study: StudyResult, studies_dir: Path) -> Path:
 FAKE_DESC = {"evaluator": "FakeEvaluator"}
 
 
+def record_selection(study: StudyResult, ledger_dir: Path, studies_dir: Path) -> None:
+    """Write the study's OOS artifacts into its store and log the ``selection`` event with their
+    hashes (as ``opt.run_study`` does, R3-2), unless the study already has one."""
+    if ledger.study_events(study.study_id, "selection", ledger_dir=ledger_dir):
+        return
+    m = study.meta or {}
+    sha = ledger.write_study_artifacts(study.study_id, {
+        "cpcv_paths": study.cpcv_paths, "wfo_oos": study.wfo_oos, "wfo_params": study.wfo_params,
+        "trade_counts": m.get("trade_counts"), "entry_counts": m.get("entry_counts")}, studies_dir)
+    ledger.log_event(study.study_id, "selection", ledger_dir=ledger_dir, selected_params=study.selected_params,
+                     selection={k: v for k, v in (study.selection or {}).items()}, artifact_sha256=sha)
+
+
 def register(study: StudyResult, ledger_dir: Path | None = None, **over) -> Path:
     """Create the study's ``study_created`` ledger row from its meta (identity, method, space,
     candidate-set flag, radius) in ``ledger_dir`` (default: a fresh temporary ledger), with the
@@ -85,6 +98,7 @@ def register(study: StudyResult, ledger_dir: Path | None = None, **over) -> Path
             row[k_led] = m[k_meta]
     row.update(over)
     ledger.create_study(ledger_dir=ld, **row)
+    record_selection(study, ld, sd)
     return ld
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")          # uncalibrated fallback spec is fine for tests
@@ -229,6 +243,9 @@ def run(study, trades, evaluator="fake", **kw):
     if "studies_dir" not in kw and "studies_dir" not in (ledger.created_row(study.study_id, ledger_dir=kw["ledger_dir"])
                                                            or {}):
         kw["studies_dir"] = write_store(study, Path(kw["ledger_dir"]) / "studies")
+    record_selection(study, Path(kw["ledger_dir"]),
+                     kw.get("studies_dir") or Path(ledger.created_row(study.study_id, ledger_dir=kw["ledger_dir"])
+                                                   ["studies_dir"]))
     return G.evaluate_gates(study, ev, periods_per_year=PPY, selected_trades=trades, **kw), ev
 
 
@@ -835,7 +852,7 @@ def test_data_dependent_flag_is_read_from_the_ledger(tmp_path, good):
     sid = study.study_id
     _create(tmp_path, sid, 1, system="toy", issue=99, candidate_set_data_dependent=False)
     ledger.log_event(sid, "trials", ledger_dir=tmp_path, n_trials=25, n_by_source={"tpe": 5, "sobol": 20})
-    ledger.log_event(sid, "selection", ledger_dir=tmp_path, candidate_set_data_dependent=False)
+    ledger.log_event(sid, "note", ledger_dir=tmp_path, candidate_set_data_dependent=False)
     assert ledger.candidate_set_data_dependent(sid, ledger_dir=tmp_path) is True
     with pytest.raises(G.GateError, match="candidate_set_data_dependent"):
         run(replace(study, meta={**study.meta, "candidate_set_data_dependent": False}), trades, ledger_dir=tmp_path)
@@ -849,11 +866,12 @@ def test_log_gates_counts_own_trials_and_flags_reruns(tmp_path, good):
     study, trades = good
     s1 = replace(study, meta={**study.meta, "book": "FBS", "system": "toy", "attempt": 1})
     _create(tmp_path, s1.study_id, 1)
-    rep, _ = run(s1, trades, ledger_dir=tmp_path)
-    assert rep.prior_gate_runs == []
-    G.log_gates(rep, ledger_dir=tmp_path)
+    rep, _ = run(s1, trades, ledger_dir=tmp_path, log=True)
+    assert rep.prior_gate_runs == [] and rep.ledger_row["event"] == "gates"
+    with pytest.raises(TypeError, match="R3-1"):
+        G.log_gates(rep, ledger_dir=tmp_path)          # an externally supplied report never reaches the ledger
     state = ledger.studies(tmp_path)[s1.study_id]
-    assert state["events"] == ["study_created", "gates"] and state["verdict"] == "PASS"
+    assert state["events"] == ["study_created", "selection", "gates"] and state["verdict"] == "PASS"
     assert state["gates"]["cscv_oos_loss"] == pytest.approx(rep.row("cscv_oos_loss").value)
     assert state["gate_run"] == 1 and state["n_trials_study"] == 25 and state["n_trials_dsr"] == 25
     assert state["holdout_band"]["sharpe_lo"] == pytest.approx(rep.holdout_band["sharpe_lo"])
@@ -865,15 +883,13 @@ def test_log_gates_counts_own_trials_and_flags_reruns(tmp_path, good):
     # attempt 2: prior = 25 (a1's own); after logging, attempt 3's prior = 25 + 25, not 25 + 50
     s2 = replace(study, study_id="fbs-0099-a2", meta={**s1.meta, "attempt": 2})
     _create(tmp_path, "fbs-0099-a2", 2)
-    r2, _ = run(s2, trades, ledger_dir=tmp_path)
+    r2, _ = run(s2, trades, ledger_dir=tmp_path, log=True)
     assert r2.effective_trials["n_trials_prior"] == 25
-    G.log_gates(r2, ledger_dir=tmp_path)
     assert ledger.system_prior_trials("FBS", "toy", exclude_study="fbs-0099-a3", ledger_dir=tmp_path)[0] == 50
     # re-run on the same study → flagged
-    again, _ = run(s1, trades, ledger_dir=tmp_path)
+    again, _ = run(s1, trades, ledger_dir=tmp_path, log=True)
     assert len(again.prior_gate_runs) == 1 and again.prior_gate_runs[0]["verdict"] == "PASS"
     assert "gated 1 time(s) before" in again.to_markdown()
-    G.log_gates(again, ledger_dir=tmp_path)
     assert ledger.studies(tmp_path)[s1.study_id]["gate_run"] == 2
     ledger.verify_chain(tmp_path)
 
@@ -962,15 +978,19 @@ def test_judge_plateau_on_d5_sobol_study(tmp_path):
                                 base_sharpe=0.0, rho=0.8, seed=7)
         res = _study_run(ev, sp, tmp_path, f"sobol5-{width}", method="sobol", n_trials=64, seed=1)
         assert res.trials["source"].to_list() == ["sobol"] * 64
+        # judged at the planted centre (not the study's own pick): the judge is called directly, since
+        # evaluate_gates refuses a selection that differs from the ledger's (R3-2)
         judged = replace(res, selected_params=dict(centre), selection={**res.selection, "trial_id": k})
-        rep = _gate(judged, ev, tmp_path)
-        pdl = rep.plateau_detail
-        assert pdl["kind"] == "judge-run" and len(pdl["points"]) == 28 and pdl["n_evaluations"] <= 29   # 5×4 + 8 joint
+        if res.selection["trial_id"] != k:
+            with pytest.raises(G.GateError, match="R3-2"):
+                _gate(judged, ev, tmp_path)
+        pdl = G.judge_plateau(judged, ev, space=sp, radius=0.2, periods_per_year=PPY)
+        assert len(pdl["points"]) == 28 and pdl["n_evaluations"] <= 29   # 5×4 + 8 joint
         assert sum(q["param"] == "joint" for q in pdl["points"]) == 8
         assert pdl["peak_sharpe"] > 1.5
-        got[width] = rep.row("plateau").status
-        fb = G.evaluate_gates(judged, None, periods_per_year=PPY, ledger_dir=tmp_path / "ledger")
-        assert fb.row("plateau").status != "PASS" and "Matrix-based fallback" in fb.row("plateau").interpretation
+        got[width] = "PASS" if G._cmp(">=", pdl["plateau_score"], 0.6) else "FAIL"
+        fb = G.plateau_score(judged, PPY, radius=0.2, space=sp.to_json())
+        assert not (fb["plateau_score"] >= 0.6) or fb["n_neighbours"] == 0      # the matrix fallback cannot judge it
     assert got == {0.02: "FAIL", 0.35: "PASS"}, got
 
 

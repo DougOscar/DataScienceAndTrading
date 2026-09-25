@@ -336,11 +336,16 @@ class SignRandomSMA:
 
 
 # =========================================================================== study plumbing
+def _hold_param(holds) -> opt.Param:
+    # R3-3: numeric categoricals are refused; an uneven hold grid is a numeric param with levels=
+    return opt.IntParam("hold", min(holds), max(holds), levels=tuple(holds), plateau_scale="relative")
+
+
 def _space(task: dict[str, Any]) -> opt.SearchSpace:
     sp = task.get("space", "seedhold")
     if sp == "seedhold":
         return opt.SearchSpace((opt.IntParam("seed", 0, N_SEEDS - 1, plateau_step=0.2 * (N_SEEDS - 1)),
-                                opt.CategoricalParam("hold", SETUPS[task["setup"]]["holds"], ordered=True)))
+                                _hold_param(SETUPS[task["setup"]]["holds"])))
     if sp == "exits":            # shared entry schedule; only exits vary (9 × 7 × 2 = 126; pilot ρ ≈ 0.79)
         return opt.SearchSpace((opt.FloatParam("stop_mult", 2.0, 4.0, step=0.25, plateau_scale="relative"),
                                 opt.FloatParam("target_mult", 3.0, 6.0, step=0.5, plateau_scale="relative"),

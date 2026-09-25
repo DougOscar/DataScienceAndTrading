@@ -20,6 +20,7 @@ lives in ``research/studies/<study_id>/`` as Parquet parts written by
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import json
@@ -36,6 +37,7 @@ from . import config
 
 STUDIES_FILE = "studies.jsonl"
 HOLDOUT_FILE = "holdout_access.jsonl"
+READS_FILE = "holdout_reads.jsonl"       # R3-5: holdout reads, kept out of the unlock/exam chain
 GENESIS = "0" * 64
 
 REQUIRED_STUDY_FIELDS = (
@@ -81,25 +83,60 @@ def _raw_lines(path: Path) -> list[str]:
     return [ln for ln in path.read_text().splitlines() if ln.strip()]
 
 
+def _last_line(path: Path) -> str | None:
+    """The last non-empty line of ``path``, read from the end of the file (R3-5: appends no longer
+    re-read the whole file)."""
+    if not path.exists():
+        return None
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        chunk = 4096
+        while True:
+            start = max(0, size - chunk)
+            fh.seek(start)
+            buf = fh.read(size - start)
+            lines = [ln for ln in buf.split(b"\n") if ln.strip()]
+            # the first piece may be a partial line unless we read from the start of the file
+            if start == 0 or len(lines) >= 2:
+                return lines[-1].decode() if lines else None
+            chunk *= 4
+
+
 def _append(path: Path, event: dict[str, Any]) -> dict[str, Any]:
     with _locked(path):
-        lines = _raw_lines(path)
-        prev = _sha(lines[-1]) if lines else GENESIS
-        row = {"seq": len(lines), "prev": prev, "at": _now(), **event}
+        last = _last_line(path)
+        prev = _sha(last) if last is not None else GENESIS
+        seq = int(json.loads(last)["seq"]) + 1 if last is not None else 0
+        row = {"seq": seq, "prev": prev, "at": _now(), **event}
         line = json.dumps(row, sort_keys=True, default=str)
         with open(path, "a") as fh:
             fh.write(line + "\n")
     return row
 
 
+_READ_CACHE: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}
+
+
 def _read(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(ln) for ln in _raw_lines(path)]
+    """Parsed rows of a ledger file, cached per (size, mtime) (R3-5).  Callers must not mutate them."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return []
+    key = str(path)
+    got = _READ_CACHE.get(key)
+    if got is not None and got[0] == st.st_size and got[1] == st.st_mtime_ns:
+        return got[2]
+    rows = [json.loads(ln) for ln in _raw_lines(path)]
+    _READ_CACHE[key] = (st.st_size, st.st_mtime_ns, rows)
+    return rows
 
 
 def verify_chain(ledger_dir: Path | None = None) -> None:
     """Raise :class:`LedgerError` if any ledger file was edited, reordered or truncated mid-chain."""
     d = _ledger_dir(ledger_dir)
-    for name in (STUDIES_FILE, HOLDOUT_FILE):
+    for name in (STUDIES_FILE, HOLDOUT_FILE, READS_FILE):
         prev = GENESIS
         for i, line in enumerate(_raw_lines(d / name)):
             row = json.loads(line)
@@ -138,6 +175,10 @@ def create_study(*, ledger_dir: Path | None = None, **fields: Any) -> dict[str, 
     if missing:
         raise LedgerError(f"study is missing fields: {missing}")
     config.get_book(fields["book"])
+    iss = fields.get("issue")
+    if isinstance(iss, bool) or not isinstance(iss, int) or iss < 0:
+        raise LedgerError(f"issue must be a non-negative int (the hypothesis issue number), got {iss!r} "
+                          f"(red-team R3-4: a study without an issue escapes the holdout family)")
     path = _ledger_dir(ledger_dir) / STUDIES_FILE
     if any(r["study_id"] == fields["study_id"] and r["event"] == "study_created" for r in _read(path)):
         raise LedgerError(f"study {fields['study_id']} already exists; use a new attempt id")
@@ -237,7 +278,7 @@ def system_prior_trials(book: str, system: str, *, exclude_study: str | None = N
 def study_events(study_id: str, event: str | None = None, *,
                  ledger_dir: Path | None = None) -> list[dict[str, Any]]:
     """Raw ledger rows of one study (optionally one event type), in order."""
-    return [r for r in _read(_ledger_dir(ledger_dir) / STUDIES_FILE)
+    return [copy.deepcopy(r) for r in _read(_ledger_dir(ledger_dir) / STUDIES_FILE)
             if r.get("study_id") == study_id and (event is None or r.get("event") == event)]
 
 
@@ -245,7 +286,7 @@ def created_row(study_id: str, *, ledger_dir: Path | None = None) -> dict[str, A
     """The study's ``study_created`` row (raw, with ``seq``), or None if the study is not in the ledger."""
     for r in _read(_ledger_dir(ledger_dir) / STUDIES_FILE):
         if r.get("study_id") == study_id and r.get("event") == "study_created":
-            return r
+            return copy.deepcopy(r)
     return None
 
 
@@ -347,15 +388,16 @@ def _canon_json(obj: Any) -> str:
 
 
 def holdout_unlocks(ledger_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Every ``holdout_unlock`` / ``holdout_exam`` row of ``holdout_access.jsonl`` (read-access
-    events are excluded — see :func:`holdout_reads`)."""
+    """Every ``holdout_unlock`` / ``holdout_exam`` row of ``holdout_access.jsonl`` (reads live in
+    ``holdout_reads.jsonl`` — see :func:`holdout_reads`)."""
     return [r for r in _read(_ledger_dir(ledger_dir) / HOLDOUT_FILE)
             if r.get("event", "holdout_unlock") in _HOLDOUT_EXAM_EVENTS]
 
 
 def holdout_reads(ledger_dir: Path | None = None) -> list[dict[str, Any]]:
-    """Every logged holdout read (``holdout_read`` events: book, system, study_id, symbol, range)."""
-    return [r for r in _read(_ledger_dir(ledger_dir) / HOLDOUT_FILE) if r.get("event") == "holdout_read"]
+    """Every logged holdout read (``holdout_read`` events in ``holdout_reads.jsonl``: book, system
+    the caller named, the unlocked system / study it resolved to, symbol, range)."""
+    return list(_read(_ledger_dir(ledger_dir) / READS_FILE))
 
 
 def _created_rows(ledger_dir: Path | None) -> dict[str, dict[str, Any]]:
@@ -370,30 +412,49 @@ def _as_int(v: Any) -> int | None:
         return None
 
 
+def _book_of(v: Any) -> str | None:
+    try:
+        return config.get_book(v).name
+    except Exception:  # noqa: BLE001 — a malformed row cannot match
+        return None
+
+
 def holdout_family(book: str, system: str, ledger_dir: Path | None = None, *, study_id: str | None = None,
                    issue: Any = None) -> dict[str, Any]:
-    """The key set of a system's holdout family (R2-2): its book, normalised system name and the
-    issues of every study of that (book, normalised system), plus ``issue`` / ``study_id``'s issue."""
+    """The key set of a system's holdout family (R2-2 / R3-4), **within one book**: the closure of
+    "shares a normalised system name OR an issue" over the book's studies, starting from
+    ``system`` (+ ``issue`` / ``study_id``'s issue).  Symmetric: every member has the same
+    family.  Returns ``book``, ``systems`` (normalised names), ``issues``, ``created`` rows."""
     b = config.get_book(book).name
-    ns = normalise_system(system)
     created = _created_rows(ledger_dir)
+    rows = [r for r in created.values() if _book_of(r.get("book")) == b]
+    systems: set[str] = {normalise_system(system)} - {""}
     issues: set[int] = set()
     if _as_int(issue) is not None:
         issues.add(_as_int(issue))
-    if study_id and study_id in created and _as_int(created[study_id].get("issue")) is not None:
-        issues.add(_as_int(created[study_id]["issue"]))
-    for r in created.values():
-        try:
-            rb = config.get_book(r.get("book")).name
-        except Exception:  # noqa: BLE001 — a malformed row cannot match
-            continue
-        if rb == b and ns and normalise_system(r.get("system")) == ns and _as_int(r.get("issue")) is not None:
-            issues.add(_as_int(r["issue"]))
-    return {"book": b, "system_norm": ns, "issues": issues, "created": created}
+    if study_id and study_id in created and _book_of(created[study_id].get("book")) == b:
+        if _as_int(created[study_id].get("issue")) is not None:
+            issues.add(_as_int(created[study_id]["issue"]))
+        systems.add(normalise_system(created[study_id].get("system")))
+    changed = True
+    while changed:
+        changed = False
+        for r in rows:
+            ns, iss = normalise_system(r.get("system")), _as_int(r.get("issue"))
+            if (ns and ns in systems) or (iss is not None and iss in issues):
+                if ns and ns not in systems:
+                    systems.add(ns)
+                    changed = True
+                if iss is not None and iss not in issues:
+                    issues.add(iss)
+                    changed = True
+    return {"book": b, "systems": systems, "issues": issues, "created": created}
 
 
 def _row_in_family(r: dict[str, Any], fam: dict[str, Any]) -> bool:
-    if r.get("book") == fam["book"] and fam["system_norm"] and normalise_system(r.get("system")) == fam["system_norm"]:
+    if _book_of(r.get("book")) != fam["book"]:
+        return False
+    if normalise_system(r.get("system")) in fam["systems"]:
         return True
     iss = _as_int(r.get("issue"))
     if iss is None:
@@ -415,8 +476,9 @@ def is_holdout_unlocked(book: str, system: str, ledger_dir: Path | None = None) 
 
 def holdout_state(book: str, system: str, ledger_dir: Path | None = None, *, study_id: str | None = None,
                   issue: Any = None) -> dict[str, Any]:
-    """Fold of the holdout rows of a system's family (R2-2: same book + normalised system name, or
-    a shared issue — see :func:`holdout_family`).
+    """Fold of the holdout rows of a system's family (R2-2 / R3-4: within the book, the closure of
+    shared normalised system names and shared issues — see :func:`holdout_family`); the state is
+    the most restrictive over the whole family.
 
     ``n_unlocks`` / ``n_exams``; ``pending`` (unlocked, exam not yet recorded); ``last_status``
     (None / PASS / FAIL / NOT_DECISIVE); ``killed`` (any FAIL); ``passed`` (a PASS);
@@ -449,16 +511,19 @@ def holdout_state(book: str, system: str, ledger_dir: Path | None = None, *, stu
 
 
 def holdout_access(book: str, system: str, ledger_dir: Path | None = None) -> dict[str, Any] | None:
-    """What ``quantlab.data`` may serve from the holdout to ``system`` (R2-2), or None when its
-    family has no unlock.  ``symbols``: the symbols registered for the unlocked study (traded +
+    """What ``quantlab.data`` may serve from the holdout to ``system`` (R2-2 / R3-5), or None when
+    ``system`` is not (normalised) the system of an unlocked study — family members and unknown
+    aliases get nothing.  ``symbols``: the symbols registered for the unlocked study (traded +
     conversion legs, stored on the latest unlock row); ``end``: exclusive timestamp limit — the
     latest unlock's ``horizon_end`` + 1 minute until a PASS, None after a decisive PASS (newer
     data then belongs to the decay review, §4.6) or for a legacy row without a horizon;
-    ``study_id`` of that unlock."""
+    ``study_id`` / ``system`` of that unlock."""
     st = holdout_state(book, system, ledger_dir)
     if st["n_unlocks"] == 0:
         return None
     u = st["last_unlock"] or {}
+    if not normalise_system(system) or normalise_system(u.get("system")) != normalise_system(system):
+        return None
     he = u.get("horizon_end")
     end = None if (st["passed"] or not he) else datetime.fromisoformat(str(he)) + timedelta(minutes=1)
     syms = list(u.get("symbols") or []) + [s for s in (u.get("conversion_legs") or []) if s not in (u.get("symbols") or [])]
@@ -476,15 +541,18 @@ _LOGGED_READS: set[tuple] = set()
 
 
 def log_holdout_read(*, book: str, system: str, study_id: str | None, symbol: str, timeframe: str,
-                     start: Any, end: Any, ledger_dir: Path | None = None) -> dict[str, Any] | None:
-    """Append a ``holdout_read`` event (R2-2) to holdout_access.jsonl: who (system / study) read which
-    symbol over which range.  An identical read already logged by this process is not repeated."""
+                     start: Any, end: Any, unlocked_system: str | None = None,
+                     ledger_dir: Path | None = None) -> dict[str, Any] | None:
+    """Append a ``holdout_read`` event (R2-2) to ``holdout_reads.jsonl`` (its own chained file, R3-5):
+    who (the system named by the caller, the unlocked study it resolved to) read which symbol over
+    which range.  An identical read already logged by this process is not repeated."""
     key = (str(_ledger_dir(ledger_dir)), book, system, study_id, symbol, timeframe, str(start), str(end))
     if key in _LOGGED_READS:
         return None
     _LOGGED_READS.add(key)
-    return _append(_ledger_dir(ledger_dir) / HOLDOUT_FILE, {
+    return _append(_ledger_dir(ledger_dir) / READS_FILE, {
         "event": "holdout_read", "book": book, "system": system, "study_id": study_id, "symbol": symbol,
+        "unlocked_system": unlocked_system,
         "timeframe": timeframe, "start": None if start is None else str(start), "end": str(end)})
 
 
@@ -498,10 +566,10 @@ def registered_holdout_band(study_id: str, *, ledger_dir: Path | None = None) ->
     replace it), else None."""
     reg = study_events(study_id, "holdout_band_registered", ledger_dir=ledger_dir)
     if reg:
-        return reg[-1]["band"]
+        return copy.deepcopy(reg[-1]["band"])
     for r in study_events(study_id, "gates", ledger_dir=ledger_dir):
         if r.get("holdout_band"):
-            return r["holdout_band"]
+            return copy.deepcopy(r["holdout_band"])
     return None
 
 
@@ -518,6 +586,16 @@ def study_symbols(study_id: str, *, ledger_dir: Path | None = None) -> tuple[lis
         syms = [band["symbols"]] if isinstance(band["symbols"], str) else list(band["symbols"])
         return syms, list(band.get("conversion_legs") or [])
     return [], []
+
+
+def record_mechanism_review(study_id: str, *, passed: bool, note: str,
+                            ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Record the human S5 judgement of the mechanism gate (component ablation vs the card) when it
+    was not run as a callable.  ``gates.unlock_holdout`` accepts a MANUAL mechanism gate only if the
+    latest review ``passed``."""
+    if not str(note).strip():
+        raise LedgerError("a mechanism review needs a note (what was checked against the card)")
+    return log_event(study_id, "mechanism_review", ledger_dir=ledger_dir, passed=bool(passed), note=str(note))
 
 
 def _study_system(study_id: str, ledger_dir: Path | None) -> tuple[str, str]:
@@ -548,12 +626,13 @@ def check_band_construction(study_id: str, band: dict[str, Any], *, ledger_dir: 
                           f"{syms} (R2-3: symbols come from the ledger)")
 
 
-def register_holdout_band(*, study_id: str, band: dict[str, Any], reason: str,
-                          ledger_dir: Path | None = None) -> dict[str, Any]:
+def _register_holdout_band(*, study_id: str, band: dict[str, Any], reason: str,
+                           ledger_dir: Path | None = None) -> dict[str, Any]:
     """Pre-register (or re-register) the holdout pass band of a study — event
     ``holdout_band_registered`` with ``band_version``, horizon and ``reason``.
 
-    Use it via ``gates.rebuild_holdout_band`` when newer data was exported before the unlock.
+    Private (R3-1): reachable only through ``gates.rebuild_holdout_band``, which computes the band
+    itself from the verified study (the first band is registered by the first gates run).
     Refuses (:class:`LedgerError`) when:
 
     * the band was not built with the fixed seed / n_boot / n_power, or for other symbols than
@@ -623,9 +702,25 @@ def _check_band_current(b: str, band: dict[str, Any]) -> dict[str, Any]:
             "manifest_changed": bool(sha_band and sha_band != sha_now)}
 
 
-def record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: dict[str, Any],
-                          user_confirmation: str, ledger_dir: Path | None = None) -> dict[str, Any]:
-    """Unlock a holdout exam (DESIGN §4.4).  Only ``/unlock-holdout`` should call this.
+def register_holdout_band(**_: Any) -> None:
+    """Removed (red-team R3-1): a band is registered only by the first gates run
+    (``gates.evaluate_gates(..., log=True)``) or by ``gates.rebuild_holdout_band``."""
+    raise LedgerError("ledger.register_holdout_band is not public (red-team R3-1): the first band comes from "
+                      "gates.evaluate_gates(..., log=True); a newer horizon from gates.rebuild_holdout_band")
+
+
+def record_holdout_unlock(**_: Any) -> None:
+    """Removed (red-team R3-1): use ``gates.unlock_holdout``, which re-verifies the study, recomputes
+    the gates and the band, and only then writes the unlock row."""
+    raise LedgerError("ledger.record_holdout_unlock is not public (red-team R3-1): use gates.unlock_holdout, which "
+                      "recomputes the verdict and the band from the verified study before unlocking")
+
+
+def _record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: dict[str, Any],
+                           user_confirmation: str, ledger_dir: Path | None = None,
+                           verification: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Unlock a holdout exam (DESIGN §4.4).  Private: only ``gates.unlock_holdout`` (called by
+    ``/unlock-holdout`` after it recomputed the gates and the band, R3-1) writes the row.
 
     ``user_confirmation`` must be the exact :func:`unlock_phrase` **typed by the user** in the
     conversation; the skill passes it through verbatim and it is stored in the chained log.
@@ -666,7 +761,7 @@ def record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: d
     reg = registered_holdout_band(study_id, ledger_dir=ledger_dir)
     if reg is None or _canon_json(reg) != _canon_json(pass_band):
         raise LedgerError("pass_band is not the study's registered band (ledger.registered_holdout_band); "
-                          "register it first (S5 gates / ledger.register_holdout_band)")
+                          "register it first (S5: gates.evaluate_gates(..., log=True))")
     check_band_construction(study_id, pass_band, ledger_dir=ledger_dir)
     if st["n_unlocks"] and (not pass_band.get("horizon_end") or datetime.fromisoformat(str(pass_band["horizon_end"]))
                             <= datetime.fromisoformat(str(st["last_horizon_end"]))):
@@ -685,6 +780,7 @@ def record_holdout_unlock(*, book: str, system: str, study_id: str, pass_band: d
         "horizon_days": pass_band.get("horizon_days"), "horizon_end": pass_band.get("horizon_end"),
         "newer_data_included": pass_band.get("newer_data_included"),
         "symbols": syms, "conversion_legs": [s for s in legs if s not in syms], **man,
+        "verification": verification,
     })
 
 
@@ -787,6 +883,64 @@ class TrialRecorder:
 
     def __exit__(self, *exc: object) -> None:
         self.flush()
+
+
+# --------------------------------------------------------------------------- study artifacts (R3-2)
+STUDY_ARTIFACTS = ("cpcv_paths", "wfo_oos", "wfo_params", "trade_counts", "entry_counts")
+EMPTY_FRAME_SHA = "empty"
+
+
+def frame_sha256(df: pl.DataFrame | None) -> str:
+    """Content hash of a frame in its row order (R3-2): column names (sorted), each column cast to a
+    canonical type (numbers → float64 with NaN for null, dates/datetimes → int, anything else →
+    string) and hashed.  None or a frame with no rows / columns → :data:`EMPTY_FRAME_SHA`."""
+    if df is None or df.width == 0 or df.height == 0:
+        return EMPTY_FRAME_SHA
+    import numpy as np
+    h = hashlib.sha256()
+    h.update(str(df.height).encode())
+    for c in sorted(df.columns):
+        s = df[c]
+        h.update(b"\x1e" + c.encode())
+        if s.dtype == pl.Date:
+            arr = s.cast(pl.Int32).cast(pl.Float64).fill_null(float("nan")).to_numpy()
+        elif isinstance(s.dtype, pl.Datetime):
+            arr = s.dt.epoch("ms").cast(pl.Float64).fill_null(float("nan")).to_numpy()
+        elif s.dtype.is_numeric() or s.dtype == pl.Boolean:
+            arr = s.cast(pl.Float64).fill_null(float("nan")).to_numpy()
+        else:
+            h.update("\x1f".join("\x00" if v is None else str(v) for v in s.to_list()).encode())
+            continue
+        h.update(np.ascontiguousarray(arr, dtype="<f8").tobytes())
+    return h.hexdigest()
+
+
+def write_study_artifacts(study_id: str, frames: dict[str, pl.DataFrame | None],
+                          studies_dir: Path | None = None) -> dict[str, str]:
+    """Write the study's OOS artifacts (``cpcv_paths``, ``wfo_oos``, ``wfo_params``, ``trade_counts``,
+    ``entry_counts``) as ``artifact-<name>.parquet`` in its store and return their
+    :func:`frame_sha256` (logged in the ``selection`` event by ``opt.run_study``)."""
+    d = (Path(studies_dir) if studies_dir else config.STUDIES_DIR) / study_id
+    d.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for name in STUDY_ARTIFACTS:
+        df = frames.get(name)
+        p = d / f"artifact-{name}.parquet"
+        sha = frame_sha256(df)
+        if sha == EMPTY_FRAME_SHA:
+            p.unlink(missing_ok=True)
+        else:
+            df.write_parquet(p)
+        out[name] = sha
+    return out
+
+
+def load_study_artifact(study_id: str, name: str, studies_dir: Path | None = None) -> pl.DataFrame | None:
+    """A stored OOS artifact (see :func:`write_study_artifacts`), or None when absent / empty."""
+    if name not in STUDY_ARTIFACTS:
+        raise ValueError(f"unknown artifact {name!r}")
+    p = (Path(studies_dir) if studies_dir else config.STUDIES_DIR) / study_id / f"artifact-{name}.parquet"
+    return pl.read_parquet(p) if p.exists() else None
 
 
 def load_trials(study_id: str, studies_dir: Path | None = None) -> pl.DataFrame:

@@ -112,6 +112,9 @@ GATE_THRESHOLDS = MappingProxyType({
 PLATEAU_PEAK_FRACTION = 0.5
 PLATEAU_RADIUS = 0.20                       # ±20 % economic neighbourhood (card pre-registers; ledger row)
 PLATEAU_RADIUS_MIN = 0.10                   # floor for a pre-registered radius (N3)
+# R3-3: every numeric perturbation's outer tolerance is at least this share of the declared search
+# range (high − low), the inner one half of it — whatever scale the author declared.  Read-only.
+PLATEAU_MIN_RANGE_FRACTION = 0.05
 WFO_RECENT_FRACTION = 1.0 / 3.0
 MINTRL_PROB = 0.95
 HOLDOUT_TARGET_COVERAGE = 0.90
@@ -164,6 +167,7 @@ class GateReport:
     plateau_detail: dict[str, Any] = field(default_factory=dict)   # judge-run perturbations (N4)
     ledger_context: dict[str, Any] = field(default_factory=dict)   # identity read from the ledger (N2)
     holdout_band_run: dict[str, Any] | None = None   # this run's band; == holdout_band unless one is registered
+    ledger_row: dict[str, Any] | None = None          # the gates event written by evaluate_gates(log=True)
 
     def row(self, gate: str) -> GateRow:
         for r in self.rows:
@@ -408,8 +412,12 @@ def plateau_score(study: StudyResult, periods_per_year: float = 260.0, *,
         xf = float(x)
         if spec.get("plateau_step") is not None:             # R2-1: pre-registered absolute step
             tol, rule = float(spec["plateau_step"]), f"±{float(spec['plateau_step']):g} (plateau_step)"
+            if spec.get("low") is not None and spec.get("high") is not None:
+                tol = max(tol, PLATEAU_MIN_RANGE_FRACTION * (float(spec["high"]) - float(spec["low"])))
         elif spec.get("plateau_scale") == "relative" and xf > 0:
             tol, rule = r * abs(xf), f"±{r:.0%} relative (plateau_scale)"
+            if spec.get("low") is not None and spec.get("high") is not None:
+                tol = max(tol, PLATEAU_MIN_RANGE_FRACTION * (float(spec["high"]) - float(spec["low"])))
         elif positive and xf > 0:
             tol, rule = r * abs(xf), f"±{r:.0%} relative"
         else:
@@ -461,6 +469,7 @@ def _axis_ladder(p: Any, x: float, radius: Any) -> tuple[list[tuple[str, float, 
     the outer point is kept distinct from the inner one (so each side has two distinct ints)."""
     step = getattr(p, "plateau_step", None)
     scale = getattr(p, "plateau_scale", None)
+    floor = PLATEAU_MIN_RANGE_FRACTION * (float(p.high) - float(p.low))
     if step is not None:
         unit, rule = float(step), f"±{float(step):g}/2, ±{float(step):g} (absolute plateau_step)"
         labels = [f"-{unit:g}", f"-{unit / 2:g}", f"+{unit / 2:g}", f"+{unit:g}"]
@@ -471,6 +480,10 @@ def _axis_ladder(p: Any, x: float, radius: Any) -> tuple[list[tuple[str, float, 
     else:
         raise GateError(f"parameter {p.name!r} declares no plateau scale (plateau_scale='relative' or "
                         f"plateau_step=); the space predates red-team R2-1 and cannot be judged — re-run the study")
+    if unit < floor:                                # R3-3: 5 % of the declared range, read-only
+        unit = floor
+        rule += f" → floored at ±{floor:g}/2, ±{floor:g} ({PLATEAU_MIN_RANGE_FRACTION:.0%} of the range)"
+        labels = [f"-{unit:g}", f"-{unit / 2:g}", f"+{unit / 2:g}", f"+{unit:g}"]
     raw = [x + m * unit for m in _AXIS_MULTS]
     if p.kind == "int":
         xi = _round_half_up(x)
@@ -505,7 +518,9 @@ def plateau_perturbations(space: Any, selected: Mapping[str, Any],
     * numeric params move one at a time by their **declared** plateau scale (R2-1): a
       ``plateau_scale="relative"`` param to x·(1 − r), x·(1 − r/2), x·(1 + r/2), x·(1 + r); a
       ``plateau_step=S`` param to x − S, x − S/2, x + S/2, x + S (r = the study's radius from
-      the ledger; per-param radii apply to relative params).  Ints: see :func:`_axis_ladder`;
+      the ledger; per-param radii apply to relative params).  The outer move is floored at
+      :data:`PLATEAU_MIN_RANGE_FRACTION` (5 %) of the declared range, the inner at half of it
+      (R3-3).  Ints: see :func:`_axis_ladder`;
     * ordered categoricals: the levels at −2, −1, +1, +2 (up to 4 points); a level beyond either
       end does not exist: it is listed (``missing_level``) but not scored, so the axis share is
       over the levels that exist (a 3-level param at its centre or edge: 2 points, both must pass);
@@ -937,8 +952,14 @@ def verify_trial_store(study: StudyResult, *, studies_dir: Path | None = None,
     values on every recorded date (0 / null elsewhere, as ``opt`` builds the matrix).  Any
     mismatch — e.g. a TPE study relabelled with a clean study's id — raises :class:`GateError`.
 
+    R3-2: ``selection['trial_id']`` and ``selected_params`` must equal the ledger's ``selection``
+    event, and ``cpcv_paths`` / ``wfo_oos`` / ``wfo_params`` (and ``meta['trade_counts']`` /
+    ``['entry_counts']`` when present) must hash (:func:`ledger.frame_sha256`) to the values that
+    event logged for the parquet artifacts ``opt.run_study`` wrote into the store.
+
     Returns ``n_store`` (store trials that are not ``invalid``), ``n_ledger`` (the optimizer's
-    ``trials`` event count, :func:`ledger.logged_trial_count`), ``tpe_in_store`` and ``studies_dir``."""
+    ``trials`` event count, :func:`ledger.logged_trial_count`), ``tpe_in_store``, ``studies_dir``
+    and ``artifacts`` (the stored frames, which the gates use)."""
     sid = study.study_id
     sdir = resolve_studies_dir(sid, studies_dir, ledger_dir)
     store = ledger.load_trials(sid, sdir)
@@ -984,8 +1005,44 @@ def verify_trial_store(study: StudyResult, *, studies_dir: Path | None = None,
     status = store["status"].to_list() if "status" in store.columns else []
     n_store = float(sum(s != "invalid" for s in status)) if status else float(store.height)
     tpe = bool("source" in store.columns and (store["source"] == "tpe").any())
+    # R3-2: selection and OOS artifacts must be the ones the optimizer logged
+    sel_ev = ledger.study_events(sid, "selection", ledger_dir=ledger_dir)
+    if not sel_ev:
+        raise GateError(f"study {sid}: no selection event in the ledger; the gates only judge studies produced by "
+                        f"opt.run_study (red-team R3-2)")
+    sel_ev = sel_ev[-1]
+    led_sel = sel_ev.get("selection") or {}
+    led_tid = led_sel.get("trial_id", led_sel.get("selected_trial"))
+    mem_tid = (study.selection or {}).get("trial_id")
+    if led_tid is not None and (mem_tid is None or int(mem_tid) != int(led_tid)):
+        raise GateError(f"study {sid}: selection trial {mem_tid} differs from the ledger's selection event "
+                        f"({led_tid}) — red-team R3-2")
+    if _canon(sel_ev.get("selected_params") or {}) != _canon(study.selected_params or {}):
+        raise GateError(f"study {sid}: selected_params {study.selected_params} differ from the ledger's selection "
+                        f"event {sel_ev.get('selected_params')} — red-team R3-2")
+    hashes = sel_ev.get("artifact_sha256")
+    if not isinstance(hashes, Mapping):
+        raise GateError(f"study {sid}: the selection event records no artifact hashes (pre-R3-2 study); re-run it")
+    meta = study.meta or {}
+    mem_frames = {"cpcv_paths": study.cpcv_paths, "wfo_oos": study.wfo_oos, "wfo_params": study.wfo_params,
+                  "trade_counts": meta.get("trade_counts"), "entry_counts": meta.get("entry_counts")}
+    artifacts: dict[str, Any] = {}
+    for name in ledger.STUDY_ARTIFACTS:
+        want = hashes.get(name)
+        if want is None:
+            continue
+        stored = ledger.load_study_artifact(sid, name, sdir)
+        if ledger.frame_sha256(stored) != want:
+            raise GateError(f"study {sid}: stored artifact {name} does not match its hash in the selection event "
+                            f"(R3-2)")
+        mf = mem_frames.get(name)
+        optional = name in ("trade_counts", "entry_counts")        # meta caches; absent = read from the store
+        if not (optional and mf is None) and ledger.frame_sha256(mf) != want:
+            raise GateError(f"study {sid}: study.{name} differs from the series the optimizer stored (sha256) — "
+                            f"red-team R3-2: OOS series cannot be recomputed or replaced after the study")
+        artifacts[name] = stored
     return {"n_store": n_store, "n_ledger": ledger.logged_trial_count(sid, ledger_dir=ledger_dir),
-            "tpe_in_store": tpe, "studies_dir": str(sdir)}
+            "tpe_in_store": tpe, "studies_dir": str(sdir), "artifacts": artifacts}
 
 
 def check_evaluator_identity(study_id: str, evaluator: Any, base_cost: Any, *,
@@ -993,7 +1050,9 @@ def check_evaluator_identity(study_id: str, evaluator: Any, base_cost: Any, *,
     """The evaluator passed to the gates must be the study's (red-team R2-4): its ``describe()``
     (or ``{"evaluator": <class name>}``, as ``opt.run_study`` records it) must equal the ledger
     row's ``evaluator``, and the base cost model version (``base_cost`` / ``evaluator.cost`` …,
-    else ``evaluator.cost_version``) its ``cost_model_version``.  Raises :class:`GateError`."""
+    else ``evaluator.cost_version``) its ``cost_model_version``, and (R3-7) the SHA-256 of the
+    strategy's source file recorded at creation (``opt.evaluator_code_fingerprint``) must equal the
+    current one.  Raises :class:`GateError`."""
     from .opt import _py
     row = ledger.created_row(study_id, ledger_dir=ledger_dir) or {}
     led = row.get("evaluator")
@@ -1006,13 +1065,28 @@ def check_evaluator_identity(study_id: str, evaluator: Any, base_cost: Any, *,
         raise GateError(f"study {study_id}: the evaluator passed to the gates is not the study's (ledger "
                         f"{json.dumps(_canon(led), sort_keys=True)[:300]} vs given "
                         f"{json.dumps(_canon(_py(desc)), sort_keys=True)[:300]}) — red-team R2-4")
-    bc = _resolve_base_cost(evaluator, base_cost)
-    ver = getattr(bc, "version", None) if bc is not None else getattr(evaluator, "cost_version", None)
+    # same precedence as opt.run_study records it: the explicit cost model, else the evaluator's
+    # cost_version, else its cost model (R3-7 harness note)
+    bc = _resolve_base_cost(evaluator, None)
+    ver = (getattr(base_cost, "version", None) if base_cost is not None else
+           (getattr(evaluator, "cost_version", None) or getattr(bc, "version", None)))
     led_ver = row.get("cost_model_version")
     if ver is not None and led_ver not in (None, "unknown") and str(ver) != str(led_ver):
         raise GateError(f"study {study_id}: cost model version {ver!r} differs from the study's "
                         f"{led_ver!r} (ledger) — the gates must run on the study's cost model (R2-4)")
-    return {"evaluator": _canon(led), "cost_model_version": led_ver}
+    from .opt import evaluator_code_fingerprint
+    code_now = evaluator_code_fingerprint(evaluator)
+    code_led = row.get("evaluator_code")
+    if code_led is not None:
+        if code_now is None or code_now.get("sha256") != code_led.get("sha256"):
+            raise GateError(f"study {study_id}: the strategy / evaluator source {code_led.get('files')} changed since "
+                            f"the study was run (sha256 {str(code_led.get('sha256'))[:12]} → "
+                            f"{str((code_now or {}).get('sha256'))[:12]}) — red-team R3-7: re-run the study")
+    elif code_now is not None:
+        import warnings as _w
+        _w.warn(f"study {study_id}: no evaluator source hash in the ledger row (pre-R3-7 study); the strategy code "
+                f"cannot be checked against the study", stacklevel=3)
+    return {"evaluator": _canon(led), "cost_model_version": led_ver, "evaluator_code": code_led}
 
 
 def _judge_space(study: StudyResult, ctx: dict[str, Any], space: Any) -> tuple[Any, str]:
@@ -1048,7 +1122,7 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
                    n_jobs: Any = 1, plateau_radius: Any = _REMOVED,
                    prior_effective_trials: Any = _REMOVED,
                    holdout_symbols: str | list[str] | None = None,
-                   studies_dir: Path | None = None) -> GateReport:
+                   studies_dir: Path | None = None, log: bool = False) -> GateReport:
     """Run every DESIGN §4.2 v1.2 gate on a study.  See the module docstring for series choices.
 
     ``evaluator``: needed for the cost-stress gate (else SKIPPED) and, when
@@ -1083,6 +1157,10 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     ``n_boot`` / ``seed`` are read-only (R2-3): the band and the budget diagnostic always use
     ``stats.HOLDOUT_BAND_N_BOOT`` and ``stats.holdout_band_seed(study_id)``; any other value
     raises :class:`GateError`.
+
+    ``log=True`` (R3-1) appends the ``gates`` event for the report computed here — the only way a
+    gate result reaches the ledger (the first run's band becomes the registered band); the row is
+    returned in ``report.ledger_row``.
     Removed: ``plateau_radius`` (pre-registered via ``opt.run_study(plateau_radius=)`` and read
     from the ledger, N3) and ``prior_effective_trials`` (use ``prior_trials``) raise TypeError."""
     if plateau_radius is not _REMOVED:
@@ -1101,6 +1179,11 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
         raise GateError(f"seed={seed!r}: the holdout band's seed is fixed per study (stats.holdout_band_seed = "
                         f"{band_seed}, red-team R2-3); omit seed")
     store = verify_trial_store(study, studies_dir=studies_dir, ledger_dir=ledger_dir)
+    # R3-2: the trade / entry counts come from the store (the frames the optimizer logged)
+    arts = store.get("artifacts") or {}
+    if arts.get("trade_counts") is not None or arts.get("entry_counts") is not None:
+        study = replace(study, meta={**(study.meta or {}),
+                                     **{k: arts[k] for k in ("trade_counts", "entry_counts") if arts.get(k) is not None}})
     ev_ident = (check_evaluator_identity(study.study_id, evaluator, base_cost, ledger_dir=ledger_dir)
                 if evaluator is not None else None)
     ppy = float(periods_per_year)
@@ -1288,9 +1371,12 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
                            "pass_share_by_param": pj["pass_share_by_param"],
                            "n_outside_search_bounds": pj["n_outside_search_bounds"],
                            "selected_at_search_space_edge": pj["selected_at_edge"]}
+        unordered = [p.name for p in jspace.params if p.kind == "categorical" and not p.ordered]
+        un_txt = (f"; unordered categorical(s) {', '.join(unordered)}: not judged — review at S2" if unordered else "")
+        diag["plateau"]["unordered_not_judged"] = unordered
         if pj["n_axes"] == 0:
             rows.append(GateRow("plateau", None, f"{op} {thr}", "SKIPPED",
-                                "No numeric or ordered parameter to perturb; plateau cannot be judged."))
+                                "No numeric or ordered parameter to perturb; plateau cannot be judged" + un_txt + "."))
         else:
             ok = _cmp(op, psc, thr)
             k_pass, k_n = pj["weakest_axis_passes"]
@@ -1305,7 +1391,7 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
                                 + (f"; {no} point(s) outside the search bounds evaluated" if no else "")
                                 + (f"; {ni} invalid counted as failed" if ni else "")
                                 + (f"; selected at search-space edge ({', '.join(edge)})" if edge else "")
-                                + (f"; {space_note}" if space_note else "")
+                                + (f"; {space_note}" if space_note else "") + un_txt
                                 + f"; {pj['n_evaluations']} evaluations in {pj['runtime_s']:.1f} s; "
                                 + ("broad optimum." if ok else "sharp, fragile optimum.")))
     else:
@@ -1438,12 +1524,23 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     lctx["trial_store"] = store["studies_dir"]
     if ev_ident is not None:
         lctx["cost_model_version"] = ev_ident["cost_model_version"]
-    return GateReport(study.study_id, rows, verdict, band, eff, diag, ppy, prior_runs, plateau_detail, lctx,
-                      band_run)
+    report = GateReport(study.study_id, rows, verdict, band, eff, diag, ppy, prior_runs, plateau_detail, lctx,
+                        band_run)
+    if log:
+        report.ledger_row = _log_gates(report, ledger_dir=ledger_dir)
+    return report
 
 
-def log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: Path | None = None) -> dict[str, Any]:
-    """Append the gate results to the study's ledger row (event ``gates``, DESIGN §8).
+def log_gates(*_: Any, **__: Any) -> None:
+    """Removed (red-team R3-1): a report computed elsewhere (and possibly edited) must never reach
+    the ledger.  Use ``evaluate_gates(..., log=True)``."""
+    raise TypeError("gates.log_gates was removed (red-team R3-1): run evaluate_gates(..., log=True), which logs "
+                    "the report it computed itself")
+
+
+def _log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Append the gate results to the study's ledger row (event ``gates``, DESIGN §8).  Private:
+    called only by :func:`evaluate_gates` (``log=True``) on the report it just computed (R3-1).
 
     Logs the study's **own** trial count (``n_trials_study`` — the N the DSR used for this study,
     i.e. never below the optimizer's logged count, R2-4) separately from the prior and the N used
@@ -1557,7 +1654,7 @@ def rebuild_holdout_band(study: StudyResult, *, periods_per_year: float, reason:
     than the registered band's.  The event is logged as ``holdout_band_registered`` with
     ``reason``, ``band_version`` and the horizon it replaces; the ledger refuses a rebuild after
     an unlock whose exam is pending, after a FAIL or PASS, or without newer data
-    (:func:`quantlab.ledger.register_holdout_band`).  Returns the new band (dict)."""
+    (``ledger._register_holdout_band``, reachable only from here — R3-1).  Returns the new band."""
     for name, v in (("symbols", symbols), ("n_boot", n_boot), ("seed", seed)):
         if v is not _REMOVED:
             raise TypeError(f"rebuild_holdout_band({name}=) is refused (red-team R2-3): the rebuild uses the same "
@@ -1577,8 +1674,91 @@ def rebuild_holdout_band(study: StudyResult, *, periods_per_year: float, reason:
     band = _build_holdout_band(study, horizon, float(periods_per_year), n_boot=st.HOLDOUT_BAND_N_BOOT,
                                seed=st.holdout_band_seed(study.study_id),
                                selected_trades=selected_trades).as_dict()
-    ledger.register_holdout_band(study_id=study.study_id, band=band, reason=reason, ledger_dir=ledger_dir)
+    ledger._register_holdout_band(study_id=study.study_id, band=band, reason=reason, ledger_dir=ledger_dir)
     return band
+
+
+def _same_band(a: Any, b: Any, path: str = "") -> list[str]:
+    """Paths where two band dicts differ (floats: rel 1e-9; NaN == NaN; ``manifest_sha`` ignored)."""
+    if isinstance(a, Mapping) and isinstance(b, Mapping):
+        out = []
+        for k in sorted(set(a) | set(b), key=str):
+            if k == "manifest_sha":
+                continue
+            if k not in a or k not in b:
+                out.append(f"{path}{k}")
+            else:
+                out += _same_band(a[k], b[k], f"{path}{k}.")
+        return out
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return [path.rstrip(".")]
+        return [d for i, (x, y) in enumerate(zip(a, b)) for d in _same_band(x, y, f"{path}{i}.")]
+    if _is_num(a) and _is_num(b):
+        fa, fb = float(a), float(b)
+        if (math.isnan(fa) and math.isnan(fb)) or math.isclose(fa, fb, rel_tol=1e-9, abs_tol=1e-12):
+            return []
+        return [path.rstrip(".")]
+    return [] if a == b else [path.rstrip(".")]
+
+
+def unlock_holdout(study: StudyResult, evaluator: Evaluator | None, *, periods_per_year: float,
+                   user_confirmation: str, ledger_dir: Path | None = None, studies_dir: Path | None = None,
+                   selected_trades: pl.DataFrame | None = None, mechanism_check: Callable[..., Any] | None = None,
+                   base_cost: Any = None, spec: Any = None, space: Any = None, n_jobs: Any = 1) -> dict[str, Any]:
+    """Unlock the holdout exam of a study (DESIGN §4.4; called by ``/unlock-holdout``) — R3-1.
+
+    Nothing logged earlier is trusted.  The study is re-verified against its trial store and the
+    ledger (:func:`verify_trial_store`, :func:`check_evaluator_identity`) and every gate is
+    recomputed by :func:`evaluate_gates` (not logged) with the study's evaluator — so cost stress
+    and plateau are re-run.  The unlock is refused unless:
+
+    * every statistical gate is PASS and the mechanism gate is PASS — either from
+      ``mechanism_check`` or, when it is MANUAL, from a ``mechanism_review`` event with
+      ``passed=True`` (:func:`quantlab.ledger.record_mechanism_review`, the human S5 decision);
+    * the band recomputed from the verified study for the current horizon equals the study's
+      registered band (:func:`ledger.registered_holdout_band`) — a band edited after it was
+      logged, or registered for another horizon, is refused (rebuild it first when newer data
+      exists: :func:`rebuild_holdout_band`).
+
+    Then ``ledger._record_holdout_unlock`` applies the family / exam-sequence / manifest / clean
+    tree rules and writes the unlock row, with the recomputed verdict as ``verification``."""
+    ctx = ledger_context(study, ledger_dir)
+    reg = ledger.registered_holdout_band(study.study_id, ledger_dir=ledger_dir)
+    if reg is None:
+        raise GateError(f"study {study.study_id}: no registered holdout band (run evaluate_gates(..., log=True) at S5)")
+    rep = evaluate_gates(study, evaluator, periods_per_year=periods_per_year, selected_trades=selected_trades,
+                         mechanism_check=mechanism_check, base_cost=base_cost, spec=spec, space=space, n_jobs=n_jobs,
+                         ledger_dir=ledger_dir, studies_dir=studies_dir, log=False)
+    st = rep.statuses()
+    stat_bad = {g: s for g, s in st.items() if g != "mechanism" and s != "PASS"}
+    if stat_bad:
+        raise GateError(f"study {study.study_id}: the recomputed gates are not all PASS ({stat_bad}); the holdout "
+                        f"cannot be unlocked (R3-1)")
+    mech = st.get("mechanism")
+    mech_src = "mechanism_check"
+    if mech != "PASS":
+        reviews = ledger.study_events(study.study_id, "mechanism_review", ledger_dir=ledger_dir)
+        if mech == "MANUAL" and reviews and reviews[-1].get("passed") is True:
+            mech_src = f"mechanism_review ({reviews[-1].get('at')})"
+        else:
+            raise GateError(f"study {study.study_id}: mechanism gate is {mech} and no passing mechanism review is "
+                            f"recorded (ledger.record_mechanism_review); the verdict is not PASS (R3-1)")
+    run_band = rep.holdout_band_run
+    if not run_band:
+        raise GateError(f"study {study.study_id}: the holdout band could not be recomputed "
+                        f"({rep.diagnostics.get('holdout_band_error')})")
+    diff = _same_band(run_band, reg)
+    if diff:
+        hint = (" — the registered band is for another horizon; rebuild it (rebuild_holdout_band) if newer data was "
+                "exported" if "horizon_end" in diff or "horizon_days" in diff else "")
+        raise GateError(f"study {study.study_id}: the registered band differs from the band recomputed from the "
+                        f"verified study in {diff[:8]}{hint} (red-team R3-1: a doctored band is never unlocked)")
+    verification = {"verdict_recomputed": "PASS", "mechanism": mech_src, "gate_values": rep.values(),
+                    "band_recomputed_equal": True, "gate_version": "4.2-v1.2"}
+    return ledger._record_holdout_unlock(book=ctx["book"], system=ctx["system"], study_id=study.study_id,
+                                         pass_band=reg, user_confirmation=user_confirmation, ledger_dir=ledger_dir,
+                                         verification=verification)
 
 
 def run_holdout_exam(*, book: str, system: str, study_id: str, holdout_daily, n_trades: float,
