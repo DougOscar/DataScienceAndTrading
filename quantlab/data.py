@@ -7,7 +7,13 @@ Everything in ``quantlab`` reaches raw data through this module.  It:
   in **naive broker server time** (:func:`load_bars`);
 * enforces the per-book holdout lock (DESIGN §4.1) — a dev-period read never
   needs anything special, a holdout-period read requires an explicit
-  ``system`` with a ledger unlock, or it raises :class:`contracts.HoldoutLocked`;
+  ``system`` with a ledger unlock, or it raises :class:`contracts.HoldoutLocked`.  An unlock
+  opens only the unlocked study's registered symbols (traded + conversion legs), and every
+  holdout read is logged (``ledger.holdout_access`` / ``log_holdout_read``, R2-2).  Until the
+  system's holdout exam is a decisive PASS, an unlock only serves bars up to the horizon its
+  band was registered for (DESIGN §4.4), so data exported later stays unseen until the band is
+  rebuilt and a re-exam unlocked;
+* reports the holdout exam horizon from manifest metadata alone (:func:`holdout_horizon`);
 * infers the price increment and currency pair of a symbol, and converts an
   amount between currencies using an as-of (backward-looking) M1 close.
 
@@ -137,7 +143,7 @@ from typing import Any
 
 import polars as pl
 
-from . import config, contracts, ledger
+from . import config, contracts, ledger, metrics
 
 # --------------------------------------------------------------------------- look-ahead audit guard
 # Set (and reset) by quantlab.testing around an audited strategy.signals() call (or, via the
@@ -178,6 +184,11 @@ _TF_EVERY: dict[str, str] = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
 _TF_TIMEDELTA: dict[str, timedelta] = {k: timedelta(minutes=v) for k, v in _TF_MINUTES.items()}
 
 _DST_GAP = timedelta(hours=1)          # the only DST delta used by any book's server_tz
+# m2 (Phase 1 red team): the as-of conversion lookup must see the cross's last close *before*
+# the first requested timestamp even when that timestamp follows a weekend / holiday gap
+# (Monday 00:00 window starts, the data start of a cross).  7 days covers any market closure
+# in the catalog; it only ever extends the window backwards (never towards the holdout).
+_ASOF_LOOKBACK = timedelta(days=7)
 _RAW_COLUMNS = ("ts", "open", "high", "low", "close", "spread", "tick_vol")
 
 # Bump whenever `_resample_full`'s semantics change: this is folded into the cache key
@@ -220,6 +231,94 @@ def catalog(book: str | None = None, *, include_ticks: bool = False) -> pl.DataF
         want = config.get_book(book).name
         df = df.filter(pl.col("book") == want)
     return df.sort(["market", "symbol", "timeframe"])
+
+
+def holdout_trading_days(start: datetime, end: datetime, periods_per_year: float) -> int:
+    """Daily-return periods from ``start``'s date to ``end``'s date, both inclusive.
+
+    ``periods_per_year`` ≥ 365 (crypto): calendar days.  Otherwise weekdays (FX: 260/year),
+    scaled by ``periods_per_year / 260`` when below 260 (B3: 252, to discount exchange holidays)."""
+    import numpy as np
+    d0, d1 = start.date(), end.date()
+    if d1 < d0:
+        return 0
+    if periods_per_year >= 365.0:
+        return (d1 - d0).days + 1
+    n = int(np.busday_count(d0, d1 + timedelta(days=1)))
+    return int(round(n * min(1.0, periods_per_year / 260.0)))
+
+
+def conversion_legs(symbols: str | list[str] | tuple[str, ...], *, book: str,
+                    currencies: tuple[str, ...] | list[str] = ()) -> list[str]:
+    """Book symbols :func:`conversion_rate` reads to convert each symbol's quote currency — plus
+    any extra ``currencies`` (e.g. a swap currency) — into the book's account currency (R2-2 /
+    red-team H7).  Metadata only (catalog + currency codes); the traded symbols themselves are
+    not repeated.  EURJPY on FBS → ``["USDJPY"]``; EURUSD / BTCUSD / XAUUSD / WIN → ``[]``."""
+    b = config.get_book(book)
+    syms = [symbols] if isinstance(symbols, str) else list(symbols)
+    acct = b.account_currency
+    ccys: set[str] = {str(c).upper() for c in currencies if c}
+    for sym in syms:
+        ccys.add(symbol_currencies(sym)[1].upper())
+    out: list[str] = []
+    for c in sorted(ccys - {acct, "ACCOUNT"}):
+        for leg in conversion_symbols(c, acct, book=b.name):
+            if leg not in syms and leg not in out:
+                out.append(leg)
+    return out
+
+
+def holdout_horizon(book: str, symbols: str | list[str] | tuple[str, ...], *,
+                    periods_per_year: float | None = None, legs: tuple[str, ...] | list[str] = (),
+                    include_legs: bool = True) -> dict[str, Any]:
+    """Horizon of the holdout exam (DESIGN §4.4, decided 2026-09-24): from the book's holdout
+    start to the **end of the data currently available** — the locked year plus every newer
+    export (the renewing holdout, §4.1).
+
+    **Metadata only:** the end date is read from ``data/manifest.json`` (via :func:`catalog`,
+    the M1 series that :func:`load_bars` would use — latest end per symbol).  No Parquet file is
+    opened, so no holdout bar or value is ever read.  The end is the earliest over the traded
+    ``symbols`` AND their conversion legs (:func:`conversion_legs` — quote currency → account
+    currency — plus the explicit ``legs``, e.g. a swap-currency leg registered for the study;
+    red-team H7): the exam can only cover the span every series it reads has.
+
+    Returns ``horizon_days`` (see :func:`holdout_trading_days`), ``holdout_start``,
+    ``horizon_end`` (last M1 bar, naive server time, ISO), ``locked_end``,
+    ``newer_data_included`` (data past the locked year exists), ``symbols`` (traded),
+    ``conversion_legs``, ``periods_per_year``, ``manifest_sha`` and ``horizon_source = "manifest"``."""
+    b = config.get_book(book)
+    syms = [symbols] if isinstance(symbols, str) else list(symbols)
+    if not syms:
+        raise ValueError("holdout_horizon needs at least one symbol")
+    cat = catalog(b.name)
+    ends, market = {}, None
+
+    def _end(sym: str) -> None:
+        c = cat.filter((pl.col("symbol") == sym) & (pl.col("timeframe") == "M1"))
+        if c.height == 0:
+            raise ValueError(f"no M1 bars for {sym!r} in the {b.name} catalog (data/manifest.json)")
+        ends[sym] = c["end"].max()
+
+    for sym in syms:
+        _end(sym)
+        market = market or cat.filter(pl.col("symbol") == sym)["market"][0]
+    leg_list = conversion_legs(syms, book=b.name) if include_legs else []
+    leg_list += [s for s in legs if s not in leg_list and s not in syms]
+    for sym in leg_list:
+        _end(sym)
+    end = min(ends.values())
+    if end is None or end <= b.holdout_start:
+        raise ValueError(f"{b.name}/{syms}: the data ends {end}, before the holdout start {b.holdout_start}")
+    ppy = float(periods_per_year) if periods_per_year else metrics.PERIODS_PER_YEAR.get(market, 260.0)
+    return {
+        "horizon_days": holdout_trading_days(b.holdout_start, end, ppy),
+        "holdout_start": b.holdout_start.isoformat(sep=" "),
+        "horizon_end": end.isoformat(sep=" "),
+        "locked_end": b.locked_end.isoformat(sep=" "),
+        "newer_data_included": bool(end.date() > b.locked_end.date()),
+        "symbols": syms, "conversion_legs": leg_list, "periods_per_year": ppy,
+        "manifest_sha": ledger.manifest_sha(), "horizon_source": "manifest",
+    }
 
 
 def _resolve_source(cat: pl.DataFrame, symbol: str, source_file: str | Path | None) -> dict[str, Any]:
@@ -367,7 +466,10 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
     """Load bars for ``symbol`` at ``timeframe``, dev-period only unless unlocked.
 
     Returns exactly :data:`contracts.BAR_COLUMNS`, sorted by ``ts``.  See the
-    module docstring for the resampling and holdout-guard rules.
+    module docstring for the resampling and holdout-guard rules.  A holdout read needs
+    ``include_holdout=True`` and a ``system`` whose holdout family has an unlock; it is limited to
+    the unlocked study's registered symbols (traded + conversion legs) and horizon, and is
+    logged as a ``holdout_read`` event (``ledger.holdout_access`` / ``log_holdout_read``, R2-2).
     """
     _forbid_during_audit("load_bars")
     if timeframe not in _TF_MINUTES:
@@ -394,13 +496,31 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
     holdout_start = book_obj.holdout_start
     resolved_end = end_dt if end_dt is not None else holdout_start
     if resolved_end > holdout_start:
-        unlocked = system is not None and ledger.is_holdout_unlocked(book_obj.name, system)
-        if not (include_holdout and unlocked):
+        access = ledger.holdout_access(book_obj.name, system) if (system is not None and include_holdout) else None
+        if access is None:
             raise contracts.HoldoutLocked(
                 f"{book_obj.name}/{symbol}: requested window ends {resolved_end}, which reaches the "
-                f"holdout (starts {holdout_start}); pass include_holdout=True with a `system` that has "
-                f"an unlock recorded in the ledger to access it"
+                f"holdout (starts {holdout_start}); pass include_holdout=True with the `system` (normalised "
+                f"name) of a study whose unlock is recorded in the ledger to access it (R3-5: aliases and "
+                f"other family members are refused)"
             )
+        # R2-2: an unlock opens the holdout only for the unlocked study's registered symbols
+        # (traded + conversion legs), not for every symbol in the book.
+        if symbol not in (access.get("symbols") or []):
+            raise contracts.HoldoutLocked(
+                f"{book_obj.name}/{symbol}: the holdout unlock of {system!r} (study {access.get('study_id')}) "
+                f"covers only {access.get('symbols') or 'no registered symbols'}; {symbol} stays locked"
+            )
+        # DESIGN §4.4 horizon rule: until a decisive PASS, an unlock only opens the span its
+        # pre-registered band was built for.  Data exported later stays locked until the band
+        # is rebuilt and a re-exam is unlocked (ledger.holdout_access).
+        access_end = access.get("end")
+        if access_end is not None and resolved_end > access_end:
+            resolved_end = access_end
+        ledger.log_holdout_read(book=book_obj.name, system=system, study_id=access.get("study_id"),
+                                unlocked_system=access.get("system"), symbol=symbol, timeframe=timeframe,
+                                start=max(start_dt, holdout_start) if start_dt is not None else holdout_start,
+                                end=resolved_end)
 
     span = _TF_TIMEDELTA[timeframe]
     src_path = Path(row["file"])
@@ -555,6 +675,11 @@ def _asof_closes(symbol: str, ts_utc: pl.Series, *, book: str, system: str | Non
     Minor 7: a ``ts_utc`` in the last minute before the holdout cutoff no longer pushes
     the internal ``load_bars`` window past the cutoff and spuriously raises
     :class:`contracts.HoldoutLocked`.
+
+    The cross is loaded from ``min(ts) - 7 days`` (m2) so a window that starts right after a
+    weekend still finds Friday's close.  A timestamp before the cross's first close (series
+    start) falls back to the open of the M1 bar that opened at/before it; a timestamp before
+    the series' first bar still raises.
     """
     _forbid_during_audit("_asof_closes")
     book_obj = config.get_book(book)
@@ -562,7 +687,7 @@ def _asof_closes(symbol: str, ts_utc: pl.Series, *, book: str, system: str | Non
         ts_utc.dt.convert_time_zone(book_obj.tz_name).dt.replace_time_zone(None).cast(pl.Datetime("ms"))
     )
     lo, hi = naive_local.min(), naive_local.max()
-    m1 = load_bars(symbol, "M1", book=book, start=lo - timedelta(minutes=5), end=hi,
+    m1 = load_bars(symbol, "M1", book=book, start=lo - _ASOF_LOOKBACK, end=hi,
                    system=system, include_holdout=include_holdout)
     m1 = m1.select("ts", "close").with_columns((pl.col("ts") + timedelta(minutes=1)).alias("__close_ts"))
     target = pl.DataFrame({"__ts_local": naive_local}).with_row_index("__order")
@@ -573,9 +698,27 @@ def _asof_closes(symbol: str, ts_utc: pl.Series, *, book: str, system: str | Non
         .sort("__order")
     )
     if joined["close"].null_count() > 0:
-        raise ValueError(
-            f"{symbol}: no M1 bar had closed yet at/before some requested timestamps "
-            "(before the series start?)"
+        # Timestamps before the cross's first *close* (only possible at the very start of its
+        # series: the lookback covers every market closure).  The latest price known at such a
+        # ``ts`` is the *open* of an M1 bar that opened at/before it (its first tick), which is
+        # causal; used only where no close exists, so every other value is unchanged.
+        miss = joined.filter(pl.col("close").is_null())
+        opens = load_bars(symbol, "M1", book=book, start=miss["__ts_local"].min(),
+                          end=miss["__ts_local"].max() + timedelta(minutes=1),
+                          system=system, include_holdout=include_holdout).select("ts", "open")
+        fill = (
+            miss.select("__order", "__ts_local").sort("__ts_local")
+            .join_asof(opens, left_on="__ts_local", right_on="ts", strategy="backward")
+        )
+        if fill["open"].null_count() > 0:
+            raise ValueError(
+                f"{symbol}: no M1 bar had opened yet at/before some requested timestamps "
+                "(before the series start?)"
+            )
+        joined = (
+            joined.join(fill.select("__order", "open"), on="__order", how="left")
+            .with_columns(pl.coalesce("close", "open").alias("close"))
+            .sort("__order")
         )
     return joined["close"].rename("rate")
 
@@ -621,3 +764,53 @@ def conversion_rate(from_ccy: str, to_ccy: str, ts_utc: pl.Series, *, book: str 
         via_to = conversion_rate("USD", to_ccy, ts_utc, book=book, system=system, include_holdout=include_holdout)
         return (via_from * via_to).rename("rate")
     raise ValueError(f"no direct, inverse or USD-triangulated path from {from_ccy} to {to_ccy} in book {book!r}")
+
+
+# --------------------------------------------------------------------------- series availability (L1)
+_SERIES_START: dict[tuple[str, int, int], datetime] = {}
+
+
+def series_start(symbol: str) -> datetime:
+    """Naive server time of the first native (M1) bar backing ``symbol`` (cached per file version).
+
+    Read from the Parquet file itself (a one-column min, no holdout data is returned), not
+    from the manifest, so a stale manifest can never make :func:`conversion_available_from`
+    too optimistic.
+    """
+    _forbid_during_audit("series_start")
+    row = _resolve_source(catalog(), symbol, None)
+    path = Path(row["file"])
+    st = path.stat()
+    key = (str(path), st.st_size, int(st.st_mtime))
+    got = _SERIES_START.get(key)
+    if got is None:
+        got = pl.scan_parquet(path).select(pl.col("ts").min()).collect().item()
+        got = _to_naive_datetime(got)
+        _SERIES_START[key] = got
+    return got
+
+
+def conversion_symbols(from_ccy: str, to_ccy: str, *, book: str = "FBS") -> tuple[str, ...]:
+    """The book symbols :func:`conversion_rate` reads to convert ``from_ccy`` → ``to_ccy``
+    (same path resolution: direct, inverse, else both legs of the USD triangulation)."""
+    from_ccy, to_ccy = from_ccy.upper(), to_ccy.upper()
+    if from_ccy == to_ccy:
+        return ()
+    index = _pair_index(book)
+    for pair in ((from_ccy, to_ccy), (to_ccy, from_ccy)):
+        if pair in index:
+            return (index[pair],)
+    if "USD" not in (from_ccy, to_ccy):
+        return (conversion_symbols(from_ccy, "USD", book=book)
+                + conversion_symbols("USD", to_ccy, book=book))
+    raise ValueError(f"no direct, inverse or USD-triangulated path from {from_ccy} to {to_ccy} in book {book!r}")
+
+
+def conversion_available_from(from_ccy: str, to_ccy: str, *, book: str = "FBS") -> datetime | None:
+    """Earliest naive **server** time at which :func:`conversion_rate` can price ``from_ccy`` →
+    ``to_ccy`` without look-ahead: the latest first-M1-bar open over every series it reads
+    (``None`` = no conversion needed).  A timestamp before it has no causal rate — some
+    series' first bar opens *after* it — and :func:`conversion_rate` raises for it (L1).
+    """
+    syms = conversion_symbols(from_ccy, to_ccy, book=book)
+    return max((series_start(s) for s in syms), default=None)

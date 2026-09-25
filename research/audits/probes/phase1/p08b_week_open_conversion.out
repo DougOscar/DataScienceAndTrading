@@ -1,0 +1,4 @@
+EURJPY D1 start=2023-01-02: ValueError: USDJPY: no M1 bar had closed yet at/before some requested timestamps (before the series start?)
+EURJPY D1 start=None: ValueError: USDJPY: no M1 bar had closed yet at/before some requested timestamps (before the series start?)
+EURJPY H4 start=2023-01-03: OK (387 days)
+GBPAUD D1 start=2020-06-01: ValueError: AUDUSD: no M1 bar had closed yet at/before some requested timestamps (before the series start?)

@@ -28,6 +28,33 @@ the full list):
   keeps "one round-trip spread per trade" exactly true while letting a
   short's realised cost float with the spread at the moment it actually
   closes (DESIGN §4.3: "shorts enter at Bid and exit at Ask").
+* **Slippage scope (red-team M2, MAJOR): ``cost.slippage_points`` (see
+  ``quantlab.costs.CostModel``) is charged adversely on every** ``entry_price``
+  **and** ``exit_price`` **that is a genuine market order, not just stops.**
+  Pre-fix, ``slip_price = slippage_points * point`` only ever reached
+  ``_chk_long``/``_chk_short`` (stop fills), so a system with no stop (risk
+  type C) or a system that exits on a signal rather than a stop paid nothing
+  extra under ``CostModel.stressed()`` beyond the spread multiplier -- the
+  cost-stress gate's "+1 pip" was a no-op for exactly the systems it most
+  needs to stress. Now, for every fill type below, the adverse direction is
+  "whichever side of the market order the strategy is on":
+    - **Entry** (Step 1): a long entry BUYS -> fills `slip_price` *higher*;
+      a short entry SELLS -> fills `slip_price` *lower*.
+    - **Signal exit** (Step 1), **session-flatten exit** (Step 3,
+      ``force_exit``) and **end-of-data exit** (final flatten): the mirror
+      image of entry -- closing a long SELLS -> fills `slip_price` *lower*;
+      closing a short BUYS BACK -> fills `slip_price` *higher* (on top of the
+      spread that leg already pays).
+    - **Stop fill** (touch or gap): unchanged from before this fix -- fills
+      at the stop level (or the gap open) ± `slip_price`, in `_chk_long`/
+      `_chk_short`.
+    - **Target/limit fill**: never slips, in either the old or new engine --
+      a resting limit order never fills worse than its own price.
+  The base cost model's default `slippage_points=0.0` adds/subtracts exactly
+  `0.0` everywhere above, so every existing base-model backtest is
+  bit-identical to before this fix (IEEE-754 `x ± 0.0 == x`). See
+  ``costs.CostModel.stressed``/``costs.pip_points`` for how the §4.2 "+1 pip"
+  cost-stress gate converts a pip to `slippage_points` per instrument.
 * **SL/TP sentinels (a missing stop or target must never trigger)**: a
   position with no stop and/or no target is modelled with a per-direction
   price sentinel that *that* direction's own comparisons can never satisfy --
@@ -336,10 +363,13 @@ def _run_core(
         if j > 0 and signal_i8[j - 1] != _NO_SIGNAL and signal_i8[j - 1] != position:
             desired = signal_i8[j - 1]
             if position != 0:
+                # Signal exit (market order, red-team M2): adverse slippage against the
+                # closing side -- a long exit SELLS (fills lower), a short exit BUYS BACK
+                # (fills higher, on top of the spread it already pays on that leg).
                 if position == 1:
-                    xprice = o[j]
+                    xprice = o[j] - slip_price
                 else:
-                    xprice = o[j] + eff_spread[j] * point
+                    xprice = o[j] + eff_spread[j] * point + slip_price
                     cur_spread_cost = eff_spread[j]
                 entry_idx[n_trades] = entry_i
                 exit_idx[n_trades] = j
@@ -359,11 +389,13 @@ def _run_core(
             if desired != 0 and not blocked:
                 position = desired
                 entry_i = j
+                # Entry (market order, red-team M2): adverse slippage against the opening
+                # side -- a long entry BUYS (fills higher), a short entry SELLS (fills lower).
                 if desired == 1:
-                    ep = o[j] + eff_spread[j] * point
+                    ep = o[j] + eff_spread[j] * point + slip_price
                     cur_spread_cost = eff_spread[j]
                 else:
-                    ep = o[j]
+                    ep = o[j] - slip_price
                     cur_spread_cost = 0.0
                 sd = stop_dist[j - 1]
                 td = target_dist[j - 1]
@@ -492,14 +524,16 @@ def _run_core(
 
         # ---- Step 3: force-flatten at bar j's close
         if position != 0 and force_exit[j]:
+            # Session-flatten exit (market order, red-team M2): same adverse-slippage
+            # convention as a signal exit above.
             if position == 1:
-                xprice = c[j]
+                xprice = c[j] - slip_price
             else:
                 if use_m1 and m1_end[j] > m1_start[j]:
                     exit_spread = m1_spread[m1_end[j] - 1]
                 else:
                     exit_spread = eff_spread_max[j]
-                xprice = c[j] + exit_spread * point
+                xprice = c[j] + exit_spread * point + slip_price
                 cur_spread_cost = exit_spread
             entry_idx[n_trades] = entry_i
             exit_idx[n_trades] = j
@@ -519,14 +553,16 @@ def _run_core(
 
     if position != 0:
         j = n - 1
+        # End-of-data exit (market order, red-team M2): same adverse-slippage
+        # convention as a signal exit above.
         if position == 1:
-            xprice = c[j]
+            xprice = c[j] - slip_price
         else:
             if use_m1 and m1_end[j] > m1_start[j]:
                 exit_spread = m1_spread[m1_end[j] - 1]
             else:
                 exit_spread = eff_spread_max[j]
-            xprice = c[j] + exit_spread * point
+            xprice = c[j] + exit_spread * point + slip_price
             cur_spread_cost = exit_spread
         entry_idx[n_trades] = entry_i
         exit_idx[n_trades] = j

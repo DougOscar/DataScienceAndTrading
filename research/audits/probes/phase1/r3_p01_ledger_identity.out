@@ -1,0 +1,35 @@
+== N2: prior-trial relabel games (sma a1..a3 on issue 7, 49 trials each)
+  honest attempt 1                                               N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (5.4s)
+  honest attempt 2                                               N_study=49 prior=49 DSR=0.968 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (5.3s)
+  honest attempt 3                                               N_study=49 prior=98 DSR=0.956 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (6.0s)
+  (c) system 'sma_v2', new issue 9                               N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (6.5s)
+  (c2) system 'S.M.A', new issue 10                              N_study=49 prior=147 DSR=0.947 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=FAIL (5.5s)
+  (c3) system 'sma_cross_fast', new issue 12                     N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (5.5s)
+== N2b: explore a1..a5, then re-gate a1
+  attempt 1 gated right after creation                           N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (5.0s)
+  attempt 2 gated right after creation                           N_study=49 prior=49 DSR=0.903 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=FAIL (5.6s)
+  attempt 3 gated right after creation                           N_study=49 prior=98 DSR=0.950 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=FAIL (5.9s)
+  attempt 4 gated right after creation                           N_study=49 prior=147 DSR=0.943 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=FAIL (5.3s)
+  attempt 5 gated right after creation                           N_study=49 prior=196 DSR=0.997 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=INCOMPLETE (5.3s)
+  attempt 1 RE-gated after a2..a5 exist                          N_study=49 prior=196 DSR=0.938 oos/wfo/cscv=PASS/SKIPPED/PASS verdict=FAIL (5.6s)
+== ID: in-memory StudyResult edits (R2-4)
+  (a0) honest 441-trial study                                    N_study=441 prior=0 DSR=0.986 oos/wfo/cscv=PASS/PASS/PASS verdict=PASS (9.1s)
+  (a) trials/returns cut to 10 in memory                         RAISES GateError: study id-a1: study.trials does not match the trial store (10 in memory vs 441 recorded; missing [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]…, no
+  (a') trials cut, returns intact                                RAISES GateError: study id-a1: study.trials does not match the trial store (10 in memory vs 441 recorded; missing [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]…, no
+  (b) ledger study_trial_count(id-a1) = 441.0 (logged_trial_count 441.0)
+  (c) TPE StudyResult relabelled as 'c-sobol'                    RAISES GateError: study c-sobol: study.trials does not match the trial store (40 in memory vs 8 recorded; missing [], not recorded [8, 9, 10, 11, 12, 13, 14, 
+  (d0) study's own evaluator                                     plateau 0.00 FAIL; cost_stress 2.93 PASS
+  (d) broad + zero-drag (different describe)                     RAISES GateError: study sw-a1: the evaluator passed to the gates is not the study's (ledger {"base_sharpe": 0.3, "bounds": {"a": [1, 101]}, "bumps": [{"center
+  (d2) same describe(), zero cost drag                           plateau 0.00 FAIL; cost_stress 3.31 PASS
+== MEM: fields the gates still take from memory
+  (m0) zero-edge study, honest                                   N_study=49 prior=0 DSR=0.517 oos/wfo/cscv=FAIL/FAIL/PASS verdict=FAIL (4.0s)
+     honest values: {'dsr': 0.52, 'cscv_oos_loss': 0.09, 'oos_sharpe': 0.75, 'wfo_oos': 0.43, 'cost_stress_sharpe': 0.4, 'plateau': 0.5, 'positive_years': 0.7, 'max_year_share': 0.34, 'trade_count': 900.0, 'mechanism': 1.0}
+  (m1) cpcv_paths := IS-best trial (in-sample)                   N_study=49 prior=0 DSR=0.517 oos/wfo/cscv=PASS/FAIL/PASS verdict=FAIL (4.5s)
+  (m2) wfo_oos := IS-best trial on the WFO dates                 N_study=49 prior=0 DSR=0.517 oos/wfo/cscv=FAIL/PASS/PASS verdict=FAIL (4.6s)
+  (m3) both                                                      N_study=49 prior=0 DSR=0.517 oos/wfo/cscv=PASS/PASS/PASS verdict=FAIL (4.2s)
+     tampered values: {'dsr': 0.52, 'cscv_oos_loss': 0.09, 'oos_sharpe': 1.17, 'wfo_oos': 1.47, 'cost_stress_sharpe': 0.4, 'plateau': 0.5, 'positive_years': 0.7, 'max_year_share': 0.34, 'trade_count': 900.0, 'mechanism': 1.0}
+  (m4) selection := IS-best trial (not the plateau pick)         N_study=49 prior=0 DSR=0.893 oos/wfo/cscv=FAIL/FAIL/PASS verdict=FAIL (2.7s)
+     ledger selection event trial: 44 vs in-memory 30
+  (m5) log_gates ACCEPTED forged report: logged verdict=PASS, registered band sharpe_lo=-9.0, p_pass_zero_edge=0.05
+== determinism of the band (needed for any recompute-and-compare fix)
+  band identical across two evaluate_gates runs: True

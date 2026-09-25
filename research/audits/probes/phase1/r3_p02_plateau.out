@@ -1,0 +1,48 @@
+== M5 control: honest a in [1, 101] step 1, relative 0.20
+  a relative                                                   sel={'a': 50} score=0.0 (FAIL), axes=1 | a=40:f, a=45:f, a=55:f, a=60:f
+   guards: F1 f=0.02 -> 0.00, F1 f=0.05 -> 0.00, F2 grid step -> 0.00
+== G1: offset reparametrisation d = a - 49.9 on [0.05, 5] step 0.05
+  d relative (allowed: low > 0)                                sel={'d': 0.05} score=1.0 (PASS), axes=1 | d=0.04:P, d=0.045:P, d=0.055:P, d=0.06:P
+   guards: F1 f=0.02 -> 0.75, F1 f=0.05 -> 0.50, F2 grid step -> 0.75
+  d plateau_step=0.01                                          sel={'d': 0.05} score=1.0 (PASS), axes=1 | d=0.04:P, d=0.045:P, d=0.055:P, d=0.06:P
+   guards: F1 f=0.02 -> 0.75, F1 f=0.05 -> 0.50, F2 grid step -> 0.75
+  d plateau_step=1.0 (honest 20% of range)                     sel={'d': 0.05} score=0.5 (FAIL), axes=1 | d=-0.95:f, d=-0.45:f, d=0.55:P, d=1.05:P
+   guards: F1 f=0.02 -> 0.50, F1 f=0.05 -> 0.50, F2 grid step -> 0.50
+== G1c: tiny absolute step on the honest parametrisation (a on [1, 101], plateau_step=1)
+  a plateau_step=1                                             sel={'a': 50} score=1.0 (PASS), axes=1 | a=48:P, a=49:P, a=51:P, a=52:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 0.50, F2 grid step -> 1.00
+== G1b: honest small positive threshold thr on [0.01, 2] step 0.01, spike at 0.05 (2 % of range)
+  thr relative                                                 sel={'thr': 0.05} score=1.0 (PASS), axes=1 | thr=0.04:P, thr=0.045:P, thr=0.055:P, thr=0.06:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 0.50, F2 grid step -> 1.00
+  thr plateau_step=0.2                                         sel={'thr': 0.05} score=0.0 (FAIL), axes=1 | thr=-0.15:f, thr=-0.05:f, thr=0.15:f, thr=0.25:f
+   guards: F1 f=0.02 -> 0.00, F1 f=0.05 -> 0.00, F2 grid step -> 0.00
+== G2: k averaged duplicates a = mean(a1..ak), levels 46..54 step 2, relative (joint axis now)
+  k=1: score 0.00 (FAIL); per-axis {'a0': (0, 4)}
+  k=2: score 0.50 (FAIL); per-axis {'a0': (2, 4), 'a1': (2, 4), 'joint': (4, 8)}
+  k=3: score 0.25 (FAIL); per-axis {'a0': (4, 4), 'a1': (2, 4), 'a2': (2, 4), 'joint': (2, 8)}
+  k=4: score 0.50 (FAIL); per-axis {'a0': (4, 4), 'a1': (4, 4), 'a2': (4, 4), 'a3': (4, 4), 'joint': (4, 8)}
+  k=5: score 0.50 (FAIL); per-axis {'a0': (4, 4), 'a1': (4, 4), 'a2': (4, 4), 'a3': (4, 4), 'a4': (4, 4), 'joint': (4, 8)}
+== G3: spiky param as UNORDERED categorical
+  numeric unordered categorical: refused: a: an unordered categorical whose choices are all numeric [10, 20, 30, 40, 50, 60, 70, 80,
+  string-labelled unordered categorical 'L10'..'L100' + b      sel={'a': 'L50', 'b': 5} score=1.0 (PASS), axes=1 | b=3:P, b=4:P, b=6:P, b=7:P
+  numeric STRINGS ('10'..'100') unordered: ACCEPTED
+  string-labelled unordered categorical ALONE                  sel={'a': 'L50'} score=nan (SKIPPED), axes=0 | 
+== G4: ordered categorical with fine levels (+-1/+-2 levels now)
+  levels 48..52 (5)                                            sel={'a': 50} score=1.0 (PASS), axes=1 | a=48:P, a=49:P, a=51:P, a=52:P
+  levels 46..54 (5)                                            sel={'a': 50} score=0.5 (FAIL), axes=1 | a=46:f, a=48:P, a=52:P, a=54:f
+  levels 40..60 (21)                                           sel={'a': 50} score=1.0 (PASS), axes=1 | a=48:P, a=49:P, a=51:P, a=52:P
+== G6: per-param radius 0.10 on a wider spike (sd 4 units)
+  radius 0.2                                                   sel={'a': 50} score=0.5 (FAIL), axes=1 | a=40:f, a=45:P, a=55:P, a=60:f
+   guards: F1 f=0.02 -> 0.50, F1 f=0.05 -> 0.50, F2 grid step -> 0.50
+  radius {'a': 0.1}                                            sel={'a': 50} score=1.0 (PASS), axes=1 | a=45:P, a=48:P, a=53:P, a=55:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 1.00, F2 grid step -> 1.00
+== False-positive cost of the guards: HONEST broad edge in a lookback on [5, 200] step 1
+   (edge in log(lookback): Sharpe falls to 50 % at x2 / x0.5 of the optimum; relative 0.20)
+  lookback optimum 10                                          sel={'L': 10} score=1.0 (PASS), axes=1 | L=8:P, L=9:P, L=11:P, L=12:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 0.75, F2 grid step -> 1.00
+  lookback optimum 20                                          sel={'L': 20} score=1.0 (PASS), axes=1 | L=16:P, L=18:P, L=22:P, L=24:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 1.00, F2 grid step -> 1.00
+  lookback optimum 50                                          sel={'L': 50} score=1.0 (PASS), axes=1 | L=40:P, L=45:P, L=55:P, L=60:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 1.00, F2 grid step -> 1.00
+  lookback optimum 120                                         sel={'L': 120} score=1.0 (PASS), axes=1 | L=96:P, L=108:P, L=132:P, L=144:P
+   guards: F1 f=0.02 -> 1.00, F1 f=0.05 -> 1.00, F2 grid step -> 1.00

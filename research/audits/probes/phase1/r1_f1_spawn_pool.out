@@ -1,0 +1,4 @@
+start method: spawn | worker diag: {'pid': 69102, 'polars_threads': 1, 'POLARS_MAX_THREADS': '1', 'NUMBA_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1', 'RAYON_NUM_THREADS': '1'}
+parent env restored: True {'POLARS_MAX_THREADS': '3', 'NUMBA_NUM_THREADS': None, 'OMP_NUM_THREADS': None, 'OPENBLAS_NUM_THREADS': None, 'MKL_NUM_THREADS': None, 'RAYON_NUM_THREADS': None}
+n_jobs=4 vs 1: returns identical True | selection identical True | wfo identical True | cpcv identical True
+resume 16->32 on 4 workers vs fresh 32: returns identical True | params identical True | selection identical True | wfo n_trades identical True

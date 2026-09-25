@@ -1,0 +1,8 @@
+seed=0 verdict=PASS  selected-trial Sharpe last45%=-0.09 WFO-OOS Sharpe last45%=+0.21 | band sharpe_p10=+0.79 median=1.98 | P(dead holdout passes §4.4)=0.17
+seed=1 verdict=FAIL  selected-trial Sharpe last45%=-0.11 WFO-OOS Sharpe last45%=-0.36 | band sharpe_p10=-0.78 median=0.63 | P(dead holdout passes §4.4)=0.62
+seed=2 verdict=PASS  selected-trial Sharpe last45%=+0.79 WFO-OOS Sharpe last45%=+0.79 | band sharpe_p10=+0.51 median=1.73 | P(dead holdout passes §4.4)=0.27
+seed=3 verdict=FAIL  selected-trial Sharpe last45%=-0.58 WFO-OOS Sharpe last45%=-1.15 | band sharpe_p10=-0.69 median=0.68 | P(dead holdout passes §4.4)=0.62
+seed=4 verdict=PASS  selected-trial Sharpe last45%=-0.47 WFO-OOS Sharpe last45%=-0.63 | band sharpe_p10=-0.69 median=0.64 | P(dead holdout passes §4.4)=0.64
+seed=5 verdict=PASS  selected-trial Sharpe last45%=+0.52 WFO-OOS Sharpe last45%=+0.52 | band sharpe_p10=+0.08 median=1.33 | P(dead holdout passes §4.4)=0.37
+seed=6 verdict=PASS  selected-trial Sharpe last45%=+0.16 WFO-OOS Sharpe last45%=-0.57 | band sharpe_p10=-0.49 median=0.84 | P(dead holdout passes §4.4)=0.56
+seed=7 verdict=FAIL  selected-trial Sharpe last45%=-0.43 WFO-OOS Sharpe last45%=-0.21 | band sharpe_p10=-0.13 median=1.23 | P(dead holdout passes §4.4)=0.46

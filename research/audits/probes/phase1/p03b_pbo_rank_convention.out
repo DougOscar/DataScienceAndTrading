@@ -1,0 +1,10 @@
+PBO 0.6289044289044289
+IS even-blocks=0: n=    1  share logit<=0 = 1.000
+IS even-blocks=1: n=   64  share logit<=0 = 1.000
+IS even-blocks=2: n=  784  share logit<=0 = 1.000
+IS even-blocks=3: n= 3136  share logit<=0 = 1.000
+IS even-blocks=4: n= 4900  share logit<=0 = 0.025
+IS even-blocks=5: n= 3136  share logit<=0 = 1.000
+IS even-blocks=6: n=  784  share logit<=0 = 1.000
+IS even-blocks=7: n=   64  share logit<=0 = 1.000
+IS even-blocks=8: n=    1  share logit<=0 = 1.000
