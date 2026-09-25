@@ -75,12 +75,13 @@ import numpy as np
 import polars as pl
 
 from . import config, data, metrics
+from .metrics import GAP_TRADING_DAYS, data_gaps
 from .contracts import SIGNAL_COLUMNS, Outcome, RiskType
 from .costs import CostModel, load_instrument
 from .engine import run_backtest
 from .sizing import apply_sizing, daily_equity
 
-__all__ = ["RuleEvaluator", "SyntheticEvaluator", "trade_stats", "clear_cache"]
+__all__ = ["RuleEvaluator", "SyntheticEvaluator", "trade_stats", "clear_cache", "data_gaps"]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -94,12 +95,19 @@ def _to_dt(v: datetime | date | str | None) -> Optional[datetime]:
     return datetime.fromisoformat(str(v))
 
 
-def trade_stats(trades: pl.DataFrame, *, calendar_days: bool = False) -> dict[str, float]:
+def trade_stats(trades: pl.DataFrame, *, calendar_days: bool = False,
+                dates: Any = None) -> dict[str, float]:
     """Trade-level statistics from a sized trades frame (skipped trades excluded).
 
-    ``hold_days_max`` / ``hold_days_p95`` count *trading* days between the entry and
-    exit server dates (weekdays; calendar days when ``calendar_days``, e.g. crypto) —
-    this is what the CPCV purge/embargo is sized from.
+    ``hold_days_max`` / ``hold_days_p95`` are what the CPCV purge/embargo is sized from, and
+    CPCV purges/embargoes *rows of the study's daily returns index*, so with ``dates`` (that
+    index: the evaluator's daily equity dates) the hold is measured in **rows** between the
+    entry and exit server dates (L4: a trade straddling a data gap — e.g. the 133-day XAUUSD
+    M1 hole in 2016 — spans only the rows that exist, not the calendar months in between).
+    Without ``dates`` it falls back to weekdays (calendar days when ``calendar_days``).
+    ``hold_calendar_days_max`` / ``hold_calendar_days_p95`` keep the calendar-day measure as a
+    diagnostic.  ``trades_across_data_gap`` (only with ``dates``) counts trades whose life spans
+    a gap of more than :data:`GAP_TRADING_DAYS` missing trading days in ``dates``.
     """
     t = trades
     if "skipped" in t.columns:
@@ -108,7 +116,10 @@ def trade_stats(trades: pl.DataFrame, *, calendar_days: bool = False) -> dict[st
     out: dict[str, float] = {"n_trades": float(n)}
     if n == 0:
         out.update(win_rate=float("nan"), profit_factor=float("nan"), expectancy_points=float("nan"),
-                   avg_hold_bars=float("nan"), hold_days_max=0.0, hold_days_p95=0.0)
+                   avg_hold_bars=float("nan"), hold_days_max=0.0, hold_days_p95=0.0,
+                   hold_calendar_days_max=0.0, hold_calendar_days_p95=0.0)
+        if dates is not None:
+            out["trades_across_data_gap"] = 0.0
         return out
     pnl = t["pnl_ccy"].to_numpy() if "pnl_ccy" in t.columns else t["pnl_points"].to_numpy()
     gains, losses = pnl[pnl > 0].sum(), -pnl[pnl < 0].sum()
@@ -118,9 +129,25 @@ def trade_stats(trades: pl.DataFrame, *, calendar_days: bool = False) -> dict[st
     out["avg_hold_bars"] = float(t["bars_held"].mean()) if "bars_held" in t.columns else float("nan")
     ed = t["entry_ts"].dt.date().to_numpy().astype("datetime64[D]")
     xd = t["exit_ts"].dt.date().to_numpy().astype("datetime64[D]")
-    hold = (xd - ed).astype(np.int64) if calendar_days else np.busday_count(ed, xd)
+    cal = (xd - ed).astype(np.int64)
+    if dates is not None:
+        d = np.asarray(dates).astype("datetime64[D]")
+        er = np.searchsorted(d, ed, side="left")
+        xr = np.searchsorted(d, xd, side="left")
+        hold = np.maximum(xr - er, 0)
+        gap_rows = np.array([int(np.searchsorted(d, np.datetime64(g[1], "D"))) for g in
+                             data_gaps(d, calendar_days=calendar_days)], dtype=np.int64)
+        if gap_rows.size:
+            across = ((er[:, None] < gap_rows[None, :]) & (xr[:, None] >= gap_rows[None, :])).any(axis=1)
+            out["trades_across_data_gap"] = float(across.sum())
+        else:
+            out["trades_across_data_gap"] = 0.0
+    else:
+        hold = cal if calendar_days else np.busday_count(ed, xd)
     out["hold_days_max"] = float(hold.max())
     out["hold_days_p95"] = float(np.quantile(hold, 0.95))
+    out["hold_calendar_days_max"] = float(cal.max())
+    out["hold_calendar_days_p95"] = float(np.quantile(cal, 0.95))
     return out
 
 
@@ -134,13 +161,18 @@ class _Data:
     spec: Any
     rates: dict[str, np.ndarray]  # ccy -> rate to account ccy at each bars_eval ts_utc
     ts_utc_ms: np.ndarray         # bars_eval ts_utc as epoch-ms int64 (rate lookup)
+    eval_start_effective: Optional[datetime] = None   # server ts of the first evaluation bar (L1)
+    eval_start_clamp: Optional[dict[str, Any]] = None # why/how far the start was clamped (L1)
 
 
-_CACHE: dict[tuple, _Data] = {}
+# key -> the data bundle, or the exception its load raised.  A data error is deterministic, so it
+# is cached too (L1): every later trial of the study re-raises it at once instead of reloading
+# M1 (≈ minutes) before failing the same way again.  ``clear_cache()`` forgets both.
+_CACHE: dict[tuple, Any] = {}
 
 
 def clear_cache() -> None:
-    """Drop every cached data bundle in this process (tests / memory pressure)."""
+    """Drop every cached data bundle (and cached data-load error) in this process."""
     _CACHE.clear()
 
 
@@ -152,8 +184,12 @@ class RuleEvaluator:
     Picklable: holds configuration only.  ``__call__(params, cost=None)`` → Outcome with
     ``daily`` (date, ret), sized ``trades`` and ``metrics`` = ``metrics.summary`` + trade
     stats (``n_trades, win_rate, profit_factor, expectancy_points, avg_hold_bars,
-    hold_days_max, hold_days_p95, n_skipped``).  ``cost=`` overrides the configured
-    :class:`CostModel` for that call only (cost-stress gate).
+    hold_days_max, hold_days_p95`` — holds in rows of the daily index, L4 —
+    ``hold_calendar_days_max, hold_calendar_days_p95, trades_across_data_gap, n_skipped``)
+    plus ``eval_start_effective`` (ISO server ts of the first evaluation bar, str) and
+    ``eval_start_bars_dropped``: the start is clamped forward to the first bar at which every
+    input exists (conversion series, intrabar M1 — see :meth:`_clamp_index`, L1).
+    ``cost=`` overrides the configured :class:`CostModel` for that call only (cost-stress gate).
     """
 
     strategy_cls: Any
@@ -257,8 +293,76 @@ class RuleEvaluator:
     def _data(self) -> _Data:
         key = self._key()
         d = _CACHE.get(key)
+        if isinstance(d, BaseException):
+            raise d
         if d is not None:
             return d
+        try:
+            d = self._load_data()
+        except Exception as e:  # deterministic data error: cache it (see _CACHE)
+            _CACHE[key] = e
+            raise
+        _CACHE[key] = d
+        return d
+
+    def _needs_m1(self) -> bool:
+        return bool(self.use_m1 and self.timeframe != "M1")
+
+    def _clamp_index(self, bars_all: pl.DataFrame, i0: int) -> tuple[int, dict[str, Any]]:
+        """First evaluation row ≥ ``i0`` at which every input the evaluation needs exists (L1).
+
+        No look-ahead: an evaluation bar's conversion rate is looked up at its open, so it may
+        only use a series whose first bar opened at/before that open — a bar that opens later
+        never fills in for it.  Leading bars before that point are dropped (they stay available
+        as warm-up history for the indicators).  Checked generally, per input:
+
+        * every conversion ``quote_ccy`` / ``swap_ccy`` → account currency needs: the latest
+          first-M1 open over the series :func:`data.conversion_rate` reads
+          (:func:`data.conversion_available_from`), e.g. USDCHF/AUDNZD/NZD* start at 00:01
+          while their first H1 bar opens at 00:00;
+        * with intrabar M1 resolution, the bar window ``[ts, ts + tf)`` must contain the start
+          of the symbol's own M1 series or come after it.
+        """
+        spec = load_instrument(self.symbol, book=self.book)
+        acct = config.get_book(self.book).account_currency
+        need: dict[str, datetime] = {}
+        for ccy in sorted({spec.quote_ccy, spec.swap_ccy}):
+            if ccy in ("ACCOUNT", acct):
+                continue
+            t = data.conversion_available_from(ccy, acct, book=self.book)
+            if t is not None:
+                need[f"conversion_{ccy}{acct}"] = t
+        ts = bars_all["ts"]
+        first_ok = {k: int(ts.search_sorted(t, side="left")) for k, t in need.items()}
+        if self._needs_m1():
+            m1_0 = data.series_start(self.symbol)
+            need["m1_intrabar"] = m1_0
+            span = timedelta(minutes=data._TF_MINUTES[self.timeframe])
+            first_ok["m1_intrabar"] = int((ts + span).search_sorted(m1_0, side="right"))
+        i = max([i0, *first_ok.values()])
+        info = {"requested": str(ts[i0]) if i0 < ts.len() else None,
+                "effective": str(ts[i]) if i < ts.len() else None,
+                "bars_dropped": int(i - i0),
+                "binding": sorted(k for k, j in first_ok.items() if j > i0) or None,
+                "available_from": {k: str(t) for k, t in need.items()}}
+        return i, info
+
+    def eval_start_effective(self) -> Optional[str]:
+        """Server timestamp (ISO) of the first evaluation bar after the L1 clamp (study meta)."""
+        d = _CACHE.get(self._key())
+        if isinstance(d, _Data):
+            return str(d.eval_start_effective)
+        got = self.__dict__.get("_eval_start_effective")
+        if got is None:
+            start = _to_dt(self.start)
+            bars_all = data.load_bars(self.symbol, self.timeframe, book=self.book, start=None, end=self.end_dt)
+            i0 = 0 if start is None else int(bars_all["ts"].search_sorted(start, side="left"))
+            i, _ = self._clamp_index(bars_all, i0)
+            got = self.__dict__["_eval_start_effective"] = (str(bars_all["ts"][i]) if i < bars_all.height
+                                                            else None)
+        return got
+
+    def _load_data(self) -> _Data:
         start, end = _to_dt(self.start), self.end_dt
         # Dev data only: never include_holdout; end <= holdout_start was checked in __post_init__.
         bars_all = data.load_bars(self.symbol, self.timeframe, book=self.book, start=None, end=end)
@@ -267,11 +371,15 @@ class RuleEvaluator:
         i0 = 0 if start is None else int(bars_all["ts"].search_sorted(start, side="left"))
         if i0 >= bars_all.height:
             raise ValueError(f"no {self.symbol} {self.timeframe} bars in [{start}, {end})")
+        i0, clamp = self._clamp_index(bars_all, i0)
+        if i0 >= bars_all.height:
+            raise ValueError(f"{self.symbol} {self.timeframe}: no bar in [{start}, {end}) has every input "
+                             f"available ({clamp['available_from']})")
         w0 = max(0, i0 - int(self.warmup_bars))
         bars_sig = bars_all.slice(w0)
         bars_eval = bars_all.slice(i0)
         m1 = None
-        if self.use_m1 and self.timeframe != "M1":
+        if self._needs_m1():
             # Starts exactly at the first evaluation bar's open → every HTF bar fully covered.
             m1 = data.load_bars(self.symbol, "M1", book=self.book, start=bars_eval["ts"][0], end=end)
         spec = load_instrument(self.symbol, book=self.book)
@@ -285,10 +393,9 @@ class RuleEvaluator:
             # conversion_rate per trial, without re-reading the M1 cross per trial.
             rates[ccy] = data.conversion_rate(ccy, acct, bars_eval["ts_utc"], book=self.book).to_numpy()
         ts_ms = bars_eval["ts_utc"].dt.epoch("ms").to_numpy()
-        d = _Data(bars_sig=bars_sig, offset=i0 - w0, bars_eval=bars_eval, m1=m1, spec=spec,
-                  rates=rates, ts_utc_ms=ts_ms)
-        _CACHE[key] = d
-        return d
+        return _Data(bars_sig=bars_sig, offset=i0 - w0, bars_eval=bars_eval, m1=m1, spec=spec,
+                     rates=rates, ts_utc_ms=ts_ms, eval_start_effective=bars_eval["ts"][0],
+                     eval_start_clamp=clamp)
 
     def _rate_fn(self, d: _Data):
         book = self.book
@@ -332,8 +439,12 @@ class RuleEvaluator:
         daily = eq.select("date", "ret")
         ppy = self.periods_per_year
         m = metrics.summary(daily, ppy)
-        m.update(trade_stats(sized, calendar_days=self._market() == "crypto"))
+        m.update(trade_stats(sized, calendar_days=self._market() == "crypto", dates=daily["date"].to_numpy()))
         m["n_skipped"] = float(sized["skipped"].sum()) if "skipped" in sized.columns else 0.0
+        # L1: the first evaluation bar actually used (ISO; non-numeric, so it is not a trial
+        # column) and how many leading bars the availability clamp dropped (numeric → m_ column)
+        m["eval_start_effective"] = str(d.eval_start_effective)
+        m["eval_start_bars_dropped"] = float((d.eval_start_clamp or {}).get("bars_dropped", 0))
         return Outcome(daily=daily, trades=sized, metrics=m)
 
 

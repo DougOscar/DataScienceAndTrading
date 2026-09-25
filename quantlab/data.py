@@ -649,3 +649,53 @@ def conversion_rate(from_ccy: str, to_ccy: str, ts_utc: pl.Series, *, book: str 
         via_to = conversion_rate("USD", to_ccy, ts_utc, book=book, system=system, include_holdout=include_holdout)
         return (via_from * via_to).rename("rate")
     raise ValueError(f"no direct, inverse or USD-triangulated path from {from_ccy} to {to_ccy} in book {book!r}")
+
+
+# --------------------------------------------------------------------------- series availability (L1)
+_SERIES_START: dict[tuple[str, int, int], datetime] = {}
+
+
+def series_start(symbol: str) -> datetime:
+    """Naive server time of the first native (M1) bar backing ``symbol`` (cached per file version).
+
+    Read from the Parquet file itself (a one-column min, no holdout data is returned), not
+    from the manifest, so a stale manifest can never make :func:`conversion_available_from`
+    too optimistic.
+    """
+    _forbid_during_audit("series_start")
+    row = _resolve_source(catalog(), symbol, None)
+    path = Path(row["file"])
+    st = path.stat()
+    key = (str(path), st.st_size, int(st.st_mtime))
+    got = _SERIES_START.get(key)
+    if got is None:
+        got = pl.scan_parquet(path).select(pl.col("ts").min()).collect().item()
+        got = _to_naive_datetime(got)
+        _SERIES_START[key] = got
+    return got
+
+
+def conversion_symbols(from_ccy: str, to_ccy: str, *, book: str = "FBS") -> tuple[str, ...]:
+    """The book symbols :func:`conversion_rate` reads to convert ``from_ccy`` → ``to_ccy``
+    (same path resolution: direct, inverse, else both legs of the USD triangulation)."""
+    from_ccy, to_ccy = from_ccy.upper(), to_ccy.upper()
+    if from_ccy == to_ccy:
+        return ()
+    index = _pair_index(book)
+    for pair in ((from_ccy, to_ccy), (to_ccy, from_ccy)):
+        if pair in index:
+            return (index[pair],)
+    if "USD" not in (from_ccy, to_ccy):
+        return (conversion_symbols(from_ccy, "USD", book=book)
+                + conversion_symbols("USD", to_ccy, book=book))
+    raise ValueError(f"no direct, inverse or USD-triangulated path from {from_ccy} to {to_ccy} in book {book!r}")
+
+
+def conversion_available_from(from_ccy: str, to_ccy: str, *, book: str = "FBS") -> datetime | None:
+    """Earliest naive **server** time at which :func:`conversion_rate` can price ``from_ccy`` →
+    ``to_ccy`` without look-ahead: the latest first-M1-bar open over every series it reads
+    (``None`` = no conversion needed).  A timestamp before it has no causal rate — some
+    series' first bar opens *after* it — and :func:`conversion_rate` raises for it (L1).
+    """
+    syms = conversion_symbols(from_ccy, to_ccy, book=book)
+    return max((series_start(s) for s in syms), default=None)

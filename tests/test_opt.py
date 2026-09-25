@@ -668,3 +668,33 @@ def test_plateau_radius_is_pre_registered_in_the_ledger(tmp_path):
     # resume without a radius takes the ledger's; the same radius is accepted
     _study(ev, sp, tmp_path, "rad", wfo=None, resume=True)
     _study(ev, sp, tmp_path, "rad", wfo=None, resume=True, plateau_radius={"a": 0.25, "b": 0.3})
+
+
+# --------------------------------------------------------------------------- L1: uniform first-batch errors
+class _DataBroken(SyntheticEvaluator):
+    """Every call fails with the same data error (like USDCHF before the L1 fix)."""
+
+    def __call__(self, params, *, cost=None):
+        raise ValueError("USDCHF: no M1 bar had opened yet at/before some requested timestamps")
+
+
+def test_uniform_first_batch_errors_abort_the_study(tmp_path):
+    ev = _DataBroken(bounds={"a": (0, 10)})
+    with pytest.raises(opt.StudyError, match="same error"):
+        _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-uni", wfo=None)
+    s = ledger.studies(tmp_path / "ledger")["s-uni"]
+    assert s["status"] == "aborted" and s["n_trials"] == 2 and s["n_error"] == 2   # max(n_jobs, 2)
+    assert ledger.load_trials("s-uni", tmp_path / "studies").height == 2
+    # opt-out grinds through the whole grid (then fails: nothing evaluated)
+    with pytest.raises(opt.StudyError, match="no configuration could be evaluated"):
+        _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-uni2", wfo=None,
+               abort_on_uniform_errors=False)
+    assert ledger.studies(tmp_path / "ledger")["s-uni2"]["n_trials"] == 11
+
+
+def test_non_uniform_first_batch_errors_do_not_abort(tmp_path):
+    # first two trials fail with *different* messages (parameter-specific) → no abort
+    ev = SyntheticEvaluator(bounds={"a": (0, 10)}, error_when=({"a": 0}, {"a": 1}), rho=0.9)
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10)]), tmp_path, "s-mixed", wfo=None)
+    assert res.meta["n_error"] == 2 and res.meta["n_ok"] == 9
+    assert res.meta["eval_start_effective"] is None and res.meta["data_gaps"] == []

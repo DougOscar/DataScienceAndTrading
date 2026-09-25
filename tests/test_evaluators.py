@@ -216,3 +216,161 @@ def test_synthetic_evaluator_regimes():
     assert ev.true_sharpe({"a": 2}, 0.0) == pytest.approx(2.0)
     assert ev.true_sharpe({"a": 2}, 0.7) == pytest.approx(0.0, abs=1e-6)
     assert ev.true_sharpe({"a": 8}, 0.7) == pytest.approx(2.0)
+
+
+# --------------------------------------------------------------------------- L1: input-availability clamp
+@real
+def test_usdchf_h1_evaluates_from_dev_start_with_effective_start_recorded():
+    """L1: USDCHF's M1 (and so its CHF→USD conversion) starts at 00:01 while its first H1 bar
+    opens at 00:00.  The evaluation start is clamped to the first bar with every input
+    available (no rate from a bar that opens after t) and the effective start is recorded."""
+    warnings.filterwarnings("ignore")
+    evaluators.clear_cache()
+    try:
+        e = RuleEvaluator(SmaCross, symbol="USDCHF", timeframe="H1", start="2016-05-02", end="2016-10-01")
+        out = e({"fast": 10, "slow": 40})
+        assert out.metrics["eval_start_effective"] == "2016-05-02 01:00:00"
+        assert out.metrics["eval_start_bars_dropped"] == 1.0
+        d = evaluators._CACHE[e._key()]
+        assert d.bars_eval["ts"][0] == datetime(2016, 5, 2, 1)
+        assert d.eval_start_clamp["binding"] == ["conversion_CHFUSD"]
+        assert out.metrics["n_trades"] > 10 and np.isfinite(out.daily["ret"].to_numpy()).all()
+        assert out.trades["entry_ts"].min() >= datetime(2016, 5, 2, 1)
+        assert e.eval_start_effective() == "2016-05-02 01:00:00"
+        # the dropped bar would have needed a CHF rate before any CHF series had opened
+        assert data.conversion_available_from("CHF", "USD", book="FBS") == datetime(2016, 5, 2, 0, 1)
+        # a symbol whose inputs all exist at its first bar is not clamped
+        eu = RuleEvaluator(SmaCross, symbol="EURUSD", timeframe="H1", start="2016-05-02", end="2016-07-01")
+        o2 = eu({"fast": 10, "slow": 40})
+        assert o2.metrics["eval_start_bars_dropped"] == 0.0
+        assert o2.metrics["eval_start_effective"] == "2016-05-02 00:00:00"
+    finally:
+        evaluators.clear_cache()
+
+
+@real
+def test_usdchf_h1_study_records_eval_start_effective(tmp_path):
+    from quantlab import ledger, opt
+    warnings.filterwarnings("ignore")
+    evaluators.clear_cache()
+    try:
+        e = RuleEvaluator(SmaCross, symbol="USDCHF", timeframe="H1", start="2016-05-02", end="2017-01-01")
+        sp = opt.SearchSpace([opt.IntParam("fast", 10, 20, 10)])
+        res = opt.run_study(e, sp, book="FBS", system="l1", issue=1, attempt=1, study_id="l1-usdchf",
+                            n_jobs=1, wfo=None, min_trades=1, ledger_dir=tmp_path / "ledger",
+                            studies_dir=tmp_path / "studies")
+        assert res.meta["n_error"] == 0 and res.meta["n_ok"] == 2
+        assert res.meta["eval_start_effective"] == "2016-05-02 01:00:00"
+        assert (res.trials["m_eval_start_bars_dropped"] == 1.0).all()
+        sel = [ev for ev in ledger.study_events("l1-usdchf", ledger_dir=tmp_path / "ledger")
+               if ev.get("event") == "selection"][0]
+        assert sel["eval_start_effective"] == "2016-05-02 01:00:00"
+    finally:
+        evaluators.clear_cache()
+
+
+@real
+def test_data_load_error_is_cached_not_reloaded(monkeypatch):
+    """L1 perf: a failing data load is cached per process, so later trials re-raise at once
+    instead of reloading (M1) data per trial."""
+    calls = []
+    real_load = data.load_bars
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(data, "load_bars", spy)
+    evaluators.clear_cache()
+    try:
+        e = RuleEvaluator(SmaCross, symbol="EURUSD", timeframe="H1", start="2030-01-01", end="2020-01-01")
+        with pytest.raises(ValueError, match="no EURUSD H1 bars"):
+            e({"fast": 10, "slow": 40})
+        n = len(calls)
+        assert n >= 1
+        with pytest.raises(ValueError, match="no EURUSD H1 bars"):
+            e({"fast": 20, "slow": 40})
+        assert len(calls) == n
+    finally:
+        evaluators.clear_cache()
+
+
+# --------------------------------------------------------------------------- L4: hold in rows, data gaps
+def test_trade_stats_hold_in_rows_across_a_data_gap():
+    # 5 weekdays, a 30-weekday hole, then 5 weekdays
+    d0 = np.busday_offset(np.datetime64("2016-06-20"), np.arange(5))
+    d1 = np.busday_offset(np.datetime64("2016-06-20"), np.arange(36, 41))
+    dates = np.concatenate([d0, d1])
+    assert evaluators.data_gaps(dates) == [(str(d0[-1]), str(d1[0]), 31)]
+    tr = pl.DataFrame({
+        "entry_ts": [datetime(2016, 6, 23, 10), datetime(2016, 6, 20, 10)],
+        "exit_ts": [datetime(2016, 8, 10, 10), datetime(2016, 6, 21, 10)],   # 1st straddles the gap
+        "pnl_points": [1.0, -1.0], "pnl_ccy": [1.0, -1.0], "bars_held": [10, 2], "skipped": [False, False],
+    })
+    assert str(d1[0]) == "2016-08-09"
+    s = evaluators.trade_stats(tr, dates=dates)
+    # 2016-06-23 is row 3, 2016-08-10 is row 6 → 3 rows, although 48 calendar days
+    assert s["hold_days_max"] == 3.0
+    assert s["hold_calendar_days_max"] == 48.0
+    assert s["trades_across_data_gap"] == 1.0
+    legacy = evaluators.trade_stats(tr)                  # no index → weekdays (old behaviour)
+    assert legacy["hold_days_max"] == 34.0 and "trades_across_data_gap" not in legacy
+
+
+class GapHold:
+    """Test-only (risk type A): long from the first bar on/after ``enter`` until the first bar
+    on/after ``exit_day`` — used to straddle the 2016 XAUUSD M1 hole."""
+
+    name = "gap_hold_test"
+    risk_type = RiskType.A
+
+    def __init__(self, exit_day: int = 10, enter: str = "2016-06-20"):
+        self.exit_day, self.enter = exit_day, datetime.fromisoformat(enter)
+
+    def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+        ts = pl.col("ts")
+        ex = datetime(2016, 11, self.exit_day)
+        on = (ts >= self.enter) & (ts < ex)
+        return bars.select(
+            pl.when(on & ~on.shift(1, fill_value=False)).then(1)
+            .when(~on & on.shift(1, fill_value=False)).then(0)
+            .otherwise(None).cast(pl.Int8).alias("signal"),
+            pl.lit(500.0).alias("stop_dist"),
+            pl.lit(None, dtype=pl.Float64).alias("target_dist"),
+        )
+
+
+def _have_xau() -> bool:
+    try:
+        return data.catalog("FBS").filter(pl.col("symbol") == "XAUUSD").height > 0
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _have_xau(), reason="XAUUSD data not available")
+def test_xauusd_h4_gap_trade_does_not_cap_the_embargo(tmp_path):
+    """L4: XAUUSD M1 has a 133-day hole (2016-06-24 → 2016-11-04).  A trade across it used to
+    set m_hold_days_max ≈ 95 weekdays → auto embargo capped → CPCV gates skipped.  Holding is
+    now measured in rows of the daily index, and the trade is flagged as gap-straddling."""
+    from quantlab import opt
+    warnings.filterwarnings("ignore")
+    evaluators.clear_cache()
+    try:
+        # 3 dev years so a CPCV group (≈ 60 rows) is wide enough that the cap (¼ group) is not
+        # binding for any honest short-hold system
+        e = RuleEvaluator(GapHold, symbol="XAUUSD", timeframe="H4", start="2016-05-02", end="2019-05-01")
+        out = e({"exit_day": 10})
+        m = out.metrics
+        assert m["n_trades"] == 1 and m["trades_across_data_gap"] == 1.0
+        assert m["hold_calendar_days_max"] > 130
+        assert m["hold_days_max"] <= 10
+        sp = opt.SearchSpace([opt.IntParam("exit_day", 8, 10, 1)])
+        res = opt.run_study(e, sp, book="FBS", system="l4", issue=1, attempt=1, study_id="l4-xau",
+                            n_jobs=1, wfo=None, min_trades=1, cv=opt.CPCVConfig(10, 2),
+                            ledger_dir=tmp_path / "ledger", studies_dir=tmp_path / "studies")
+        assert res.meta["embargo_capped"] is False, res.meta["cpcv"]
+        assert res.meta["cpcv"]["embargo_days"] <= 10
+        assert res.meta["m_trades_across_data_gap"] == 1
+        assert any(g[0] <= "2016-06-24" and g[1] >= "2016-11-04" for g in res.meta["data_gaps"])
+    finally:
+        evaluators.clear_cache()

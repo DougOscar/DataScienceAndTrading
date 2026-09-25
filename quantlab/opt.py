@@ -93,7 +93,9 @@ trade).  Hence, measured in trading-day rows:
   (positions opened in the test block carry over; serial correlation of MTM returns).
 
 Both default to the maximum holding period seen among the ``ok`` trials
-(``m_hold_days_max``, weekdays), floored at 1 and capped at a quarter of a group.
+(``m_hold_days_max``, in rows of the date index between entry and exit — L4: a trade across
+a data gap spans only the rows that exist, not the calendar time of the gap), floored at 1
+and capped at a quarter of a group.
 Selection on each split's training rows uses the SAME objective + plateau procedure as
 the full-sample selection; the selected column's test-row returns are stored.  Paths
 follow López de Prado: each group is in the test set of φ = C(N−1, k−1) splits; path
@@ -175,6 +177,7 @@ import numpy as np
 import polars as pl
 
 from . import config, ledger
+from .metrics import data_gaps as _data_gaps
 from .contracts import StudyResult
 
 __all__ = [
@@ -1242,7 +1245,10 @@ class _Book:
     """In-memory record list + checkpointed TrialRecorder (+ opt_aux sidecar parquet)."""
 
     def __init__(self, study_id: str, studies_dir: Optional[Path], space: SearchSpace, objective: Objective,
-                 ppy: float, checkpoint_every: int):
+                 ppy: float, checkpoint_every: int, abort_after: int = 0):
+        self.study_id = study_id
+        self.abort_after = int(abort_after)   # L1: size of the first batch checked for a uniform error
+        self.first_batch: list[Optional[str]] = []
         self.rec = ledger.TrialRecorder(study_id, studies_dir, flush_every=10 ** 9)
         self.dir = self.rec.dir
         self.space, self.objective, self.ppy = space, objective, ppy
@@ -1280,6 +1286,17 @@ class _Book:
         self.seen[_pjson(params)] = r
         if len(self.pending) >= self.checkpoint_every:
             self.flush()
+        if res is not None and len(self.first_batch) < self.abort_after:
+            self.first_batch.append(r.error if r.status == "error" else None)
+            fb = self.first_batch
+            if len(fb) == self.abort_after and fb[0] is not None and all(e == fb[0] for e in fb):
+                # L1: every trial of the first batch failed with the same exception type and
+                # message → a data / setup error, not a parameter-specific one.  Abort instead
+                # of grinding through the whole candidate set (the failed trials are recorded:
+                # run_study's `finally` flushes them and logs the `trials` event as aborted).
+                raise StudyError(
+                    f"study {self.study_id}: the first {len(fb)} evaluated trials all failed with the same "
+                    f"error — aborting (data/setup error, not a parameter effect): {fb[0]}")
         return r
 
     def restore(self, recs: list[_Rec]) -> None:
@@ -1403,6 +1420,7 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
               parent_study: Optional[str] = None, notes: str = "", study_id: Optional[str] = None,
               storage: Optional[str] = None, resume: bool = False, tpe_batch: int = 8,
               checkpoint_every: int = 100, allow_large_grid: bool = False,
+              abort_on_uniform_errors: bool = True,
               plateau_radius: Optional[float | Mapping[str, float]] = None,
               ledger_dir: Optional[Path] = None, studies_dir: Optional[Path] = None) -> StudyResult:
     """Run a fully logged study and assemble a :class:`contracts.StudyResult`.
@@ -1419,6 +1437,13 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     ``storage`` (Optuna RDB URL, e.g. ``sqlite:///…``) makes the sampler state durable;
     ``resume=True`` continues an existing study id from its recorded trials.
     ``min_trades`` overrides ``objective.min_trades``.  ``wfo=None`` skips the walk-forward.
+
+    ``abort_on_uniform_errors`` (default True, L1): if the first ``max(n_jobs, 2)`` evaluated
+    trials of this call all fail with the *same* exception type and message, the error is a
+    data/setup error rather than a parameter effect, and the study stops with
+    :class:`StudyError` (the failed trials are recorded and the ``trials`` event is logged
+    with ``status="aborted"``).  Disable it for an evaluator whose parameter-specific errors
+    legitimately share one message.
 
     ``plateau_radius`` (float, or ``{param: float}``; default 0.20, floor 0.10): the plateau
     neighbourhood pre-registered on the hypothesis card (DESIGN §4.2, red-team N3).  It is
@@ -1511,7 +1536,8 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
             candidate_set=method, candidate_set_data_dependent=data_dependent,
             objective=objective.describe(), selection=selection.describe(), evaluator=_py(ev_desc), notes=notes)
 
-    bk = _Book(sid, studies_dir, space, objective, ppy, checkpoint_every)
+    bk = _Book(sid, studies_dir, space, objective, ppy, checkpoint_every,
+               abort_after=max(jobs, 2) if abort_on_uniform_errors else 0)
     if resume:
         bk.restore(_load_existing(sid, studies_dir, default_source=str(row.get("method") or "")))
     runner = _Runner(evaluator, cost, jobs)
@@ -1595,6 +1621,20 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
     ok_trades = trials.filter(pl.col("status") == "ok")
     med_trades = float(ok_trades["m_n_trades"].median()) if ok_trades.height and "m_n_trades" in ok_trades.columns else float("nan")
     budget = med_trades / len(space.params) / cv.n_groups * (cv.n_groups - cv.k_test) if med_trades == med_trades else float("nan")
+    # L1: the evaluation start actually used (after the input-availability clamp), if the
+    # evaluator reports one; L4: data gaps in the study's date index + gap-straddling trades
+    eval_start_eff = None
+    fn = getattr(evaluator, "eval_start_effective", None)
+    if callable(fn):
+        try:
+            eval_start_eff = fn()
+        except Exception as e:  # diagnostic only; the trials already carry the real outcome
+            eval_start_eff = f"unavailable ({type(e).__name__}: {e})"
+    gaps = _data_gaps(S.dates, calendar_days=ppy > 300)
+    gap_col = "m_trades_across_data_gap"
+    ok_evaluated = trials.filter(pl.col("status").is_in(["ok", "low_trades"]))
+    gap_trades = (int(np.nan_to_num(ok_evaluated[gap_col].max() or 0.0))
+                  if gap_col in ok_evaluated.columns and ok_evaluated.height else None)
     meta = {
         "study_id": sid, "book": bname, "system": system, "issue": issue, "attempt": attempt,
         "space": space.to_json(), "candidate_set": method, "candidate_set_data_dependent": data_dependent,
@@ -1612,6 +1652,8 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
         "trade_counts": tcounts, "median_trades_ok": med_trades,
         "train_trades_per_param_per_fold": budget, "resumed": resume, "storage": storage,
         "mp_start_method": runner.start_method, "worker_threads": worker_threads,
+        "eval_start_effective": eval_start_eff, "data_gaps": gaps,
+        "m_trades_across_data_gap": gap_trades,
     }
     ledger.log_event(sid, "selection", ledger_dir=ledger_dir, selected_params=selected,
                      selection=_py({k: v for k, v in sel_info.items()}), cv_scheme=cv_scheme,
@@ -1620,7 +1662,9 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
                      embargo_days_uncapped=meta["embargo_days_uncapped"], candidate_set=method,
                      candidate_set_data_dependent=data_dependent, wfo_refits=wmeta.get("n_refits"),
                      wfo_drift_mean=wmeta.get("drift_mean"), wfo_drift_max=wmeta.get("drift_max"),
-                     dev_window_actual=meta["dev_window"], runtime_s=round(runtime, 2), n_jobs=jobs)
+                     dev_window_actual=meta["dev_window"], runtime_s=round(runtime, 2), n_jobs=jobs,
+                     eval_start_effective=eval_start_eff, data_gaps=gaps,
+                     m_trades_across_data_gap=gap_trades)
     return StudyResult(study_id=sid, param_names=space.names, trials=trials, returns=returns,
                        selected_params=selected, selection=sel_info, cpcv_paths=paths,
                        wfo_oos=wfo_oos, wfo_params=wfo_params, meta=meta)

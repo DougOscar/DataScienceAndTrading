@@ -14,6 +14,20 @@ import numpy as np
 import polars as pl
 
 PERIODS_PER_YEAR = {"forex": 260.0, "crypto": 365.0, "b3": 252.0}
+GAP_TRADING_DAYS = 5   # L4: a data gap is "more than 5 trading days missing" between two rows
+
+
+def data_gaps(dates, *, calendar_days: bool = False, min_missing: int = GAP_TRADING_DAYS
+              ) -> list[tuple[str, str, int]]:
+    """Gaps in a daily date index: ``(last_date_before, first_date_after, n_missing)`` for every
+    pair of consecutive rows with more than ``min_missing`` trading days (weekdays; calendar days
+    when ``calendar_days``, e.g. crypto) missing between them."""
+    d = np.asarray(dates).astype("datetime64[D]")
+    if d.size < 2:
+        return []
+    miss = ((d[1:] - d[:-1]).astype(np.int64) if calendar_days else np.busday_count(d[:-1], d[1:])) - 1
+    idx = np.flatnonzero(miss > min_missing)
+    return [(str(d[i]), str(d[i + 1]), int(miss[i])) for i in idx]
 
 
 def as_array(r) -> np.ndarray:
