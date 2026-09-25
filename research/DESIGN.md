@@ -340,4 +340,4 @@ Rules:
 | 5 | Commands | Old commands retired; new skills and agents as in §9 |
 | 6 | Naming | `quantlab/`, `research/systems/<book>/…` |
 | 7 | Gate recalibration (2026-09-24) | Adopted R1 (DSR hurdle from null variance + raw trial count) and R2 (CSCV P(OOS loss) < 0.10 replaces PBO < 0.30), plus the red-team fixes: WFO procedure gate, judge-computed plateau, 1-pip stress slippage on all fills, joint holdout band. See `research/audits/2026-09-24_phase1_fix_plan.md` |
-| 8 | Recalibration decisions (2026-09-24) | WFO gate recency threshold stays "> 0" (dead-edge pass 3.3%, power 80% point SR 1.57); holdout = locked year + newer data, NOT_DECISIVE blocks promotion (§4.4); plateau radius floor 0.10. Still open: time-stability replacement (R3) |
+| 8 | Recalibration decisions (2026-09-24) | WFO gate recency threshold stays "> 0" (dead-edge pass 3.3%, power 80% point SR 1.58 on the final code); holdout = locked year + newer data, NOT_DECISIVE blocks promotion (§4.4); plateau radius floor 0.10. Still open: time-stability replacement (R3) |

@@ -1,4 +1,131 @@
-# Phase 1 exit test, final confirmation run after round 3 (2026-09-25)
+# Phase 1 exit test: final confirmation (2026-09-25)
+
+# Final (2394ea7): authoritative numbers
+
+**Author:** validation-statistician · **Branch:** `feat/quantlab-phase1` @ `2394ea7`. The library includes red-team round 3 (`ebfb0a5`):
+- numeric categoricals are refused, so `hold` is now `IntParam(levels=…, plateau_scale="relative")`;
+- the plateau move has a floor of 5 % of the declared range;
+- `run_study` stores the CPCV, WFO and trade-count artifacts, and the gates verify them;
+- `evaluate_gates(log=True)` is the only ledger writer;
+- `issue` is required.
+
+The calibration script was migrated in `ebfb0a5`. I checked it: the only change is `_hold_param`, and every family's scale is sensible (below). `quantlab/` was not edited. Thresholds were not touched (DESIGN §4.2 / §4.4 v1.2).
+
+**Raw results:** `research/calibration/output/phase1_final_r4_results.jsonl`: 1,245 studies, **0 errors**, same task ids and salts as the r3 and `48e696f` runs. The r3 and `48e696f` checkpoints are kept unchanged. Each study used its own temporary ledger. `research/ledger/` was not touched, and no holdout bars were read.
+
+**How the three runs compare.** Every non-plateau gate status is identical in all 1,245 paired studies across the three runs. The holdout bands are identical to r3. Every difference below is the plateau gate.
+
+### F.1 Headline
+
+| Question | **Final (2394ea7)** | r3 (30b23b6) | 48e696f | Requirement | Status |
+|---|---|---|---|---|---|
+| Null false-pass, real-data nulls (660, 8 families) | **0/660**, 95 % CP [0, 0.6 %] | 0/660 | 0/660 | ≤ 5 % | **MET** |
+| Null false-pass, all nulls incl. synthetic | **0/760** [0, 0.5 %] | 0/760 | 0/760 | ≤ 5 % | **MET** |
+| Nulls passing with any one gate removed | 0 for every gate | 0 | 0 | — | No single gate carries the null result |
+| Planted grid edge passes, true SR ≥ 1.93 | **40/40** [91, 100] | 38/40 | 40/40 | "a planted edge passes" | **MET** |
+| Planted Sobol edge passes, true SR 1.95 / 1.51 | **20/20 / 14/15** | 20/20 / 14/15 | 20/20 / 14/15 | — | MET |
+| **Power, 80 % point** (true net SR, 160 paired grid studies) | **1.58** (50 %: 1.37) | 1.76 | 1.58 | — | Back to `48e696f`: r4 − r3 = −0.18, paired bootstrap 95 % [−0.47, −0.01]; r4 − 48e696f = 0.00 |
+| Dead-edge pass | **3/90 = 3.3 %** [0.7, 9.4] | 3/90 | 3/90 | — | The same 3 studies in all runs |
+| Holdout band decisive (manifest horizon 262 d), gate-passing real studies | 51/109 = 47 % [37, 57] | 48/104 | 49/104 | — | Unchanged band; the denominator follows the gate passes |
+| Runtime | 65.5 min wall for 1,223 studies + 1.6 min pilot for 22, 8 workers; **8.9 core-h** | 8.6 | 9.4 | ≤ 2 h | OK |
+
+**Planted passes and binding gates.**
+- Planted passes are 72/160, exactly the `48e696f` set.
+- The 5 salt-3012 studies that r3 failed pass again.
+- Among the planted failures, the only failing gate is cost stress in 35 studies and plateau in 2 (true SR 0.85 and 1.21).
+- **Cost stress is the binding gate for true edges.** Without it the 80 % point is 1.20.
+
+### F.2 Plateau pass rates (judge), paired
+
+| Family | n | **Final** | r3 | 48e696f | Matrix plateau (diagnostic) |
+|---|---|---|---|---|---|
+| All nulls | 760 | **11.3 %** [9.2, 13.8] | 10.8 % | 12.8 % | 18.6 % (32 SKIPPED) |
+| … seed × hold nulls | 360 | 1.4 % | 0.3 % | 1.7 % | 0.3 % |
+| … CORR shared / CORR SMA | 100 / 100 | 42 % / 28 % | 42 % / 28 % | 47 % / 30 % | 53 % / 47 % |
+| … Sobol null / synthetic zero | 100 / 100 | 4 % / 7 % | 4 % / 7 % | 4 % / 10 % | 24 % / 16 % |
+| Planted grid, all p | 160 | **91.9 %** | 78.8 % | 91.9 % | 95.6 % |
+| Planted grid, p ≥ 0.60 | 100 | **99 %** | 88 % | 99 % | 100 % |
+| Sobol oracles, p = 0.65 / 0.62 | 20 / 15 | 100 % / 100 % | 100 % / 100 % | 100 % / 100 % | 50 % / 47 % |
+| Dead | 90 | 78.9 % | 75.6 % | 83.3 % | 87.8 % |
+| Synthetic spike | 40 | 0 % | 0 % | 2.5 % | 12.5 % |
+
+**What the migration did to the plateau gate (paired with r3):**
+- 31 plateau studies went FAIL → PASS: the ±2-level `hold` failures are gone.
+- 3 went PASS → FAIL.
+
+**The joint axis now exists on the seed × hold families, since `hold` is numeric:**
+- it is below 0.6 in 348/360 seed × hold nulls;
+- in 5/160 planted studies, without changing any overall PASS;
+- in 12/90 dead studies.
+
+**Joint axis across the whole run:**
+- It is the only failing axis in 18 studies.
+- It blocks one overall PASS: `syn-plateau-h1.0-003`, true SR 1.0.
+- It removes 11 of the 97 null plateau passes that the plateau would give without it.
+
+**Scales (the migrated script):**
+- **`hold`, H1:** relative r = 0.20. At the usual selected value, 12, the judge evaluates 10, 11, 13, 14. These are off-grid and evaluated anyway; the 5 % floor (1.8) does not bind.
+- **`hold`, XAUUSD H4 (3/6/12):** at hold 3, integer rounding forces 1, 2, 4, 5, i.e. ±67 %. Hold 3 is selected in only 5 of the 100 XAUUSD nulls, so this barely shows here. It is still a coarse move on small integer parameters, a design note (no power measured on H4).
+- **Other families:** unchanged from r3, all sensible.
+
+### F.3 Gate-by-gate rejection
+
+Identical to r3 (§3.1 below) except the plateau column:
+
+| Family | Final | r3 |
+|---|---|---|
+| XAUUSD nulls | 99 % | 100 % |
+| EURUSD frictionless nulls | 96 % | 99 % |
+| Planted | 8 % | 21 % |
+| Dead | 21 % | 24 % |
+
+Standalone null pass rate per gate (760 nulls):
+
+| Gate | Pass rate |
+|---|---|
+| dsr | 0 % |
+| oos | 0.1 % |
+| cscv | 1.2 % |
+| trade_count | 2.4 % |
+| cost_stress | 3.3 % |
+| wfo_oos | 4.3 % |
+| plateau | 11.3 % |
+| max_year | 14.5 % |
+| pos_years | 49.5 % |
+
+Every null family still fails at least 3 gates. At least five gates each reject ≥ 89 % of every real-data null family.
+
+### F.4 Other checks
+
+- **USDCHF:** 60/60 ran, 0 errors, 0 pass, median 30 s per study.
+- **XAUUSD:** embargo 3 days, 0 capped, 0/100 SKIPPED on the OOS gates.
+- **Sobol vs grid at p = 0.65:** 20/20 on both.
+- **Holdout decisiveness by true SR among gate passers:**
+
+  | True SR | Decisive |
+  |---|---|
+  | < 1.5 | 0/33 |
+  | 1.5–2.0 | 28/52 = 54 % |
+  | ≥ 2.5 | 20/20 |
+
+- **Gate runtime:** median 9.1 s per real study (p90 12.2 s), against 7.7 s in r3 and 7.6 s in `48e696f`. The +1.4 s is the artifact verification plus the judge plateau: 17 evaluations instead of 7 on seed × hold (2.3 s against 0.9 s). Synthetic: 5.0 s.
+
+### F.5 Verdict on the DESIGN §10 Phase 1 exit criterion: **MET**
+
+- **"A zero-edge synthetic system fails the gates ≥ 95 % of the time":** 760/760 nulls fail. That is synthetic plus 660 real-data nulls, including ρ = 0.6–0.8 correlated grids, Sobol sets, and XAUUSD and USDCHF. The upper 95 % CI of the false-pass rate is 0.5 %. No single gate carries the result.
+- **"A planted edge passes":** 40/40 on grid and 20/20 on Sobol at true net SR ≈ 1.9. The power 80 % point is SR 1.58, as in `48e696f`, and the round 2/3 anti-gaming changes cost no measurable power.
+- **Standing qualifications (not blockers):**
+  - cost stress binds for high-turnover H1 systems;
+  - a one-year holdout is decisive only for true SR ≳ 1.9;
+  - no planted edge was tested on a correlated grid.
+
+The r3 report below is kept as history. Its §4 finding (the ±2-level `hold` cost 0.18 of power) is resolved by the round 3 migration.
+
+---
+
+# History: r3 run on 30b23b6
+
+## (r3) Phase 1 exit test, final confirmation run after round 3 (2026-09-25)
 
 **Author:** validation-statistician · **Branch:** `feat/quantlab-phase1` @ `30b23b6`. The library includes red-team round 2 (R2-1..R2-4, `8356343`): the judge plateau with pre-registered scales, a joint axis and ±1/±2 ordered levels; fixed band seed and n_boot 2000/1000; trial-store and evaluator identity checks; holdout family keys. `quantlab/` was not edited.
 
