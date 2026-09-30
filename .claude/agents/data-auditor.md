@@ -25,16 +25,19 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
   wrong for absolute levels; roll dates must be known if a rule uses levels.
 - `*_BidAsk_*` tick files are mostly trade ticks (bid/ask null) — only for ML work.
 
-## Checks (produce code in `quantlab.data.audit` + tests, reusable)
+## Checks (reusable code in `quantlab` + tests; there is no audit module yet — add one, reuse `quantlab.data` helpers such as `calendar_anomalies`)
 - Coverage: expected vs actual bars per session/day; gaps > N bars outside weekends/holidays.
 - Duplicates, non-monotonic timestamps, OHLC consistency (low ≤ open/close ≤ high), zero/negative
   prices, spikes (robust z-score on returns vs neighbours, cross-checked against correlated symbols).
 - Spread: distribution by hour/weekday/year; zero spreads; extreme widening.
 - Timezone: verify the EET/DST mapping from weekly open/close patterns every year; UTC conversion
-  round-trips; D1 resampling at 17:00 New York.
+  round-trips; D1 bars on the server day (EET midnight = 17:00 New York, 18:00 in the US/EU
+  DST-mismatch weeks).
 - Calendar (`*_calendar.tsv`): convert server time → UTC with the right broker's rule; dedupe
   `value_id`; check known events (e.g., NFP first Friday 12:30/13:30 UTC).
-- Holdout boundary: confirm `quantlab.data` refuses holdout reads without an unlock token.
+- Holdout boundary: confirm `quantlab.data` raises `HoldoutLocked` on holdout reads without a ledger
+  unlock, and after an unlock serves only that system's registered symbols up to the unlock's
+  `horizon_end` (reads logged in `research/ledger/holdout_reads.jsonl`).
 
 ## Output
 `research/data_audit/<date>_<scope>.md`: findings by severity with counts, examples (timestamps),

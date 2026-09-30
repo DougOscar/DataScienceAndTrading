@@ -21,7 +21,9 @@ and is read-only.
 
 1. **Pre-flight (refuse if any fails):**
    - System passed S5 with no open BLOCKER from the red team.
-   - `quantlab.ledger.holdout_state(book, system)`:
+   - `quantlab.ledger.holdout_state(book, system, study_id=study_id)` — the state of the whole
+     holdout **family** (within the book, every study sharing the normalised system name or the
+     issue number, transitively), so a renamed variant inherits its sibling's FAIL / PASS / pending:
      - `killed` (an earlier FAIL) → **stop**. A FAIL is final; there is no re-exam.
      - `passed` → stop; the holdout is done (go to `/promote`).
      - `pending` (unlocked, no exam recorded) → stop and finish that exam (steps 4–6) instead.
@@ -32,7 +34,8 @@ and is read-only.
      `horizon_source == "manifest"`.
    - **Band current?** Compare the band's `horizon_end` with `quantlab.data.holdout_horizon(book, band["symbols"])["horizon_end"]`.
      If the manifest now ends later (newer data was exported), or this is a re-exam, delegate to
-     **validation-statistician** to run `quantlab.gates.rebuild_holdout_band(study, periods_per_year=…, reason="<what was exported>")`
+     **validation-statistician** to run `quantlab.gates.rebuild_holdout_band(study, periods_per_year=…, reason="<what was exported>", evaluator=…)`
+     (`evaluator=` is required when the study has no WFO series)
      **before anything else**. It rebuilds the band for the new horizon with the same construction
      and seed, and logs a `holdout_band_registered` event (new `band_version`, the horizon it
      replaces, and the reason). Show the user the new band and its `p_pass_zero_edge`. No one may
@@ -52,8 +55,9 @@ and is read-only.
    `quantlab.ledger.record_mechanism_review`) and the band, and refuses unless the recomputed verdict
    is PASS and the recomputed band equals the registered one. The ledger then refuses the unlock if
    the band is stale versus the manifest, if the horizon doesn't come from the manifest, after a FAIL
-   or a PASS anywhere in the system's holdout family, while an exam is pending, or (for a re-exam) if
-   the band doesn't reach past the last exam's horizon. The row records `exam` (1, 2, …), the horizon
+   or a PASS anywhere in the system's holdout family, while an exam is pending, with a dirty working
+   tree, or (for a re-exam) if the study is not the one first unlocked or the band doesn't reach past
+   the last exam's horizon. The row records `exam` (1, 2, …), the horizon
    and the verification. This is what makes `quantlab.data` serve holdout data for this system (its
    own system name only, its registered symbols only), up to the band's `horizon_end`.
 3. Delegate to **optimization-architect** only to *execute* the frozen procedure over the **full**

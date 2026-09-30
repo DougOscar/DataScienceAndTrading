@@ -110,6 +110,8 @@ See `references/methodology.md` for the full CPCV algorithm and formulas.
 
 ### Deflated Sharpe Ratio (DSR)
 
+> **In this repo use `quantlab.stats.dsr` / `dsr_from_matrix`** (per-period Sharpe; hurdle √(1/(T−1)) · E[max of N], N = raw trials incl. related studies — DESIGN v1.2 §4.2). The sketch below is illustrative only: it mixes an annualised SR with a per-period variance and omits the √V0 scaling of E[max].
+
 The observed Sharpe ratio must be adjusted for:
 - Number of strategies tested (multiple testing)
 - Non-normality of returns (skewness, kurtosis)

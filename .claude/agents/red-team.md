@@ -13,16 +13,31 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 
 ## Read first
 - `research/DESIGN.md` §4.3 (execution realism), §4.2, §5.
-- The hypothesis card, the strategy code, tests, the notebook, the study and validation report.
+- The hypothesis card, the strategy code, tests, the notebook, the study (its `study_created`
+  ledger row and events) and validation report.
+
+## S2 card review (before any study runs)
+- **Plateau scales**: every numeric param on the card has a scale — `relative` only for strictly
+  positive params whose zero is economically meaningful (lookbacks, multipliers), else an absolute
+  step — with a one-line justification. A scale much finer than the card's economic neighbourhood,
+  a relative scale on an offset/threshold, a radius below 0.10, or a range declared narrower than
+  the mechanism justifies (the judge's floor is 5 % of the declared range) is a finding. The code's
+  `SearchSpace` must carry exactly the card's scales and radius.
+- Numeric knobs declared as categoricals (refused by `opt`); unordered categoricals not named and
+  justified on the card (the plateau does not judge them).
+- Risk type (A–D), book/symbols/timeframe, expected Sharpe and trade frequency (consistent with the
+  S1 power check), and a mechanism ablation that could actually contradict the mechanism.
 
 ## Attack checklist (run probes with code; don't just read)
 **Look-ahead / leakage**
 - Signals using the current bar's close/high/low for an order that fills in the same bar.
 - Indicators with centred windows, `shift(-k)`, full-sample normalisation/fit, future-aware resampling
-  (label='right' mistakes), D1 bars not closing at 17:00 NY.
+  (label='right' mistakes), D1 bars not following the server day (EET midnight = 17:00 New York,
+  18:00 in the US/EU DST-mismatch weeks).
 - ML: features/labels overlapping across CV folds, scaler/encoder fit on all data, target leakage.
-- Run the truncation test yourself on random timestamps; perturb future bars and check that past
-  signals don't change.
+- Run the audit yourself: `quantlab.testing.assert_no_lookahead(StrategyClass, bars)` (factory, no
+  `max_forced_cuts`), `assert_engine_causal(…)` and `lint_strategy_source(<module>)`; add your own
+  truncation / future-perturbation probes where the strategy has unusual inputs.
 
 **Execution & costs**
 - Bid/Ask handling (MT5 bars are Bid): long entries at Ask, short exits at Ask.
@@ -33,13 +48,16 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 **Statistics & process**
 - Trials not logged, repeated "attempts" disguised as one, thresholds or windows chosen after
   looking; PnL concentrated in a few trades/months/years; results driven by one symbol.
+- Ledger signs of fishing: a TPE (data-dependent) study presented for validation, `n_trials_changed`
+  events (optional stopping), several `gates` runs on one study, gate results not from
+  `evaluate_gates(log=True)`, SKIPPED gates (e.g. `embargo_capped`) glossed over.
 - Parameter drift across walk-forward re-fits; plateau narrower than claimed.
 
 **Mechanism**
 - Does the profit come from the stated mechanism? (e.g., a "mean-reversion" system that actually
   earns carry/swap or trend drift). Use ablations and conditional P&L attribution.
 
-## Output: `research/systems/<book>/<slug>/results/redteam_<stage>.md`
+## Output: `research/systems/<book>/<issue:04d>_<slug>/results/redteam_<stage>.md`
 Findings ranked by severity: **BLOCKER** (invalidates results) / **MAJOR** (materially changes
 numbers) / **MINOR**. Each with evidence (code path, probe output) and the concrete failure scenario.
 State explicitly which checks you ran that found nothing.

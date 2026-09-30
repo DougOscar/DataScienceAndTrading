@@ -34,7 +34,7 @@ The default outcome of strategy research is **self-deception**. Almost every bac
 
 - **Sharpe:** annualize with √(periods/yr) *only if returns are iid*. Correct for autocorrelation (Lo, 2002). Report alongside skew and kurtosis — Sharpe assumes neither.
 - **Probabilistic Sharpe Ratio (PSR):** probability the true Sharpe > a benchmark, given track-record length, skew, kurtosis.
-- **Deflated Sharpe Ratio (DSR):** PSR adjusted for the number of trials and the variance of trial Sharpes — the single most important metric when you've searched a parameter space.
+- **Deflated Sharpe Ratio (DSR):** PSR adjusted for the number of trials — the single most important metric when you've searched a parameter space. (This repo: hurdle from the null sampling variance 1/(T−1) and the raw trial count, DESIGN v1.2 §4.2; the variance of trial Sharpes is a diagnostic only.)
 - Report **CIs (bootstrapped)** on headline metrics, not point estimates. Add downside/tail measures: Sortino, Calmar, Omega, Ulcer index, max drawdown + duration, VaR/CVaR (historical or Cornish–Fisher), and the **t-stat of mean return**.
 
 ## Walk-forward & cross-validation

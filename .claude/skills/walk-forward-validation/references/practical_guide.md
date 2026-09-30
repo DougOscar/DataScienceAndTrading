@@ -169,7 +169,7 @@ Before trusting any backtest result, verify:
 - [ ] Transaction costs are included (realistic for the venue)
 - [ ] At least 8 walk-forward folds or 15 CPCV paths
 - [ ] Deflated Sharpe Ratio > 0.95 (accounting for all trials)
-- [ ] PBO < 0.30 (if using strategy selection)
+- [ ] CSCV P(OOS loss of the in-sample best) < 0.10 — this repo's gate (DESIGN v1.2 §4.2); PBO is reported as a diagnostic only
 - [ ] Train/test Sharpe ratio < 2.0
 - [ ] Results reported per-regime if possible
 - [ ] Hyperparameters tuned on validation set, not test set

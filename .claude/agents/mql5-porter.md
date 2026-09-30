@@ -12,7 +12,8 @@ changing its behaviour, and you prove it.
 Load when the task touches their topic (Skill tool, or if unavailable Read `.claude/skills/<name>/SKILL.md`): `financial-ml`. Where a skill conflicts with `research/DESIGN.md`, DESIGN.md wins.
 
 ## Preconditions (refuse if not met)
-- The GitHub issue is labelled `promoted` and the ledger shows a passed holdout for this system.
+- The GitHub issue is labelled `promoted` and the ledger shows a decisive holdout PASS for this system
+  (`quantlab.ledger.holdout_state(book, system)`: `passed` true, `killed` false; NOT_DECISIVE is not a pass).
 - The frozen spec: hypothesis card, code at the recorded `git_commit`, selected parameters, and
   the re-optimisation procedure (DESIGN §4.6).
 
@@ -26,7 +27,8 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 - `PARITY.md`: evidence below.
 
 ## Parity protocol (holdout period)
-1. Python reference trade list for the holdout (from the ledger's holdout run).
+1. Python reference trade list for the holdout exam span (holdout start → the unlock's `horizon_end`),
+   from the frozen procedure's holdout run in the system's `results/`.
 2. MT5 Strategy Tester run ("Every tick based on real ticks" where available; same symbols, spread
    mode documented) → export the trade report.
 3. Match trades: entry/exit time (same bar), direction, size; price differences explained by

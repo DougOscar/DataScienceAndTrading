@@ -12,7 +12,8 @@ find ideas worth testing and state them so precisely that they can be *killed* c
 Load when the task touches their topic (Skill tool, or if unavailable Read `.claude/skills/<name>/SKILL.md`): `quant-trading-research`, `applied-math-quant`, `mean-reversion`, `regime-detection`, `feature-engineering`, `correlation-analysis`. Where a skill conflicts with `research/DESIGN.md`, DESIGN.md wins.
 
 ## Read first
-- `research/DESIGN.md` §0 (principles), §3 (pipeline), §4.2 (gates), §5 (risk-semantics types A–D).
+- `research/DESIGN.md` §0 (principles), §3 (pipeline), §4.2 (gates, incl. the pre-registered
+  plateau scale), §5 (risk-semantics types A–D).
 - `research/ledger/studies.jsonl` and closed GitHub issues (`gh issue list --state all --label killed,promoted,hypothesis,testing`)
   and `DocumentationVault/systems/` — **never re-propose an idea already tested** unless you state
   what is materially different; a re-proposal counts against the original's trial budget.
@@ -22,7 +23,8 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 2. Practitioner books/papers with reproducible rules (e.g., Chan, Kaufman, Carver, López de Prado).
 3. Trading communities with concrete rules: MQL5 forum/codebase/articles, BabyPips, Forex Factory threads.
 4. **Data mining** on *development data only* (`quantlab.data` enforces this). Mining is allowed, but you
-   must record how many candidate patterns you scanned — that number is logged as trials.
+   must record on the card how many candidate patterns you scanned; the statistician adds that
+   number to the Deflated Sharpe's trial count (`evaluate_gates(prior_trials=…)`).
 
 Never use social media, news sites, influencer content, or paywalled summaries you cannot read.
 Always cite: title, authors, year, URL/DOI, and the page/section where the rule is defined.
@@ -34,8 +36,10 @@ Always cite: title, authors, year, URL/DOI, and the page/section where the rule 
   arbitraged away) — or, for mined ideas, an explicit "no known mechanism" flag (higher bar).
 - Survives costs: estimate gross edge per trade vs. typical spread (EURUSD ≈ 0.8 pip daytime,
   ≈ 2.8 pip at 00:00 server rollover) and swap for multi-day holds.
-- Has enough trades in 2016-05→2025-05 to be testable (rough MinTRL sanity check).
-- Few free parameters (≤ 4 preferred), each with a *prior range justified by the mechanism*.
+- Has enough trades in 2016-05→2025-05 to be testable (rough MinTRL sanity check; the S1 power
+  check uses the card's expected Sharpe and trade frequency).
+- Few free parameters (≤ 4 preferred; ≤ 3 are searched on a full grid, more on a Sobol sample),
+  each with a *prior range justified by the mechanism* and a *plateau scale* (below).
 
 ## Output: one hypothesis card per idea
 Draft each card in `research/systems/_drafts/<slug>.md`, then (only when the main session tells you
@@ -47,10 +51,24 @@ to publish) create the issue with `gh issue create --label hypothesis`. Card tem
 **Idea (≤200 chars):** …
 **Mechanism:** why this should work and persist (or "data-mined, no known mechanism")
 **Falsifiable prediction:** what we should observe if true, and what result kills it
+**Mechanism ablation:** which component to switch off / randomise to test the mechanism, and the
+  result that would contradict it (DESIGN §4.2 mechanism gate)
 **Rules:** exact entry / exit / stop / sizing, unambiguous enough to code without asking
 **Risk semantics:** type A | B | C | D (DESIGN §5) + stop/target definition
-**Markets & timeframes:** …   **Expected trades/year (per symbol):** …
-**Free parameters & prior ranges:** name: [lo, hi] — justification
+**Symbols:** …   **Timeframe:** …
+**Expected Sharpe (annualised, net of costs):** …   **Expected trades/year (per symbol):** …
+  (both feed the S1 power check — state how you estimated them)
+**Free parameters (pre-registered; reviewed by the red team at S2):**
+| name | type | range [lo, hi] (or levels) | plateau scale | economic justification (1 line) |
+|---|---|---|---|---|
+| e.g. lookback | int | [20, 120] | relative | a 20 % longer/shorter lookback is the same idea |
+| e.g. z_entry | float | [1.0, 3.0] | step 0.25 | threshold; zero is arbitrary, so absolute |
+  Plateau scale: `relative` (±r/2, ±r of the value; strictly positive params whose zero is
+  meaningful — lookbacks, multipliers) or an absolute `step` in the param's units (offsets,
+  thresholds). Optional plateau radius r (default 0.20, floor 0.10). The judge never perturbs
+  less than 5 % of the declared range, so declare the range the mechanism justifies, not a
+  narrow one. Numeric knobs are never categoricals (use explicit levels); any unordered
+  categorical is named and justified here (the plateau does not judge it).
 **Cost sensitivity:** expected gross edge/trade vs spread (+ swap if multi-day)
 **Null / benchmark for component tests:** (e.g., random filter with same selectivity)
 **Sources:** full citations
