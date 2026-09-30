@@ -1,0 +1,27 @@
+== H1: NOT_DECISIVE loop on a ZERO-edge holdout (sd 0.6 %/day, 0.4 trades/day)
+  dev SR 1.0: p_pass_zero_edge by exam horizon [0.69, 0.66, 0.51, 0.51]; honest chain P(PASS) 0.000 (FAIL 0.623, pending 0.377); one exam at first decisive horizon None: nan; peeking author (monthly, 19 looks) 0.000
+  dev SR 1.2: p_pass_zero_edge by exam horizon [0.65, 0.56, 0.41, 0.37]; honest chain P(PASS) 0.000 (FAIL 0.731, pending 0.270); one exam at first decisive horizon None: nan; peeking author (monthly, 19 looks) 0.000
+  dev SR 1.5: p_pass_zero_edge by exam horizon [0.57, 0.42, 0.27, 0.25]; honest chain P(PASS) 0.214 (FAIL 0.785, pending 0.000); one exam at first decisive horizon 522: 0.264; peeking author (monthly, 19 looks) 0.383
+  dev SR 1.9: p_pass_zero_edge by exam horizon [0.42, 0.26, 0.13, 0.09]; honest chain P(PASS) 0.209 (FAIL 0.790, pending 0.000); one exam at first decisive horizon 392: 0.251; peeking author (monthly, 19 looks) 0.349
+== H2: band re-roll at S5 and rebuild overrides
+  (seed, n_boot, sharpe_lo, max_dd_hi, p_pass_zero_edge) per gate run: [(1, 2000, -0.017, 0.1171, 0.451), (2, 2000, -0.102, 0.1221, 0.448), (3, 2000, 0.024, 0.1228, 0.452), (4, 100, -0.229, 0.127, 0.511), (5, 60, -0.085, 0.1051, 0.425), (6, 60, -0.418, 0.1054, 0.468), (7, 60, 0.072, 0.1118, 0.395)]
+  registered band = last gate run's (seed 7, n_boot 60); gate runs logged: 7
+  unlock with the re-rolled n_boot=60 band: ACCEPTED (exam 1)
+  rebuild_holdout_band(seed=999, n_boot=40, symbols=['GBPUSD']) ACCEPTED: horizon_end 2027-03-01 23:59:00 (the system trades EURUSD, which ends 2026-09-30), n_boot 40, seed 999
+== H3: FAIL -> killed; renamed system
+  exam 1: FAIL | state killed: True
+  renamed system 'Probe' (issue 42) after the FAIL: unlock ACCEPTED (exam 1); normalise_system equal: True
+  renamed system 'probe_v2' (issue 43) after the FAIL: unlock ACCEPTED (exam 1); normalise_system equal: False
+== H4 + H5: never-recorded exam; load_bars keys (synthetic M1 parquet)
+  passed_sys exam: PASS
+  pending_sys state: {'pending': True, 'last_status': None, 'killed': False}
+  load_bars(GBPUSD, system='passed_sys', end=2026-09-30): served up to 2026-09-29 23:00:00
+  load_bars(GBPUSD, system='pending_sys', end=2026-09-30): served up to 2026-09-29 23:00:00
+  load_bars(GBPUSD, system='never_unlocked_sys'): HoldoutLocked
+== H6: forged manifest end vs exam tolerance
+  band horizon 262 d: a realised series up to 13 d shorter/longer is accepted (= a manifest end up to 18 calendar days off)
+  band horizon 392 d: a realised series up to 19 d shorter/longer is accepted (= a manifest end up to 27 calendar days off)
+  band horizon 522 d: a realised series up to 26 d shorter/longer is accepted (= a manifest end up to 36 calendar days off)
+  band horizon 652 d: a realised series up to 32 d shorter/longer is accepted (= a manifest end up to 45 calendar days off)
+== H7: newer data for some symbols only; conversion legs
+  EURJPY alone: horizon_end 2027-05-14 23:59:00 (522 d); with its USDJPY conversion leg: 2026-05-15 10:36:00 (262 d).  gates default symbols = evaluator.symbol only.

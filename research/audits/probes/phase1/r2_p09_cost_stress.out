@@ -1,0 +1,11 @@
+symbol  point  tick   stress_pts  = price   bp_of_px  med_spread_pts  slip/spread  slip/tick  pip_points(display)
+EURUSD  1e-05  1e-05          10  0.0001      0.923              30        0.333      10.00  10   (stressed().slippage_points=10)
+USDJPY  0.001  0.001          10  0.01        0.663              73        0.137      10.00  10   (stressed().slippage_points=10)
+XAUUSD  0.01   0.01           10  0.1         0.461              28        0.357      10.00  10   (stressed().slippage_points=10)
+XAGUSD  0.001  0.001          10  0.01        4.054              39        0.256      10.00  10   (stressed().slippage_points=10)
+BTCUSD  0.01   0.01         3383  33.83       5.374            1942        1.742    3383.00  1   (stressed().slippage_points=3383)
+ETHUSD  0.01   0.01          203  2.03        6.591             203        1.000     203.00  1   (stressed().slippage_points=203)
+WIN     1      5               5  5           0.304               1        5.000       1.00  1   (stressed().slippage_points=5)
+WDO     0.001  0.5           500  0.5         0.854               1      500.000       1.00  1   (stressed().slippage_points=500)
+unknown symbol -> ValueError stress_slippage_points: 'ZZZUNKNOWN' has no pip/tick convention (not FX, a metal, or a B3 future) an
+no spec: CostModel().stressed().slippage_points = 1.0

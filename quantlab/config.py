@@ -49,6 +49,12 @@ class Book:
     def tz_name(self) -> str:
         return self.server_tz.key
 
+    @property
+    def locked_end(self) -> datetime:
+        """End of the locked 12-month holdout (DESIGN §4.1).  Data after this is "newer data":
+        the renewing holdout that the exam also uses once it exists (DESIGN §4.4)."""
+        return self.holdout_start.replace(year=self.holdout_start.year + 1)
+
 
 BOOKS: dict[str, Book] = {
     "FBS": Book(

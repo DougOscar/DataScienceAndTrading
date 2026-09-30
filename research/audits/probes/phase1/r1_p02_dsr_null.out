@@ -1,0 +1,5 @@
+sma_grid      N= 90: P(DSR_gate>=0.95)=0.000  (v1.1-style 0.190)  mean max SR 0.49 ann vs hurdle 0.83
+equicorr_0.8  N=100: P(DSR_gate>=0.95)=0.000  (v1.1-style 0.213)  mean max SR 0.37 ann vs hurdle 0.84
+iid_100       N=100: P(DSR_gate>=0.95)=0.000  (v1.1-style 0.000)  mean max SR 0.83 ann vs hurdle 0.84
+t3_20         N= 20: P(DSR_gate>=0.95)=0.017  (v1.1-style 0.000)  mean max SR 0.64 ann vs hurdle 0.63
+volclust_50   N= 50: P(DSR_gate>=0.95)=0.007  (v1.1-style 0.003)  mean max SR 0.74 ann vs hurdle 0.76

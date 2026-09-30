@@ -1,0 +1,45 @@
+== N1: TPE then resume as sobol
+  tpe 30                                                       OK (meta data_dependent=True)
+  resume same id method=sobol                                  RAISES StudyError: resume of n1-a1 must use the study's pre-registered settings from its ledger study_created row; these differ (ledger, call): {'method': ('tpe', 'sobol
+  resume same id method=random                                 RAISES StudyError: resume of n1-a1 must use the study's pre-registered settings from its ledger study_created row; these differ (ledger, call): {'method': ('tpe', 'rando
+  resume same id method=tpe n_trials=40                        OK (meta data_dependent=True)
+  events: ['study_created', 'trials', 'selection', 'n_trials_changed', 'resumed', 'trials', 'selection']
+  gate tpe study                                               N_study=40 prior=0 DSR=0.997 oos/wfo/cscv=SKIPPED/SKIPPED/SKIPPED
+== N2: prior-trial relabel games (ledger: sma a1..a3 on issue 7, 49 trials each)
+  honest attempt 1                                             N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS
+  honest attempt 2                                             N_study=49 prior=49 DSR=0.968 oos/wfo/cscv=PASS/SKIPPED/PASS
+  honest attempt 3                                             N_study=49 prior=98 DSR=0.956 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (b) new issue 8, same system, attempt=1                      N_study=49 prior=147 DSR=0.947 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (c) system 'sma_v2', new issue 9                             N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (c2) system 'S.M.A', new issue 10                            N_study=49 prior=196 DSR=0.938 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (c3) system 'sma_cross_fast', new issue 12                   N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (d) issue 7, system 'other', attempt=1                       N_study=49 prior=147 DSR=0.947 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (f) resume a3 with system='other', attempt=1                 RAISES StudyError: resume of fbs-0007-a3 must use the study's pre-registered settings from its ledger study_created row; these differ (ledger, call): {'system': ('sma', 
+  (e) explicit prior_trials=0                                  RAISES GateError: prior_trials=0 is below the ledger's count of related earlier trials (147 from ['fbs-0007-a1', 'fbs-0007-a2', 'fbs-0007-a3']); an explicit prior may o
+  (g) gated against an EMPTY ledger_dir                        RAISES GateError: study fbs-0008-a1 is not in the ledger (/tmp/rt_r1_becqq1y_/ledger); the gates read the study's identity, prior trials, plateau radius and candidate-s
+== N2b: prior = studies created BEFORE -> explore a1..a5, then re-gate / promote a1
+  attempt 1 gated right after creation                         N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS
+  attempt 2 gated right after creation                         N_study=49 prior=49 DSR=0.903 oos/wfo/cscv=PASS/SKIPPED/PASS
+  attempt 3 gated right after creation                         N_study=49 prior=98 DSR=0.950 oos/wfo/cscv=PASS/SKIPPED/PASS
+  attempt 4 gated right after creation                         N_study=49 prior=147 DSR=0.943 oos/wfo/cscv=PASS/SKIPPED/PASS
+  attempt 5 gated right after creation                         N_study=49 prior=196 DSR=0.997 oos/wfo/cscv=PASS/SKIPPED/PASS
+  attempt 1 RE-gated after a2..a5 exist                        N_study=49 prior=0 DSR=0.982 oos/wfo/cscv=PASS/SKIPPED/PASS
+  -> a1 prior after 4 later attempts: 0 (total explored 245); a5 prior 196
+== N3: plateau radius
+  run_study(plateau_radius=1e-06)                              RAISES ValueError: plateau_radius = 1e-06 is below the floor 0.1 (DESIGN §4.2: ±20 % economic neighbourhood)
+  run_study(plateau_radius=0.05)                               RAISES ValueError: plateau_radius = 0.05 is below the floor 0.1 (DESIGN §4.2: ±20 % economic neighbourhood)
+  run_study(plateau_radius=0.1)                                OK (meta data_dependent=False)
+  run_study(plateau_radius={'a': 0.1, 'b': 0.5})               OK (meta data_dependent=False)
+  evaluate_gates(plateau_radius=0.5) -> TypeError: evaluate_gates(plateau_radius=) was removed (red-team N3): the radius is pre-reg
+  resume with plateau_radius=0.5 (ledger 0.2)                  RAISES StudyError: resume of n3-base must use the study's pre-registered settings from its ledger study_created row; these differ (ledger, call): {'plateau_radius': (0.2
+  ledger radius of n3-base: 0.2
+== N7: spec symbol mismatch
+  spec=BTCUSD for EURUSD evaluator -> GateError spec= is for 'BTCUSD' but the evaluator trades 'EURUSD' (red-team N7): the stress slippage
+== ID: in-memory StudyResult edits
+  ledger trials event n_trials = 441
+  (a0) honest 441-trial study                                  N_study=441 prior=0 DSR=0.986 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (a) same study, trials/returns cut to 10 in memory           N_study=10 prior=0 DSR=1.000 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (b) after log_gates: ledger study_trial_count(id-a1) = 10.0
+  (b) attempt 2 prior (true prior 441)                         N_study=441 prior=10 DSR=0.986 oos/wfo/cscv=PASS/SKIPPED/PASS
+  (c0) TPE study as is                                         N_study=40 prior=0 DSR=0.993 oos/wfo/cscv=SKIPPED/SKIPPED/SKIPPED
+  (c) TPE StudyResult relabelled study_id='c-sobol', source col + meta keys dropped N_study=40 prior=40 DSR=0.986 oos/wfo/cscv=PASS/PASS/PASS

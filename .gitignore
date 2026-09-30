@@ -65,3 +65,7 @@ comparison/.cache/
 # Research: per-trial study artefacts (large); ledger JSONL stays tracked
 research/studies/
 research/systems/_drafts/
+
+# agent worktrees / regenerable calibration outputs
+.claude/worktrees/
+research/calibration/output/

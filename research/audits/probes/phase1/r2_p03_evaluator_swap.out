@@ -1,0 +1,3 @@
+study's own evaluator                 : plateau 0.00 FAIL; peak re-evaluated 3.31 vs study 3.31; cost_stress 2.93 PASS
+swapped broad + zero-drag evaluator   : plateau 1.00 PASS; peak re-evaluated 3.31 vs study 3.31; cost_stress 3.31 PASS
+ledger evaluator description: [{'center': {'a': 51}, 'height': 2.5, 'width': 0.02}]

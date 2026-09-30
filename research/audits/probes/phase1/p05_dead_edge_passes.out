@@ -1,0 +1,21 @@
+H=3.0 seed=0 verdict=FAIL       DSR=0.994 PBO=0.22 OOS=0.82 stress=1.01 plateau=1.00 posY=0.80 maxY=0.47 trades=PASS | WFO OOS Sharpe 2019+ = 0.69 | not-pass=['oos_sharpe', 'max_year_share']
+H=3.0 seed=1 verdict=FAIL       DSR=0.107 PBO=0.62 OOS=-0.18 stress=-0.28 plateau=0.80 posY=0.40 maxY=2.37 trades=FAIL | WFO OOS Sharpe 2019+ = -0.61 | not-pass=['dsr', 'pbo', 'oos_sharpe', 'cost_stress_sharpe', 'positive_years', 'max_year_share', 'trade_count']
+H=3.0 seed=2 verdict=FAIL       DSR=0.565 PBO=0.16 OOS=0.61 stress=-0.01 plateau=0.88 posY=0.60 maxY=0.65 trades=FAIL | WFO OOS Sharpe 2019+ = 0.51 | not-pass=['dsr', 'oos_sharpe', 'cost_stress_sharpe', 'max_year_share', 'trade_count']
+H=3.0 seed=3 verdict=FAIL       DSR=0.692 PBO=0.47 OOS=0.50 stress=0.32 plateau=1.00 posY=0.80 maxY=0.30 trades=FAIL | WFO OOS Sharpe 2019+ = -0.15 | not-pass=['dsr', 'pbo', 'oos_sharpe', 'cost_stress_sharpe', 'trade_count']
+H=3.0 seed=4 verdict=FAIL       DSR=0.366 PBO=0.30 OOS=-0.05 stress=-0.19 plateau=0.80 posY=0.40 maxY=1.39 trades=FAIL | WFO OOS Sharpe 2019+ = -0.63 | not-pass=['dsr', 'oos_sharpe', 'cost_stress_sharpe', 'positive_years', 'max_year_share', 'trade_count']
+H=3.0 seed=5 verdict=FAIL       DSR=0.845 PBO=0.09 OOS=0.98 stress=0.62 plateau=1.00 posY=0.70 maxY=0.48 trades=PASS | WFO OOS Sharpe 2019+ = 0.06 | not-pass=['dsr', 'oos_sharpe', 'max_year_share']
+  => H=3.0: PASS 0/6
+H=3.5 seed=0 verdict=FAIL       DSR=0.997 PBO=0.15 OOS=0.81 stress=1.15 plateau=1.00 posY=0.80 maxY=0.46 trades=PASS | WFO OOS Sharpe 2019+ = 0.70 | not-pass=['oos_sharpe', 'max_year_share']
+H=3.5 seed=1 verdict=FAIL       DSR=0.114 PBO=0.55 OOS=-0.17 stress=-0.22 plateau=0.80 posY=0.50 maxY=1.63 trades=FAIL | WFO OOS Sharpe 2019+ = -0.61 | not-pass=['dsr', 'pbo', 'oos_sharpe', 'cost_stress_sharpe', 'positive_years', 'max_year_share', 'trade_count']
+H=3.5 seed=2 verdict=FAIL       DSR=0.686 PBO=0.13 OOS=0.74 stress=0.12 plateau=1.00 posY=0.60 maxY=0.54 trades=FAIL | WFO OOS Sharpe 2019+ = 0.51 | not-pass=['dsr', 'oos_sharpe', 'cost_stress_sharpe', 'max_year_share', 'trade_count']
+H=3.5 seed=3 verdict=FAIL       DSR=0.706 PBO=0.44 OOS=0.55 stress=0.37 plateau=1.00 posY=0.80 maxY=0.30 trades=PASS | WFO OOS Sharpe 2019+ = -0.31 | not-pass=['dsr', 'pbo', 'oos_sharpe', 'cost_stress_sharpe']
+H=3.5 seed=4 verdict=FAIL       DSR=0.404 PBO=0.27 OOS=0.03 stress=-0.14 plateau=0.80 posY=0.40 maxY=1.13 trades=FAIL | WFO OOS Sharpe 2019+ = -0.59 | not-pass=['dsr', 'oos_sharpe', 'cost_stress_sharpe', 'positive_years', 'max_year_share', 'trade_count']
+H=3.5 seed=5 verdict=FAIL       DSR=0.909 PBO=0.07 OOS=1.02 stress=0.77 plateau=1.00 posY=0.70 maxY=0.47 trades=PASS | WFO OOS Sharpe 2019+ = 0.02 | not-pass=['dsr', 'max_year_share']
+  => H=3.5: PASS 0/6
+H=4.0 seed=0 verdict=FAIL       DSR=0.999 PBO=0.11 OOS=0.73 stress=1.30 plateau=1.00 posY=0.80 maxY=0.45 trades=PASS | WFO OOS Sharpe 2019+ = 0.74 | not-pass=['oos_sharpe', 'max_year_share']
+H=4.0 seed=1 verdict=FAIL       DSR=0.121 PBO=0.47 OOS=-0.12 stress=-0.17 plateau=0.80 posY=0.50 maxY=1.28 trades=FAIL | WFO OOS Sharpe 2019+ = -0.53 | not-pass=['dsr', 'pbo', 'oos_sharpe', 'cost_stress_sharpe', 'positive_years', 'max_year_share', 'trade_count']
+H=4.0 seed=2 verdict=FAIL       DSR=0.789 PBO=0.10 OOS=0.76 stress=0.26 plateau=1.00 posY=0.60 maxY=0.48 trades=PASS | WFO OOS Sharpe 2019+ = 0.49 | not-pass=['dsr', 'oos_sharpe', 'cost_stress_sharpe', 'max_year_share']
+H=4.0 seed=3 verdict=FAIL       DSR=0.715 PBO=0.41 OOS=0.57 stress=0.43 plateau=1.00 posY=0.80 maxY=0.31 trades=PASS | WFO OOS Sharpe 2019+ = -0.17 | not-pass=['dsr', 'pbo', 'oos_sharpe', 'cost_stress_sharpe']
+H=4.0 seed=4 verdict=FAIL       DSR=0.440 PBO=0.24 OOS=0.04 stress=-0.08 plateau=1.00 posY=0.50 maxY=0.96 trades=FAIL | WFO OOS Sharpe 2019+ = -0.50 | not-pass=['dsr', 'oos_sharpe', 'cost_stress_sharpe', 'positive_years', 'max_year_share', 'trade_count']
+H=4.0 seed=5 verdict=FAIL       DSR=0.950 PBO=0.05 OOS=1.15 stress=0.92 plateau=1.00 posY=0.70 maxY=0.46 trades=PASS | WFO OOS Sharpe 2019+ = 0.03 | not-pass=['dsr', 'max_year_share']
+  => H=4.0: PASS 0/6

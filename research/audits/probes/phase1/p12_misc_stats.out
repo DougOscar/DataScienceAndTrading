@@ -1,0 +1,9 @@
+SB mean block (want ~10, wrap makes a few look continuous): 9.65; index histogram cv 0.071
+PW block for AR(1) 0.5, n=4000: 16.9; boot var(mean) 9.426e-04 vs theory 1.000e-03
+budget: k=0.4472, k(r/2)=0.8943 (ratio 2.0000, want 2); monthly 0.3064%
+SPA_c / RC rejection rate at 5%, null: (np.float64(0.03333333333333333), np.float64(0.02666666666666667))
+SPA_c / RC rejection rate at 5%, one strategy with mean 0.1 sd: (np.float64(0.6933333333333334), np.float64(0.6933333333333334))
+BH rejections lib 12 vs brute 12
+CUSUM k=0.25 h=7.265 target ARL0 500: simulated mean run length 483
+default k at SR 1.0 ann: 0.0310; h for ARL0 2600: 32.55
+CUSUM default settings: days to alarm after an SR-1.0 edge dies: median 554 (~2.1 y)

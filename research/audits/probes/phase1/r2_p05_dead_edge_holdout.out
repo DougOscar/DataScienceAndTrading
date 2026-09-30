@@ -1,0 +1,38 @@
+dead_from=0.55 sched=default      : S5 verdict PASS 5/12; wfo_oos was the only failing gate in 2; median recent-third WFO SR -0.09
+   1y band p_pass_zero_edge [0.31, 0.45, 0.6, 0.67, 0.52]
+   1y P(criteria pass | zero edge): joint [0.3, 0.4, 0.51, 0.59, 0.46] | v1.1-level [0.14, 0.24, 0.32, 0.37, 0.31]
+   1y P(decisive PASS | zero edge) [0.0, 0.0, 0.0, 0.0, 0.0]
+   p_pass_zero_edge by horizon (260, 390, 520, 650): [0.31, 0.18, 0.11, 0.1]; [0.45, 0.32, 0.24, 0.15]; [0.6, 0.49, 0.34, 0.31]; [0.67, 0.44, 0.46, 0.41]; [0.52, 0.46, 0.41, 0.3]
+   chain (<=4 exams) zero-edge: P(PASS) [0.17, 0.17, 0.0, 0.0, 0.18] P(FAIL) [0.83, 0.83, 0.82, 0.76, 0.82] P(still pending) [0.0, 0.0, 0.18, 0.24, 0.0]
+dead_from=0.55 sched=min_train=1y : S5 verdict PASS 4/12; wfo_oos was the only failing gate in 3; median recent-third WFO SR -0.11
+   1y band p_pass_zero_edge [0.27, 0.39, 0.41, 0.47]
+   1y P(criteria pass | zero edge): joint [0.28, 0.36, 0.36, 0.44] | v1.1-level [0.14, 0.19, 0.21, 0.28]
+   1y P(decisive PASS | zero edge) [0.28, 0.0, 0.0, 0.0]
+   p_pass_zero_edge by horizon (260, 390, 520, 650): [0.27, 0.15, 0.09, 0.05]; [0.39, 0.24, 0.18, 0.09]; [0.41, 0.26, 0.18, 0.11]; [0.47, 0.43, 0.28, 0.27]
+   chain (<=4 exams) zero-edge: P(PASS) [0.3, 0.24, 0.23, 0.22] P(FAIL) [0.7, 0.76, 0.77, 0.78] P(still pending) [0.0, 0.0, 0.0, 0.0]
+dead_from=0.7 sched=default      : S5 verdict PASS 6/12; wfo_oos was the only failing gate in 5; median recent-third WFO SR -0.09
+   1y band p_pass_zero_edge [0.25, 0.28, 0.39, 0.52, 0.35, 0.24]
+   1y P(criteria pass | zero edge): joint [0.24, 0.26, 0.34, 0.46, 0.31, 0.18] | v1.1-level [0.09, 0.11, 0.14, 0.27, 0.14, 0.1]
+   1y P(decisive PASS | zero edge) [0.24, 0.26, 0.0, 0.0, 0.0, 0.18]
+   p_pass_zero_edge by horizon (260, 390, 520, 650): [0.25, 0.07, 0.04, 0.02]; [0.28, 0.14, 0.06, 0.03]; [0.39, 0.23, 0.12, 0.09]; [0.52, 0.27, 0.23, 0.2]; [0.35, 0.27, 0.14, 0.1]; [0.24, 0.08, 0.05, 0.02]
+   chain (<=4 exams) zero-edge: P(PASS) [0.26, 0.27, 0.2, 0.28, 0.22, 0.2] P(FAIL) [0.74, 0.73, 0.8, 0.72, 0.78, 0.8] P(still pending) [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+dead_from=0.7 sched=min_train=1y : S5 verdict PASS 3/12; wfo_oos was the only failing gate in 8; median recent-third WFO SR -0.22
+   1y band p_pass_zero_edge [0.23, 0.27, 0.13]
+   1y P(criteria pass | zero edge): joint [0.22, 0.24, 0.11] | v1.1-level [0.09, 0.1, 0.05]
+   1y P(decisive PASS | zero edge) [0.22, 0.24, 0.11]
+   p_pass_zero_edge by horizon (260, 390, 520, 650): [0.23, 0.09, 0.06, 0.03]; [0.27, 0.13, 0.03, 0.04]; [0.13, 0.08, 0.01, 0.01]
+   chain (<=4 exams) zero-edge: P(PASS) [0.24, 0.26, 0.13] P(FAIL) [0.76, 0.74, 0.87] P(still pending) [0.0, 0.0, 0.0]
+dead_from=None sched=default      : S5 verdict PASS 12/12; wfo_oos was the only failing gate in 0; median recent-third WFO SR +3.01
+   1y band p_pass_zero_edge [0.04, 0.22, 0.04, 0.13, 0.26, 0.06, 0.17, 0.14, 0.18, 0.07, 0.18, 0.04]
+   1y P(criteria pass | zero edge): joint [0.04, 0.2, 0.04, 0.14, 0.25, 0.06, 0.16, 0.13, 0.16, 0.08, 0.16, 0.04] | v1.1-level [0.01, 0.1, 0.02, 0.06, 0.1, 0.02, 0.06, 0.05, 0.08, 0.02, 0.1, 0.01]
+   1y P(decisive PASS | zero edge) [0.04, 0.2, 0.04, 0.14, 0.25, 0.06, 0.16, 0.13, 0.16, 0.08, 0.16, 0.04]
+   p_pass_zero_edge by horizon (260, 390, 520, 650): [0.04, 0.01, 0.0, 0.0]; [0.22, 0.08, 0.04, 0.02]; [0.04, 0.01, 0.0, 0.0]; [0.13, 0.08, 0.03, 0.02]; [0.26, 0.1, 0.05, 0.01]; [0.06, 0.02, 0.0, 0.0]; [0.17, 0.07, 0.02, 0.02]; [0.14, 0.04, 0.02, 0.0]; [0.18, 0.08, 0.02, 0.01]; [0.07, 0.02, 0.01, 0.0]; [0.18, 0.08, 0.03, 0.01]; [0.04, 0.0, 0.0, 0.0]
+   chain (<=4 exams) zero-edge: P(PASS) [0.04, 0.21, 0.03, 0.16, 0.26, 0.07, 0.17, 0.14, 0.19, 0.08, 0.18, 0.02] P(FAIL) [0.96, 0.79, 0.97, 0.84, 0.74, 0.93, 0.83, 0.86, 0.81, 0.92, 0.82, 0.98] P(still pending) [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+dead_from=None sched=min_train=1y : S5 verdict PASS 12/12; wfo_oos was the only failing gate in 0; median recent-third WFO SR +2.77
+   1y band p_pass_zero_edge [0.02, 0.22, 0.06, 0.21, 0.16, 0.04, 0.16, 0.09, 0.24, 0.09, 0.14, 0.02]
+   1y P(criteria pass | zero edge): joint [0.03, 0.2, 0.06, 0.18, 0.16, 0.05, 0.16, 0.08, 0.21, 0.1, 0.14, 0.02] | v1.1-level [0.01, 0.09, 0.02, 0.08, 0.06, 0.02, 0.08, 0.03, 0.1, 0.03, 0.05, 0.01]
+   1y P(decisive PASS | zero edge) [0.03, 0.2, 0.06, 0.18, 0.16, 0.05, 0.16, 0.08, 0.21, 0.1, 0.14, 0.02]
+   p_pass_zero_edge by horizon (260, 390, 520, 650): [0.02, 0.01, 0.0, 0.0]; [0.22, 0.12, 0.05, 0.02]; [0.06, 0.01, 0.0, 0.0]; [0.21, 0.08, 0.05, 0.01]; [0.16, 0.05, 0.02, 0.01]; [0.04, 0.01, 0.0, 0.0]; [0.16, 0.07, 0.02, 0.01]; [0.09, 0.05, 0.0, 0.0]; [0.24, 0.12, 0.04, 0.03]; [0.09, 0.03, 0.0, 0.0]; [0.14, 0.07, 0.03, 0.0]; [0.02, 0.0, 0.0, 0.0]
+   chain (<=4 exams) zero-edge: P(PASS) [0.03, 0.22, 0.07, 0.2, 0.17, 0.04, 0.18, 0.08, 0.23, 0.11, 0.15, 0.01] P(FAIL) [0.97, 0.78, 0.93, 0.8, 0.83, 0.96, 0.82, 0.92, 0.77, 0.89, 0.85, 0.99] P(still pending) [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+POOLED dead S5-passing studies (n=18): mean P(zero-edge holdout -> PASS) 1y-decisive-only 0.085, chain 0.197, max chain 0.300; old 1y criteria-pass 0.337, v1.1-level 0.183
+POOLED live S5-passing studies (n=24): mean P(zero-edge holdout -> PASS) 1y-decisive-only 0.118, chain 0.127, max chain 0.265; old 1y criteria-pass 0.118, v1.1-level 0.050

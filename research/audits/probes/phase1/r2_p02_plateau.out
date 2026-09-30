@@ -1,0 +1,34 @@
+== M5: grid resolution, honest parametrisation a in [1, 101]
+  step 10                                                    sel={'a': 51} score=0.0 (FAIL), axes=1 | a=41:f, a=46:f, a=56:f, a=61:f
+  step 5                                                     sel={'a': 51} score=0.0 (FAIL), axes=1 | a=41:f, a=46:f, a=56:f, a=61:f
+  step 2                                                     sel={'a': 49} score=0.0 (FAIL), axes=1 | a=39:f, a=44:f, a=54:f, a=59:f
+  step 1                                                     sel={'a': 50} score=0.0 (FAIL), axes=1 | a=40:f, a=45:f, a=55:f, a=60:f
+== N4: Sobol d=3..5 n=64 (zero surface, rho .8) -> judge plateau points / SKIP?
+  d=3: points per study 12, SKIPPED 0/4, scores [0.0, 0.0, 0.0, 0.0]
+  d=4: points per study 16, SKIPPED 0/4, scores [0.0, 0.5, 0.0, 0.0]
+  d=5: points per study 20, SKIPPED 0/4, scores [0.5, 0.0, 0.0, 0.0]
+== N8: irrelevant params (spike on 'a' + k dummies)
+  0 dummies: score 0.00 (pooled 0.00), weakest a
+  1 dummies: score 0.00 (pooled 0.38), weakest a
+  2 dummies: score 0.00 (pooled 0.33), weakest a
+== G1: offset reparametrisation (same economic spike)
+  d = a - 49.9 on [0.05, 5] (relative mode)                  sel={'d': 0.05} score=1.0 (PASS), axes=1 | d=0.04:P, d=0.045:P, d=0.055:P, d=0.06:P
+  same, declared low = 0 (range mode, +-20% of 5)            sel={'d': 0.1} score=1.0 (PASS), axes=1 | d=-0.9:P, d=-0.4:P, d=0.6:P, d=1.1:P
+== G1b: honest small-valued positive param (thr on [0.01, 2], spike at 0.05, width 2 % of range)
+  thr declared low=0.01                                      sel={'thr': 0.05} score=1.0 (PASS), axes=1 | thr=0.04:P, thr=0.045:P, thr=0.055:P, thr=0.06:P
+  thr declared low=0.0                                       sel={'thr': 0.05} score=0.0 (FAIL), axes=1 | thr=-0.35:f, thr=-0.15:f, thr=0.25:f, thr=0.45:f
+== G2: k averaged duplicates a = mean(a1..ak), each on [1, 101]; levels 46..54 step 2
+  k=1: score 0.00 (FAIL); per-axis {'a0': (0, 4)}
+  k=2: score 0.50 (FAIL); per-axis {'a0': (2, 4), 'a1': (2, 4)}
+  k=3: score 0.50 (FAIL); per-axis {'a0': (4, 4), 'a1': (2, 4), 'a2': (2, 4)}
+  k=4: score 1.00 (PASS); per-axis {'a0': (4, 4), 'a1': (4, 4), 'a2': (4, 4), 'a3': (4, 4)}
+  k=5: score 1.00 (PASS); per-axis {'a0': (4, 4), 'a1': (4, 4), 'a2': (4, 4), 'a3': (4, 4), 'a4': (4, 4)}
+== G3: spiky param as UNORDERED categorical + harmless numeric 'b'
+  a unordered categorical (10..100), b int 5..15 (ignored)   sel={'a': 50, 'b': 5} score=1.0 (PASS), axes=1 | b=3:P, b=4:P, b=6:P, b=7:P
+== G4: ordered categorical with fine levels
+  a ordered categorical (48..52)                             sel={'a': 50} score=1.0 (PASS), axes=1 | a=49:P, a=51:P
+== G5: constraint rejecting perturbations
+  constraint a % 10 == 0                                     sel={'a': 50} score=0.0 (FAIL), axes=1 | a=40:f, a=45:f, a=55:f, a=60:f
+== G6: pre-registered per-param radius 0.10 vs 0.20 on a wider spike (width 4 %, sd 4 units)
+  radius 0.2                                                 sel={'a': 50} score=0.5 (FAIL), axes=1 | a=40:f, a=45:P, a=55:P, a=60:f
+  radius {'a': 0.1}                                          sel={'a': 50} score=1.0 (PASS), axes=1 | a=45:P, a=48:P, a=53:P, a=55:P

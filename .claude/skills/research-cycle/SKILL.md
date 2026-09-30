@@ -36,7 +36,9 @@ with stage + reason. Bug fixes found by the red team are not attempts; parameter
 
 ## Checkpoints — always stop and hand control to the user
 - **After S7 with a PASS**: present the tear-sheet summary and ask whether to unlock the holdout.
-  The user runs `/unlock-holdout <system>`; you never unlock it.
+  The user runs `/unlock-holdout <system>`; you never unlock it. The exam covers the locked year plus
+  all newer data, with a band rebuilt beforehand if more data was exported. It ends PASS, FAIL
+  (killed) or NOT_DECISIVE (`holdout_pending`: wait for more data, then re-examine). DESIGN §4.4.
 - **Any kill**: summarise why (gate values), then close with label `killed`.
 
 ## Hand-off discipline

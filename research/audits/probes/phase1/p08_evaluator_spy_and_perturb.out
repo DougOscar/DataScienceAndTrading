@@ -1,0 +1,11 @@
+1) spy calls:
+   load_bars args=('EURJPY', 'H4') end=2024-07-01 00:00:00 include_holdout=False
+   load_bars args=('EURJPY', 'M1') end=2024-07-01 00:00:00 include_holdout=False
+   conversion_rate args=('JPY', 'USD') end=None include_holdout=False
+   load_bars args=('USDJPY', 'M1') end=2024-06-28 20:00:00 include_holdout=False
+   violations: 0
+2) pre-cut daily identical after perturbing the future: True (rows 258); post-cut changed: True
+   trades closed pre-cut identical: True (40 trades)
+3) first daily row 2023-01-03 ret=0.00455271; earliest entry 2023-01-03 04:00:00; entries before eval start: 0
+4) risk type A -> fixed_fraction, B -> fixed_lots
+   metrics sharpe 0.003, n_trades 56, hold_days_max 19.0

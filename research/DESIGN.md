@@ -1,6 +1,6 @@
-# Research Team Design — v1.1
+# Research Team Design — v1.2
 
-Status: **v1.1: approved 2026-09-23** · The decisions from §11 are merged into the sections below.
+Status: **v1.1: approved 2026-09-23** · **v1.2 (2026-09-24): Phase 1 gate recalibration (§4.2, §4.4, §11 #7–#8)** · The decisions from §11 are merged into the sections below.
 
 ---
 
@@ -138,11 +138,12 @@ D1 MQL5/ONNX port + parity test ─► MT5
 
 | Gate | Threshold | Why |
 |---|---|---|
-| Deflated Sharpe probability | ≥ 0.95 | Is the Sharpe real after accounting for *all* trials (effective N)? |
-| PBO (CSCV) | < 0.30 | Does the chosen configuration tend to fail out of sample? |
+| Deflated Sharpe probability | ≥ 0.95 | Is the Sharpe real after accounting for *all* trials? Hurdle from the null sampling variance 1/(T−1) and the **raw** trial count of the study plus earlier attempts (v1.2; effective-N estimates are diagnostics only) |
+| CSCV out-of-sample loss | P(OOS Sharpe of the in-sample best < 0) < 0.10 | Does the chosen configuration lose money out of sample? (v1.2: replaces PBO < 0.30, which stays as a diagnostic) |
 | OOS Sharpe (CPCV path median) | ≥ 1.0 annualised | The minimum edge needed to enter a book |
-| Cost stress | Sharpe > 0.5 at 1.5× spread + 1 pt slippage | The edge must survive worse fills |
-| Parameter plateau | ≥ 60% of neighbours within 50% of the peak Sharpe | Rejects sharp, fragile optima |
+| Walk-forward procedure OOS | Sharpe ≥ 0.5 over the whole WFO OOS span, and > 0 over its most recent third | The re-optimisation procedure (§4.6) still works, and recently (v1.2, new) |
+| Cost stress | Sharpe > 0.5 at 1.5× spread + 1 pip adverse slippage on every market and stop fill | The edge must survive worse fills |
+| Parameter plateau | The judge re-runs the system at ±r/2 and ±r on each parameter axis and on a joint axis (all parameters together); on the **weakest axis** ≥ 60% of points keep ≥ 50% of the peak Sharpe (and > 0). Each numeric parameter pre-registers its scale (relative, r = 0.20 default, floor 0.10; or an absolute step), reviewed by the red team at S2 | Rejects sharp, fragile optima, independent of grid resolution and parametrisation tricks |
 | Time stability | Positive in ≥ 60% of years, and no single year > 40% of total PnL | Your own finding: past edges were concentrated in 2016–18 and 2021–22 |
 | Trade count | ≥ MinTRL | Enough evidence for the claimed Sharpe |
 | Mechanism check | Component ablation matches the hypothesis | The system must make money *for the stated reason* |
@@ -168,12 +169,16 @@ D1 MQL5/ONNX port + parity test ─► MT5
 
 ### 4.4 Holdout pass criterion (defined *before* unlocking)
 
-Build the predictive distribution from the CPCV paths plus a stationary bootstrap. The system passes if:
-- its holdout Sharpe and return-at-budget are **above the 10th percentile** of that distribution;
-- its max drawdown is **within the predicted 95th percentile**;
-- its trade count is **within the predicted range**.
+Build the predictive distribution from the **walk-forward procedure's OOS series** (the procedure the holdout runs, §4.6) plus a stationary bootstrap. The system passes if:
+- its holdout Sharpe and return-at-budget are **above** their lower band;
+- its max drawdown is **within** its upper band;
+- its trade count is **within the predicted range** (from the procedure's own trade counts).
 
-Fail → `killed`, with no re-tries on the same holdout.
+v1.2: the four bands are set **jointly**, so that about 90% of bootstrap draws of a real edge pass all four at once.
+
+**Horizon and decisiveness (decided 2026-09-24).** The exam uses the locked year **plus all newer data** available at the unlock (the renewing holdout, §4.1). The band is built for that horizon *before* unlocking; if more data arrives before the unlock, the band is rebuilt and re-registered first. The band also reports how often a zero-edge holdout would pass it. If that probability is above 0.30, the exam cannot tell a real edge from a dead one, so an all-criteria pass is recorded as **NOT_DECISIVE**: the system waits (`holdout_pending`) and is re-examined on the full, longer holdout once more data exists, with the band rebuilt beforehand. Calibration: one year is decisive for ~55% of true edges, two years for ~82%.
+
+Fail → `killed`, with no re-tries on the same holdout. NOT_DECISIVE is not a fail and not a pass; a system can only be promoted after a decisive PASS.
 
 ### 4.5 Classification (descriptive; goes on the card)
 
@@ -334,3 +339,5 @@ Rules:
 | 4 | Units / account | Points first; 100,000 nominal account when % equity is needed (§5) |
 | 5 | Commands | Old commands retired; new skills and agents as in §9 |
 | 6 | Naming | `quantlab/`, `research/systems/<book>/…` |
+| 7 | Gate recalibration (2026-09-24) | Adopted R1 (DSR hurdle from null variance + raw trial count) and R2 (CSCV P(OOS loss) < 0.10 replaces PBO < 0.30), plus the red-team fixes: WFO procedure gate, judge-computed plateau, 1-pip stress slippage on all fills, joint holdout band. See `research/audits/2026-09-24_phase1_fix_plan.md` |
+| 8 | Recalibration decisions (2026-09-24) | WFO gate recency threshold stays "> 0" (dead-edge pass 3.3%, power 80% point SR 1.58 on the final code); holdout = locked year + newer data, NOT_DECISIVE blocks promotion (§4.4); plateau radius floor 0.10. Still open: time-stability replacement (R3) |

@@ -1,0 +1,7 @@
+  band n_boot=2000 (n_power 1000 fixed inside _build_holdout_band): 1.39 s
+  band n_boot= 500 (n_power 1000 fixed inside _build_holdout_band): 0.49 s
+  band n_boot= 200 (n_power 1000 fixed inside _build_holdout_band): 0.32 s
+  stats.holdout_band n_boot=2000 n_power=1000: 1.46 s
+  stats.holdout_band n_boot=2000 n_power= 300: 1.32 s
+  stats.holdout_band n_boot=2000 n_power=   0: 1.30 s
+  full evaluate_gates (no evaluator -> no plateau / cost stress): 3.36 s

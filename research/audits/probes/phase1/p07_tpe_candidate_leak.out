@@ -1,0 +1,33 @@
+seed  0: grid CPCV-med -0.22 WFO +0.06 IS +0.57 | tpe CPCV-med +0.33 WFO +0.14 IS +0.54
+seed  1: grid CPCV-med -0.47 WFO -0.07 IS +0.32 | tpe CPCV-med +0.06 WFO +0.25 IS +0.33
+seed  2: grid CPCV-med +0.01 WFO +0.18 IS +0.56 | tpe CPCV-med +0.43 WFO -0.08 IS +0.56
+seed  3: grid CPCV-med +0.24 WFO -0.27 IS +0.42 | tpe CPCV-med +0.32 WFO +0.05 IS +0.42
+seed  4: grid CPCV-med -0.12 WFO +0.03 IS +0.58 | tpe CPCV-med +0.18 WFO +0.17 IS +0.58
+seed  5: grid CPCV-med +0.33 WFO +0.24 IS +0.27 | tpe CPCV-med +0.52 WFO +0.51 IS +0.55
+seed  6: grid CPCV-med +0.20 WFO +0.08 IS +0.51 | tpe CPCV-med +0.34 WFO +0.17 IS +0.49
+seed  7: grid CPCV-med +0.13 WFO +0.11 IS +0.58 | tpe CPCV-med +0.37 WFO +0.48 IS +0.58
+seed  8: grid CPCV-med +0.46 WFO +0.08 IS +0.81 | tpe CPCV-med +0.57 WFO +0.49 IS +0.80
+seed  9: grid CPCV-med -0.03 WFO -0.33 IS +0.44 | tpe CPCV-med +0.25 WFO -0.06 IS +0.46
+seed 10: grid CPCV-med +0.40 WFO +0.03 IS +0.72 | tpe CPCV-med +0.50 WFO +0.32 IS +0.72
+seed 11: grid CPCV-med -0.61 WFO -0.73 IS +0.12 | tpe CPCV-med -0.51 WFO -0.78 IS +0.12
+seed 12: grid CPCV-med -0.19 WFO -0.26 IS +0.23 | tpe CPCV-med -0.15 WFO -0.29 IS +0.23
+seed 13: grid CPCV-med -0.21 WFO -0.35 IS +0.16 | tpe CPCV-med -0.15 WFO -0.18 IS +0.12
+seed 14: grid CPCV-med -0.37 WFO -0.66 IS +0.26 | tpe CPCV-med -0.23 WFO -0.34 IS +0.26
+seed 15: grid CPCV-med -0.24 WFO +0.20 IS +0.57 | tpe CPCV-med +0.12 WFO -0.03 IS +0.58
+seed 16: grid CPCV-med +0.58 WFO +0.31 IS +0.74 | tpe CPCV-med +0.57 WFO +0.35 IS +0.74
+seed 17: grid CPCV-med -0.30 WFO -0.17 IS +0.46 | tpe CPCV-med -0.16 WFO +0.27 IS +0.46
+seed 18: grid CPCV-med +0.04 WFO -0.22 IS +0.51 | tpe CPCV-med +0.19 WFO -0.02 IS +0.51
+seed 19: grid CPCV-med +0.37 WFO +0.15 IS +0.79 | tpe CPCV-med +0.53 WFO +0.12 IS +0.82
+seed 20: grid CPCV-med -0.18 WFO +0.10 IS +0.39 | tpe CPCV-med +0.12 WFO +0.29 IS +0.39
+seed 21: grid CPCV-med +0.19 WFO +0.04 IS +0.45 | tpe CPCV-med +0.26 WFO +0.03 IS +0.43
+seed 22: grid CPCV-med +1.03 WFO +0.46 IS +1.12 | tpe CPCV-med +1.06 WFO +0.76 IS +1.12
+seed 23: grid CPCV-med -0.34 WFO -0.42 IS +0.14 | tpe CPCV-med -0.33 WFO -0.50 IS +0.13
+seed 24: grid CPCV-med +0.36 WFO +0.24 IS +0.64 | tpe CPCV-med +0.48 WFO +0.37 IS +0.64
+seed 25: grid CPCV-med -0.46 WFO -0.63 IS +0.16 | tpe CPCV-med -0.30 WFO -0.32 IS +0.16
+seed 26: grid CPCV-med +0.72 WFO +0.02 IS +0.83 | tpe CPCV-med +0.83 WFO +0.15 IS +0.83
+seed 27: grid CPCV-med +0.99 WFO +0.61 IS +1.16 | tpe CPCV-med +0.97 WFO +1.06 IS +1.15
+seed 28: grid CPCV-med +0.08 WFO +0.20 IS +0.81 | tpe CPCV-med +0.27 WFO +0.61 IS +0.75
+seed 29: grid CPCV-med +0.08 WFO +0.07 IS +0.51 | tpe CPCV-med +0.09 WFO +0.03 IS +0.51
+grid: mean CPCV path-median OOS Sharpe +0.083 (se 0.076); mean WFO OOS -0.030 (se 0.058); mean IS +0.528
+tpe: mean CPCV path-median OOS Sharpe +0.251 (se 0.069); mean WFO OOS +0.134 (se 0.069); mean IS +0.533
+paired TPE - grid: CPCV +0.168 (se 0.027), WFO +0.164 (se 0.035)

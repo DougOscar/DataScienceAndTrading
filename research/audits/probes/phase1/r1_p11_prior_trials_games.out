@@ -1,0 +1,14 @@
+honest attempt 1 (issue 7)                                     N_study=49 prior=0 DSR=0.982 hurdle=0.76 src=ledger: no earlier studies
+honest attempt 2 (issue 7)                                     N_study=49 prior=49 DSR=0.968 hurdle=0.84 src=ledger: fbs-0007-a1
+honest attempt 3 (issue 7)                                     N_study=49 prior=98 DSR=0.956 hurdle=0.89 src=ledger: fbs-0007-a1, fbs-0007-a2
+(b) new issue 8, same system, attempt=1                        N_study=49 prior=49 DSR=0.968 hurdle=0.84 src=ledger: fbs-0007-a1
+(c) same idea renamed system='sma_v2', attempt=1               N_study=49 prior=0 DSR=0.982 hurdle=0.76 src=ledger: no earlier studies
+(c2) system='SMA' (case change)                                N_study=49 prior=0 DSR=0.982 hurdle=0.76 src=ledger: no earlier studies
+(d) issue 7 study with explicit id, attempt=1 label            N_study=49 prior=98 DSR=0.956 hurdle=0.89 src=ledger: fbs-0007-a1, fbs-0008-a1
+(e0) attempt=3 honest label, custom id                         N_study=49 prior=245 DSR=0.931 hurdle=0.96 src=ledger: fbs-0007-a1, fbs-0007-a2, fbs-0007-a3, fbs-0008-a1, fbs-0007-x9
+(e) explicit prior_trials=0 on a study                         N_study=49 prior=0 DSR=0.982 hurdle=0.76 src=explicit prior_trials
+(f0) resume a3 honestly                                        N_study=49 prior=245 DSR=0.931 hurdle=0.96 src=ledger: fbs-0007-a1, fbs-0007-a2, fbs-0008-a1, fbs-0007-x9, fbs-0007-a3r
+    resumed a3 with system='other', attempt=1 -> meta system=other attempt=1; ledger row system=sma attempt=3
+(f) resume a3 passing system='other', attempt=1                N_study=49 prior=0 DSR=0.982 hurdle=0.76 src=ledger: no earlier studies
+(g) a3 gated against an EMPTY ledger_dir: RAISES ValueError
+(h) meta attempt removed + id suffix a1                        N_study=49 prior=147 DSR=0.947 hurdle=0.92 src=ledger: fbs-0007-a1, fbs-0008-a1, fbs-0007-x9

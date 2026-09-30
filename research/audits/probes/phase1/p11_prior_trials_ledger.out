@@ -1,0 +1,3 @@
+attempt 1: this study's own n_eff 4.00; prior read from ledger 0.00; n_eff used 4.00; DSR with prior 1.0000 vs forgot-prior 1.0000
+attempt 2: this study's own n_eff 8.00; prior read from ledger 4.00; n_eff used 12.00; DSR with prior 0.9960 vs forgot-prior 0.9977
+attempt 3: this study's own n_eff 8.00; prior read from ledger 16.00; n_eff used 24.00; DSR with prior 1.0000 vs forgot-prior 1.0000

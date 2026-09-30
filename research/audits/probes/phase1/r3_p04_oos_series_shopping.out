@@ -1,0 +1,68 @@
+== null: 12 worlds
+  oos_sharpe PASS: pre-registered CPCV(10,2) 0.00 | best of 15 recomputed CPCV schemes 0.00
+  wfo_oos    PASS: pre-registered WFO        0.08 | best of 36 recomputed WFO schedules 0.17
+  both PASS      : pre-registered            0.00 | shopped 0.00
+  per world (seed, IS SR, base oos, max alt oos, base wfo SR, #WFO schedules passing):
+     0 +0.04  +0.02  +0.07  +0.15  0/36
+     1 +0.01  -0.01  +0.19  +0.10  0/36
+     2 -0.43  -0.63  -0.35  -0.50  0/36
+     3 -0.14  -0.28  -0.10  -0.33  0/36
+     4 +0.38  +0.14  +0.30  -0.10  0/36
+     5 +0.80  +0.56  +0.60  +0.52  15/36
+     6 +0.77  +0.30  +0.55  +0.44  2/36
+     7 -0.20  -0.40  -0.14  -0.33  0/36
+     8 -0.50  -0.50  -0.36  -0.53  0/36
+     9 -0.26  -0.37  -0.35  -0.56  0/36
+    10 +0.24  +0.01  +0.14  +0.07  0/36
+    11 +0.60  +0.27  +0.60  +0.15  0/36
+== dead55: 12 worlds
+  oos_sharpe PASS: pre-registered CPCV(10,2) 0.92 | best of 15 recomputed CPCV schemes 1.00
+  wfo_oos    PASS: pre-registered WFO        0.50 | best of 36 recomputed WFO schedules 0.83
+  both PASS      : pre-registered            0.50 | shopped 0.83
+  per world (seed, IS SR, base oos, max alt oos, base wfo SR, #WFO schedules passing):
+     0 +2.14  +2.14  +2.36  +1.96  20/36
+     1 +1.26  +1.08  +1.38  +0.62  0/36
+     2 +1.76  +1.76  +1.92  +1.66  30/36
+     3 +1.37  +0.64  +1.05  +0.68  5/36
+     4 +1.15  +1.11  +1.19  +0.54  0/36
+     5 +1.77  +1.87  +1.98  +1.36  24/36
+     6 +1.36  +1.17  +1.50  +0.79  8/36
+     7 +1.43  +1.17  +1.49  +1.15  26/36
+     8 +1.39  +1.36  +1.43  +0.69  9/36
+     9 +1.51  +1.51  +1.66  +1.37  18/36
+    10 +1.27  +1.27  +1.27  +0.67  2/36
+    11 +1.86  +1.40  +1.83  +1.64  15/36
+== dead70: 12 worlds
+  oos_sharpe PASS: pre-registered CPCV(10,2) 1.00 | best of 15 recomputed CPCV schemes 1.00
+  wfo_oos    PASS: pre-registered WFO        0.50 | best of 36 recomputed WFO schedules 0.67
+  both PASS      : pre-registered            0.50 | shopped 0.67
+  per world (seed, IS SR, base oos, max alt oos, base wfo SR, #WFO schedules passing):
+     0 +2.60  +2.60  +2.60  +2.38  25/36
+     1 +1.37  +1.37  +1.50  +1.26  0/36
+     2 +2.19  +2.19  +2.19  +2.22  35/36
+     3 +1.77  +1.58  +1.71  +1.34  0/36
+     4 +1.87  +1.61  +1.80  +1.22  0/36
+     5 +2.23  +2.23  +2.33  +1.96  36/36
+     6 +1.76  +1.78  +1.90  +1.36  5/36
+     7 +1.89  +1.89  +1.89  +1.60  15/36
+     8 +1.84  +1.84  +1.84  +1.28  5/36
+     9 +1.95  +1.95  +1.95  +1.95  8/36
+    10 +1.73  +1.73  +1.73  +1.25  0/36
+    11 +2.81  +2.56  +2.81  +2.45  27/36
+== live_H3: 12 worlds
+  oos_sharpe PASS: pre-registered CPCV(10,2) 1.00 | best of 15 recomputed CPCV schemes 1.00
+  wfo_oos    PASS: pre-registered WFO        1.00 | best of 36 recomputed WFO schedules 1.00
+  both PASS      : pre-registered            1.00 | shopped 1.00
+  per world (seed, IS SR, base oos, max alt oos, base wfo SR, #WFO schedules passing):
+     0 +3.53  +3.53  +3.53  +3.58  36/36
+     1 +2.27  +2.27  +2.27  +2.42  36/36
+     2 +3.07  +3.07  +3.07  +3.34  36/36
+     3 +2.58  +2.58  +2.58  +2.53  36/36
+     4 +2.74  +2.74  +2.74  +2.34  36/36
+     5 +3.16  +3.16  +3.16  +3.18  36/36
+     6 +2.67  +2.67  +2.67  +2.44  36/36
+     7 +2.80  +2.80  +2.80  +2.77  36/36
+     8 +2.75  +2.75  +2.75  +2.46  36/36
+     9 +2.86  +2.86  +2.86  +3.11  36/36
+    10 +2.64  +2.64  +2.64  +2.41  36/36
+    11 +3.72  +3.72  +3.72  +3.68  36/36

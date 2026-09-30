@@ -1,0 +1,14 @@
+PSR lib vs indep 0.9999214010331328 0.9999214010331328
+PSR lib vs indep 0.8301595089850775 0.8301595089850775
+PSR lib vs indep 0.9654576702724956 0.9654576702724956
+PSR coverage (target 0.05): 0.04975
+E[max] N=2: formula 0.5198  MC 0.5658
+E[max] N=5: formula 1.1926  MC 1.1590
+E[max] N=10: formula 1.5746  MC 1.5426
+E[max] N=50: formula 2.2763  MC 2.2545
+E[max] N=100: formula 2.5306  MC 2.5044
+E[max] N=1000: formula 3.2551  MC 3.2394
+PSR at MinTRL (want 0.95): 0.95
+PSR at MinTRL (want 0.95): 0.95
+dsr per-period var: 0.9115836077183702
+dsr annualised trial_sharpes (unit bug, no error raised): 0.0

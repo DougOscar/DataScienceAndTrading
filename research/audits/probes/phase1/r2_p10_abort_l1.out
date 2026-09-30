@@ -1,0 +1,17 @@
+== abort_on_uniform_errors
+  ab-a1 Boom: StudyError: study ab-a1: the first 2 evaluated trials all failed with the same error — aborting (data/setup error, not a p
+     ledger: trials events [('aborted', 2, 2)]; study_trial_count = 2.0; recorded rows = 2
+  ab-a2 FirstTwoBoom: StudyError: study ab-a2: the first 2 evaluated trials all failed with the same error — aborting (data/setup error, not a p
+     ledger: trials events [('aborted', 2, 2)]; study_trial_count = 2.0; recorded rows = 2
+  attempt 3 after the two aborted studies: prior = 4.0 from ['ab-a1', 'ab-a2']
+  ab-a4 with abort disabled: 49 trials, errors 2
+== L1 clamp: eval start vs the conversion series' first bar; independent of the end date?
+  USDCHF H1: first H1 bar 2016-05-02 00:00:00; quote CHF conversion available from 2016-05-02 00:01:00; series_start(M1) 2016-05-02 00:01:00; eval_start_effective for end 2017/2020/2025 = ['2016-05-02 01:00:00', '2016-05-02 01:00:00', '2016-05-02 01:00:00']
+  AUDNZD H1: first H1 bar 2016-05-02 00:00:00; quote NZD conversion available from 2016-05-02 00:01:00; series_start(M1) 2016-05-02 00:01:00; eval_start_effective for end 2017/2020/2025 = ['2016-05-02 01:00:00', '2016-05-02 01:00:00', '2016-05-02 01:00:00']
+  EURUSD H1: first H1 bar 2016-05-02 00:00:00; quote USD conversion available from None; series_start(M1) 2016-05-02 00:00:00; eval_start_effective for end 2017/2020/2025 = ['2016-05-02 00:00:00', '2016-05-02 00:00:00', '2016-05-02 00:00:00']
+  CHF->USD at available_from-1min: ValueError: USDCHF: no M1 bar had opened yet at/before some requested timestamps (before the
+  CHF->USD at available_from+0min: rate 1.044659; first M1 rows [(datetime.datetime(2016, 5, 2, 0, 1), 0.95725, 0.95725), (datetime.datetime(2016, 5, 2, 0, 2), 0.95624, 0.95624)]
+  CHF->USD at available_from+1min: rate 1.044659; first M1 rows [(datetime.datetime(2016, 5, 2, 0, 1), 0.95725, 0.95725), (datetime.datetime(2016, 5, 2, 0, 2), 0.95624, 0.95624)]
+  NZD->USD at available_from-1min: ValueError: NZDUSD: no M1 bar had opened yet at/before some requested timestamps (before the
+  NZD->USD at available_from+0min: rate 0.697380; first M1 rows [(datetime.datetime(2016, 5, 2, 0, 1), 0.69738, 0.69726), (datetime.datetime(2016, 5, 2, 0, 2), 0.69725, 0.69725)]
+  NZD->USD at available_from+1min: rate 0.697260; first M1 rows [(datetime.datetime(2016, 5, 2, 0, 1), 0.69738, 0.69726), (datetime.datetime(2016, 5, 2, 0, 2), 0.69725, 0.69725)]

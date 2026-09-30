@@ -1,0 +1,4 @@
+m4: dsr raises on |sr|>1: dsr: |per-period Sharpe| = 1.2 > 1 — looks annualised; pass 
+m3: embargo_capped True -> {'oos_sharpe': 'SKIPPED', 'cscv_oos_loss': 'SKIPPED', 'wfo_oos': 'PASS'} verdict INCOMPLETE
+m9: prior gate runs visible: 2 | warning in markdown: True
+alias: v1.1-style caller passes prior_effective_trials=8.00 -> prior used 8.00 (ledger raw would be 25); DSR 1.000 vs 1.000; warnings: ['DeprecationWarning']
