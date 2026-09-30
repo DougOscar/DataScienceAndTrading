@@ -29,7 +29,7 @@ def true_range() -> pl.Expr:
 
 
 def atr(period: int, *, min_periods: int | None = None) -> pl.Expr:
-    """Rolling-mean ATR expression over :func:`true_range`.
+    """Rolling-mean ATR expression over :func:`true_range` (the same definition as MT5's ``iATR``).
 
     ``min_periods`` defaults to ``period`` (no partial windows): warm-up rows are null rather
     than a noisy short-window estimate, matching ``contracts.py``'s "signal known at its close"
@@ -42,7 +42,11 @@ def atr(period: int, *, min_periods: int | None = None) -> pl.Expr:
 
 
 def wilder_atr(period: int) -> pl.Expr:
-    """Wilder's Average True Range: MT5's ``iATR`` definition, distinct from :func:`atr`.
+    """Wilder's Average True Range (RMA smoothing), distinct from :func:`atr`.
+
+    **Not** MT5's built-in ``iATR``, which is a simple moving average of the true range, i.e.
+    :func:`atr`.  Stop distances differ by ~5 % median / ~16 % p95 on EURUSD H4 (dry run #23
+    red team), so an MQL5 port must hand-roll this recursion to keep parity (D1).
 
     Seeded at row ``period - 1`` (same "no partial windows" convention as :func:`atr`: a
     simple mean of the first ``period`` true-range values, via ``true_range().rolling_mean``),
@@ -50,8 +54,8 @@ def wilder_atr(period: int) -> pl.Expr:
     TR[i]) / period`` -- **not** a plain rolling mean of ``true_range()`` throughout, which is
     what :func:`atr` computes and a materially different number after the first window. Added
     for dry run #23 (``toy_tsmom``), whose card pins down "Wilder ATR on Bid bars" explicitly;
-    kept here rather than in the strategy module because any future system stopping off an
-    MT5-style ATR needs the same recursion, not a fresh one-off.
+    kept here rather than in the strategy module because any future system using Wilder's
+    smoothing needs the same recursion, not a fresh one-off.
 
     Causal by construction: built from a Polars expression chain (:func:`true_range`,
     ``rolling_mean``, ``ewm_mean``), each of which only ever reads rows ``<= i`` to produce row

@@ -1,7 +1,7 @@
 """DRY RUN toy -- ``toy_tsmom``: H4 EURUSD ROC-sign time-series momentum.
 
 Dry run #23 (DESIGN §10 Phase 2 exit test); card at
-``research/systems/FBS/0023_toy_tsmom/hypothesis.md``. Not a real research candidate -- a toy
+``research/dryrun/systems/FBS/0023_toy_tsmom/hypothesis.md``. Not a real research candidate -- a toy
 system used to exercise S2/S3 of the pipeline end to end.
 
 Rules (card, verbatim in spirit)
