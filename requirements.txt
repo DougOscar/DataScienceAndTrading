@@ -27,3 +27,4 @@ pytest>=8.0
 hypothesis>=6.0
 optuna>=4.0
 scipy>=1.15   # qmc.Sobol(rng=) (opt.candidate_set)
+pyyaml>=6.0   # hypothesis.md front matter (quantlab.systems)

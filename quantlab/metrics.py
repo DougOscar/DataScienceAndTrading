@@ -157,3 +157,147 @@ def summary(daily: pl.DataFrame, periods_per_year: float = 260.0) -> dict[str, f
         "worst_month": float(monthly.min()) if monthly.len() else float("nan"),
         "n_days": float(r.len()),
     }
+
+
+# =========================================================================== trade-level (report-builder, DESIGN §5)
+# These read the sized-trades frame produced by ``sizing.apply_sizing`` (skipped trades are
+# always excluded).  Everything here is a *display* statistic for the tear sheet — never a
+# validation gate (gates live in ``quantlab.gates`` and are read from the ledger, not recomputed).
+
+def _trades_not_skipped(trades: pl.DataFrame | None) -> pl.DataFrame | None:
+    if trades is None or trades.height == 0:
+        return None
+    return trades.filter(~pl.col("skipped")) if "skipped" in trades.columns else trades
+
+
+def r_multiples(trades: pl.DataFrame | None) -> np.ndarray:
+    """Per-trade R-multiples (risk type A, DESIGN §5): ``pnl_ccy / risk_target_ccy``.  Empty
+    array when ``trades`` has no rows, no ``risk_target_ccy`` column (not fixed-fraction
+    sizing) or every risk target is null/non-positive (e.g. a stopless system)."""
+    t = _trades_not_skipped(trades)
+    if t is None or "risk_target_ccy" not in t.columns or "pnl_ccy" not in t.columns:
+        return np.array([], dtype=float)
+    rt = t["risk_target_ccy"].to_numpy().astype(float)
+    pnl = t["pnl_ccy"].to_numpy().astype(float)
+    mask = np.isfinite(rt) & (rt > 0) & np.isfinite(pnl)
+    return (pnl[mask] / rt[mask]).astype(float)
+
+
+def expectancy_r(trades: pl.DataFrame | None) -> float:
+    """Mean R-multiple (type A expectancy in R, DESIGN §5); NaN when unavailable."""
+    r = r_multiples(trades)
+    return float(r.mean()) if r.size else float("nan")
+
+
+def max_losing_streak_r(trades: pl.DataFrame | None) -> int:
+    """Longest run of consecutive negative R-multiples, in trade (not calendar) order."""
+    r = r_multiples(trades)
+    if r.size == 0:
+        return 0
+    best = cur = 0
+    for x in r < 0:
+        cur = cur + 1 if x else 0
+        best = max(best, cur)
+    return best
+
+
+def risk_realisation_error_stats(trades: pl.DataFrame | None) -> dict[str, float]:
+    """Type A "risk-realisation error" (actual risk vs target after lot rounding and gaps):
+    mean signed error and the 95th percentile of its magnitude, both as a fraction of the
+    target risk (``sizing.apply_sizing``'s ``risk_realisation_error``, skips -1 = trade
+    skipped below the minimum lot)."""
+    t = _trades_not_skipped(trades)
+    if t is None or "risk_realisation_error" not in t.columns:
+        return {"mean": float("nan"), "p95_abs": float("nan"), "n": 0.0}
+    e = t["risk_realisation_error"].drop_nulls().to_numpy().astype(float)
+    e = e[np.isfinite(e)]
+    if e.size == 0:
+        return {"mean": float("nan"), "p95_abs": float("nan"), "n": 0.0}
+    return {"mean": float(e.mean()), "p95_abs": float(np.quantile(np.abs(e), 0.95)), "n": float(e.size)}
+
+
+def mae_mfe_stats(trades: pl.DataFrame | None) -> dict[str, float]:
+    """Type C MAE/MFE summary in **points** (engine columns ``mae_points``/``mfe_points``):
+    median and 95th percentile of the adverse and favourable excursion any open trade saw."""
+    t = _trades_not_skipped(trades)
+    if t is None or "mae_points" not in t.columns or "mfe_points" not in t.columns:
+        return {"mae_p50": float("nan"), "mae_p95": float("nan"),
+                "mfe_p50": float("nan"), "mfe_p95": float("nan"), "n": 0.0}
+    mae = t["mae_points"].to_numpy().astype(float)
+    mfe = t["mfe_points"].to_numpy().astype(float)
+    return {"mae_p50": float(np.median(mae)), "mae_p95": float(np.quantile(mae, 0.95)),
+            "mfe_p50": float(np.median(mfe)), "mfe_p95": float(np.quantile(mfe, 0.95)), "n": float(t.height)}
+
+
+def worst_trade_points(trades: pl.DataFrame | None) -> float:
+    """Worst single-trade P&L in points (``pnl_points``; symbol-comparable within one symbol)."""
+    t = _trades_not_skipped(trades)
+    if t is None or "pnl_points" not in t.columns or t.height == 0:
+        return float("nan")
+    return float(t["pnl_points"].min())
+
+
+def worst_trade_ccy(trades: pl.DataFrame | None) -> float:
+    """Worst single-trade P&L in account currency (``pnl_ccy``, DESIGN §5 type B/C)."""
+    t = _trades_not_skipped(trades)
+    if t is None or "pnl_ccy" not in t.columns or t.height == 0:
+        return float("nan")
+    return float(t["pnl_ccy"].min())
+
+
+def risk_per_trade_ccy(trades: pl.DataFrame | None) -> np.ndarray:
+    """Type B "distribution of risk per trade": realised risk in account currency
+    (``stop_distance x value_per_point x lots``, ``risk_realised_ccy``) for trades that carry
+    a stop; empty when the column is absent or every stop is null (no hard stop at all)."""
+    t = _trades_not_skipped(trades)
+    if t is None or "risk_realised_ccy" not in t.columns:
+        return np.array([], dtype=float)
+    r = t["risk_realised_ccy"].drop_nulls().to_numpy().astype(float)
+    return r[np.isfinite(r)]
+
+
+def cost_breakdown(trades: pl.DataFrame | None) -> dict[str, float]:
+    """Approximate cost decomposition of a sized-trades frame, in account currency.
+
+    Engine/sizing convention: ``pnl_ccy = pnl_points*value_per_point_acct_exit*lots + swap_ccy
+    - commission_ccy`` (``sizing.apply_sizing``).  Fill prices already price in the spread paid
+    at entry/exit (DESIGN §4.3: longs buy at Ask, sell at Bid); ``spread_cost_points`` is the
+    engine's own diagnostic of how many points of spread were paid, so the spread-free
+    ("gross") P&L is recovered by adding it back at the entry-time point value.  Swap and
+    commission are isolated from the money-mode columns at the *exit*-time point value
+    (an approximation when ``spec.swap_ccy`` differs from the quote currency — the exact
+    conversion lives only inside ``apply_sizing``, red-team N1).  Returns NaN fields when the
+    trades frame lacks the needed columns (no evaluator, or a non-engine trade source).
+
+    ``cost_total_ccy`` = spread + commission + (swap only when it drags, i.e. ``-swap_ccy`` when
+    positive).  ``cost_pct_of_gross`` = cost_total / gross P&L (gross > 0 only, else NaN).
+    ``break_even_spread_multiple`` = the multiple of the *current* spread cost at which total
+    net P&L would hit zero, holding every other cost fixed: ``1 + net_pnl / spread_cost_ccy``
+    (only meaningful when both are positive)."""
+    need = {"pnl_ccy", "spread_cost_points", "swap_points", "swap_money_per_lot", "commission_per_lot",
+            "value_per_point_acct", "value_per_point_acct_exit", "lots"}
+    t = _trades_not_skipped(trades)
+    nan = float("nan")
+    out = {"gross_pnl_ccy": nan, "net_pnl_ccy": nan, "cost_total_ccy": nan, "spread_cost_ccy": nan,
+          "commission_ccy": nan, "swap_ccy": nan, "cost_pct_of_gross": nan, "swap_share_of_costs": nan,
+          "break_even_spread_multiple": nan}
+    if t is None or not need <= set(t.columns) or t.height == 0:
+        return out
+    lots = t["lots"].to_numpy().astype(float)
+    spread_ccy = t["spread_cost_points"].fill_null(0.0).to_numpy().astype(float) * \
+        t["value_per_point_acct"].to_numpy().astype(float) * lots
+    swap_ccy = (t["swap_points"].fill_null(0.0).to_numpy().astype(float) *
+                t["value_per_point_acct_exit"].to_numpy().astype(float) * lots +
+                t["swap_money_per_lot"].fill_null(0.0).to_numpy().astype(float) * lots)
+    commission_ccy = t["commission_per_lot"].fill_null(0.0).to_numpy().astype(float) * lots
+    net_pnl = float(t["pnl_ccy"].sum())
+    spread_tot, swap_tot, commission_tot = float(spread_ccy.sum()), float(swap_ccy.sum()), float(commission_ccy.sum())
+    gross = net_pnl + spread_tot
+    swap_cost = max(-swap_tot, 0.0)
+    cost_total = spread_tot + commission_tot + swap_cost
+    out.update(gross_pnl_ccy=gross, net_pnl_ccy=net_pnl, cost_total_ccy=cost_total, spread_cost_ccy=spread_tot,
+              commission_ccy=commission_tot, swap_ccy=swap_tot,
+              cost_pct_of_gross=(cost_total / gross if gross > 0 else nan),
+              swap_share_of_costs=(swap_cost / cost_total if cost_total > 0 else nan),
+              break_even_spread_multiple=(1.0 + net_pnl / spread_tot if net_pnl > 0 and spread_tot > 0 else nan))
+    return out

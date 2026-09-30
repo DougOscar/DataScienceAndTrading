@@ -19,6 +19,7 @@ any bar with ``ts >= holdout_start`` is locked (DESIGN §4.1).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,9 +30,35 @@ DATA_DIR = ROOT / "data"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 BROKER_DIR = DATA_DIR / "broker"          # ExportBrokerSpecs.mq5 outputs (*.tsv)
 RESEARCH_DIR = ROOT / "research"
-LEDGER_DIR = RESEARCH_DIR / "ledger"
-STUDIES_DIR = RESEARCH_DIR / "studies"
 CACHE_DIR = DATA_DIR / "_quantlab_cache"
+
+
+def _env_path(var: str, default: Path) -> Path:
+    """``default``, optionally overridden by the environment variable ``var``.
+
+    Read once, at import time, like every other path constant in this module: a dry run or a
+    sandbox sets the variable in its own environment *before* ``import quantlab`` (or
+    ``quantlab.config`` directly) runs, so it must not be re-read later. Every module that uses
+    these directories (``ledger``, ``opt``, ``gates``, ``systems``, ...) reads the resulting
+    constant (``config.LEDGER_DIR`` etc.) at *call* time via a plain attribute lookup -- never
+    binds it as a function's default-argument value, which would freeze whatever was current when
+    Python first defined that function -- so a later ``monkeypatch.setattr(config, "LEDGER_DIR",
+    ...)`` in a test, or this env-var override read before import, reaches every caller uniformly.
+
+    A relative override resolves against :data:`ROOT`, not the process's current working
+    directory, so it is stable no matter where the interpreter was launched from.
+    """
+    raw = os.environ.get(var)
+    if not raw:
+        return default
+    p = Path(raw)
+    return p if p.is_absolute() else (ROOT / p)
+
+
+LEDGER_DIR = _env_path("QUANTLAB_LEDGER_DIR", RESEARCH_DIR / "ledger")
+STUDIES_DIR = _env_path("QUANTLAB_STUDIES_DIR", RESEARCH_DIR / "studies")
+SYSTEMS_DIR = _env_path("QUANTLAB_SYSTEMS_DIR", RESEARCH_DIR / "systems")
+VAULT_DIR = _env_path("QUANTLAB_VAULT_DIR", ROOT / "DocumentationVault" / "systems")
 
 
 @dataclass(frozen=True)

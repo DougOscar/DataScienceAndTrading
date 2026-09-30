@@ -226,7 +226,7 @@ Every hypothesis card declares the system's **risk semantics**. The report switc
 - **Risk-adjusted:** Sharpe (from daily returns), Sortino, Calmar, PSR/DSR.
 - **Risk:** max DD, longest drawdown duration, Ulcer index, daily CVaR95, worst month, % of time under water.
 - **Costs:** cost as % of gross P&L, break-even spread multiple, share of costs from swap.
-- **Robustness:** DSR, CSCV OOS loss, OOS Sharpe (CPCV), walk-forward OOS, plateau (judge, weakest axis), cost-stress Sharpe, year consistency, holdout verdict and z-score; PBO as a diagnostic.
+- **Robustness:** DSR, CSCV OOS loss, OOS Sharpe (CPCV), walk-forward OOS, plateau (judge, weakest axis), cost-stress Sharpe, year consistency, holdout verdict (PASS / FAIL / NOT_DECISIVE, §4.4); PBO as a diagnostic.
 
 **Every tear sheet includes:**
 - a **metrics applicability table**: metric → included/excluded → why;
@@ -243,7 +243,7 @@ Every hypothesis card declares the system's **risk semantics**. The report switc
 **Result:** profitable | reasonable | unprofitable — <X.X>%/month at 10% DD budget
 **Risk profile:** <label> — MaxDD <..>, longest DD <n> months, max losing streak <n>,
                   skew <..>, CVaR95 <..>
-**Robustness:** DSR <0.xx> · CSCV OOS loss <0.xx> · WFO OOS Sharpe <x.xx> (recent third <x.xx>) · holdout <PASS|FAIL|NOT_DECISIVE> z <..> (or "not unlocked")
+**Robustness:** DSR <0.xx> · CSCV OOS loss <0.xx> · WFO OOS Sharpe <x.xx> (recent third <x.xx>) · holdout <PASS|FAIL|NOT_DECISIVE> (or "not unlocked")
 ![[<slug>_sharpe_yearly.png]]
 ![[<slug>_sharpe_monthly.png]]
 ```
