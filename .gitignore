@@ -69,3 +69,4 @@ research/systems/_drafts/
 # agent worktrees / regenerable calibration outputs
 .claude/worktrees/
 research/calibration/output/
+research/dryrun/studies/

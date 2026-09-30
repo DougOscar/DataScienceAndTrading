@@ -391,3 +391,12 @@ def test_create_system_reads_symbols_and_timeframe_from_the_card(tmp_path):
     d2 = systems.create_system("FBS", 8, "toy_placeholder", name="Toy", card_markdown=placeholder, systems_dir=tmp_path)
     front2 = systems.read_card(d2 / "hypothesis.md")
     assert "symbol" not in front2 and "timeframe" not in front2
+
+
+@pytest.mark.parametrize("line", ["**Risk semantics:** type **A**. Fixed-fraction 1 % risk",
+                                  "**Risk semantics:** type `C` (no stop)", "**Risk semantics:** type B"])
+def test_risk_type_tolerates_markdown_emphasis(tmp_path, line):
+    """Dry run #23: the scout wrote 'type **A**' and create_system could not parse it."""
+    from quantlab import systems
+    d = systems.create_system("FBS", 9, "toy_emph", name="T", card_markdown=f"# T\n{line}\n", systems_dir=tmp_path)
+    assert systems.read_card(d / "hypothesis.md")["risk_type"] == line.split("type")[1].strip(" *`.")[0]

@@ -58,6 +58,72 @@ def test_atr_rejects_non_positive_period():
         base.atr(0)
 
 
+def test_wilder_atr_matches_hand_computation():
+    """Wilder's recursion (seed = simple mean of the first ``period`` TR values, then
+    ``ATR[i] = (ATR[i-1] * (period-1) + TR[i]) / period``), not a plain rolling mean."""
+    bars = synthetic_bars(60, seed=4, timeframe="H1")
+    period = 5
+    got = bars.select(base.wilder_atr(period).alias("atr"))["atr"].to_numpy()
+
+    tr = bars.select(base.true_range().alias("tr"))["tr"].to_numpy()
+    expected = np.full(tr.shape[0], np.nan)
+    expected[period - 1] = tr[:period].mean()
+    for i in range(period, tr.shape[0]):
+        expected[i] = (expected[i - 1] * (period - 1) + tr[i]) / period
+
+    assert np.isnan(got[: period - 1]).all()
+    np.testing.assert_allclose(got[period - 1:], expected[period - 1:], rtol=1e-9)
+
+
+def test_wilder_atr_differs_from_the_plain_rolling_mean_atr_after_the_seed():
+    """Past the shared seed row, Wilder's recursion and the plain rolling mean diverge as soon
+    as true range is non-constant -- proof the two helpers are not accidentally the same."""
+    bars = synthetic_bars(80, seed=6, timeframe="H1")
+    period = 10
+    wilder = bars.select(base.wilder_atr(period).alias("a"))["a"].to_numpy()
+    plain = bars.select(base.atr(period).alias("a"))["a"].to_numpy()
+
+    first = period - 1
+    assert wilder[first] == pytest.approx(plain[first], rel=1e-9)   # same seed row
+    assert not np.allclose(wilder[first + 1:], plain[first + 1:], rtol=1e-9)
+
+
+def test_wilder_atr_rejects_non_positive_period():
+    with pytest.raises(ValueError, match="period"):
+        base.wilder_atr(0)
+
+
+def test_wilder_atr_is_causal_via_lookahead_audit():
+    """Same pattern as :func:`test_atr_and_true_range_are_causal_via_lookahead_audit`."""
+    from dataclasses import dataclass
+
+    from quantlab.contracts import Params, RiskType
+    from quantlab.testing import assert_no_lookahead
+
+    @dataclass(frozen=True)
+    class P(Params):
+        period: int = 10
+
+    class WilderAtrProbe:
+        name = "wilder_atr_probe_test"
+        risk_type = RiskType.C
+        params_cls = P
+
+        def __init__(self, params: P):
+            self.params = params
+
+        def signals(self, bars: pl.DataFrame) -> pl.DataFrame:
+            a = base.wilder_atr(self.params.period)
+            return bars.select(
+                pl.when(a.is_null()).then(None).otherwise(1).cast(pl.Int8).alias("signal"),
+                pl.lit(None, dtype=pl.Float64).alias("stop_dist"),
+                pl.lit(None, dtype=pl.Float64).alias("target_dist"),
+            )
+
+    bars = synthetic_bars(400, seed=8, timeframe="H1")
+    assert_no_lookahead(lambda: WilderAtrProbe(P()), bars, min_history=60)
+
+
 def test_atr_and_true_range_are_causal_via_lookahead_audit():
     """The two helpers are expressions used inside a strategy's signals(); prove a strategy
     built purely from them passes the same audit a real system module must pass."""

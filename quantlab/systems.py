@@ -75,7 +75,8 @@ def _check_slug(slug: str) -> str:
 
 
 def _extract_risk_type(card_markdown: str, *, slug: str) -> str:
-    m = _RISK_TYPE_RE.search(card_markdown)
+    # markdown emphasis around the letter ("type **A**", "type `A`") is common in real cards
+    m = _RISK_TYPE_RE.search(re.sub(r"[*`]", "", card_markdown))
     if not m:
         raise ValueError(
             f"create_system({slug!r}): could not find a risk-semantics declaration in card_markdown "
