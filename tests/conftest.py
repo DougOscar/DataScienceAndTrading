@@ -14,6 +14,25 @@ from quantlab import config, data
 RAW_M1_SCHEMA = ["ts", "open", "high", "low", "close", "tick_vol", "volume", "spread"]
 
 
+def _snapshot(root: Path) -> dict[str, tuple[int, int]]:
+    if not root.exists():
+        return {}
+    return {str(f.relative_to(root)): (f.stat().st_size, f.stat().st_mtime_ns) for f in root.rglob("*")}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def real_research_dirs_untouched():
+    """Fail the run if any test writes to the real ledger / trial store (research/ledger,
+    research/studies).  Tests must use tmp dirs or the QUANTLAB_* overrides (dry run #23 found a
+    test draft that had leaked trial files into research/studies/)."""
+    roots = [config.RESEARCH_DIR / "ledger", config.RESEARCH_DIR / "studies"]
+    before = {r: _snapshot(r) for r in roots}
+    yield
+    changed = {str(r): sorted(set(_snapshot(r).items()) ^ set(before[r].items())) for r in roots}
+    changed = {k: v for k, v in changed.items() if v}
+    assert not changed, f"tests modified the real research dirs: {changed}"
+
+
 @pytest.fixture(autouse=True)
 def isolated_cache_dir(monkeypatch, tmp_path: Path) -> Path:
     """Every test writes its resample cache under its own tmp dir, never into ``data/_quantlab_cache``."""
