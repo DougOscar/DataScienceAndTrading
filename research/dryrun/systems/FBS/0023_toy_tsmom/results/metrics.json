@@ -1,0 +1,409 @@
+{
+  "study_id": "fbs-0023-a1",
+  "risk_type": "A",
+  "headline": {
+    "study_id": "fbs-0023-a1",
+    "book": "FBS",
+    "system": "toy_tsmom",
+    "issue": 23,
+    "risk_type": "A",
+    "class": "unprofitable",
+    "mean_monthly": -0.00014826601331920442,
+    "mean_monthly_pct": -0.01482660133192044,
+    "mean_monthly_band": [
+      -0.0007858606244749482,
+      -0.00015833777542830592,
+      0.0005286777234694226
+    ],
+    "gate_verdict": "FAIL",
+    "robustness": {
+      "dsr": 0.00019700712894813049,
+      "cscv_oos_loss": 0.7887334887334887,
+      "oos_sharpe": -0.6825940469582321,
+      "wfo_oos": 0.06735869322974737,
+      "wfo_oos_recent": -0.07403172677579248,
+      "plateau": 0.0,
+      "cost_stress_sharpe": -0.9174275932628458,
+      "positive_years": 0.6,
+      "max_year_share": null,
+      "holdout_status": "not unlocked",
+      "pbo": 0.5312354312354313
+    },
+    "risk_profile": "Trend-like",
+    "key_risks": [
+      "Failed gate(s): Deflated Sharpe probability, CSCV OOS loss probability, OOS Sharpe (CPCV median), Walk-forward procedure OOS, Cost-stress Sharpe, Parameter plateau, Max single-year PnL share, Trade count vs MinTRL.",
+      "Holdout not unlocked: the figures above are development-data only."
+    ]
+  },
+  "metrics": {
+    "cagr": -0.025534171826443686,
+    "mean_monthly": -0.0014264441087034928,
+    "sharpe": -0.1177532700374289,
+    "sortino": -0.1829893786302974,
+    "calmar": -0.05089739198947725,
+    "max_dd": -0.50167937547218,
+    "longest_dd_days": 2043.0,
+    "ulcer": 0.33024062208655447,
+    "cvar95": -0.019875615609269946,
+    "worst_month": -0.10495746998889499,
+    "skew": 1.159192294546639,
+    "kurtosis": 12.282570469725757,
+    "pct_time_underwater": 0.9783163265306123,
+    "psr0": 0.3622040777570093,
+    "ret_at_budget": {
+      "mean_monthly": -0.00014826601331920442,
+      "leverage": 0.10882436498811547,
+      "band_p5_p50_p95": [
+        -0.0007858606244749482,
+        -0.00015833777542830592,
+        0.0005286777234694226
+      ],
+      "label": "unprofitable"
+    },
+    "cost_pct_of_gross": 18.08435522803448,
+    "break_even_spread_multiple": NaN,
+    "swap_share_of_costs": -0.0,
+    "gate_verdict": "FAIL",
+    "dsr": 0.00019700712894813049,
+    "cscv_oos_loss": 0.7887334887334887,
+    "oos_sharpe": -0.6825940469582321,
+    "wfo_oos": 0.06735869322974737,
+    "plateau": 0.0,
+    "cost_stress_sharpe": -0.9174275932628458,
+    "positive_years": 0.6,
+    "max_year_share": null,
+    "wfo_oos_recent": -0.07403172677579248,
+    "holdout_status": "not unlocked",
+    "pbo": 0.5312354312354313,
+    "win_rate": 0.29402985074626864,
+    "profit_factor": 0.930441403356435,
+    "n_trades": 670.0,
+    "expectancy_points": -12.292998597202818,
+    "hold_days_p95": 3.0,
+    "expectancy_r": -0.022731507731912032,
+    "max_losing_streak_r": 11,
+    "risk_realisation_error": {
+      "mean": -0.0018611348214324476,
+      "p95_abs": 0.003980607185677326,
+      "n": 670.0
+    }
+  },
+  "interpretations": {
+    "cagr": "CAGR -2.6%: compound annual growth of the %-equity curve.",
+    "mean_monthly": "Average calendar-month return -0.14% (unlevered, all months equal weight).",
+    "sharpe": "Annualised Sharpe -0.12 from daily returns (periods/year = 260).",
+    "sortino": "Sortino -0.18: like Sharpe but only penalises downside deviation.",
+    "calmar": "Calmar -0.05: CAGR / max drawdown magnitude.",
+    "max_dd": "Max drawdown -50.2% of the running peak (unlevered).",
+    "longest_dd_days": "Longest stretch below the running peak: 2043 trading days.",
+    "ulcer": "Ulcer index 0.330: RMS drawdown depth (penalises deep and long drawdowns).",
+    "cvar95": "Daily CVaR95 -1.99%: mean return on the worst 5% of days.",
+    "worst_month": "Worst calendar month -10.50%.",
+    "pct_time_underwater": "98% of trading days were below the running peak.",
+    "psr0": "PSR(SR*=0) 0.36: probability the true per-period Sharpe exceeds 0, given its skew/kurtosis over 2352 days -- NOT deflated for multiple testing (see DSR under Robustness for that).",
+    "ret_at_budget": "Return at the 10% DD budget: -0.01%/month at leverage k=0.11 (bootstrap band p5/p50/p95 = -0.08%/-0.02%/0.05%) -> classified **unprofitable** (DESIGN \u00a74.5).",
+    "cost_pct_of_gross": "Costs are 1808.4% of gross P&L (gross 1,221, net -20,863, cost 22,084, 100k nominal).",
+    "break_even_spread_multiple": "Break-even spread multiple: not defined (net P&L <= 0 or no spread cost).",
+    "swap_share_of_costs": "Swap is -0% of total cost.",
+    "dsr": "Deflated Sharpe probability 0.000197 (>= 0.95, status FAIL).",
+    "cscv_oos_loss": "CSCV OOS loss probability 0.789 (< 0.1, status FAIL).",
+    "oos_sharpe": "OOS Sharpe (CPCV median) -0.683 (>= 1.0, status FAIL).",
+    "wfo_oos": "Walk-forward procedure OOS 0.07 (>= 0.5, status FAIL); recent third (recomputed from the stored WFO OOS series, same 33% window the gate uses) -0.07.",
+    "plateau": "Parameter plateau 0.00 (>= 0.6, status FAIL): weakest parameter axis 'lookback' keeps >= half the peak Sharpe on 0% of its judge-run perturbations.",
+    "cost_stress_sharpe": "Cost-stress Sharpe -0.917 (> 0.5, status FAIL).",
+    "positive_years": "Positive years 0.6 (>= 0.6, status PASS).",
+    "max_year_share": "Max single-year PnL share \u2014 (<= 0.4, status FAIL).",
+    "holdout_status": "Holdout: not unlocked (checkpoint B has not run).",
+    "pbo": "PBO 0.53 (diagnostic, not a v1.2 gate \u2014 replaced by CSCV OOS loss): probability the in-sample-best configuration ranks at or below the out-of-sample median.",
+    "win_rate": "Win rate 29% over 670 trades.",
+    "profit_factor": "Profit factor 0.93 (gross win / gross loss).",
+    "holding_time": "Holding time: median-scale 5.4 bars; 95th percentile 3 trading days.",
+    "expectancy_r": "Expectancy -0.02 R over 670 trades (mean P&L / planned risk).",
+    "max_losing_streak_r": "Longest losing streak: 11 trades in a row with a negative R-multiple.",
+    "risk_realisation_error": "Risk-realisation error: mean -0.2% of target, 95th percentile |error| 0.4% (lot-step rounding / gaps vs the planned A-type risk)."
+  },
+  "applicability": [
+    {
+      "metric": "cagr",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "mean_monthly",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "sharpe",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "sortino",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "calmar",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "max_dd",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "longest_dd_days",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "ulcer",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "cvar95",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "worst_month",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "pct_time_underwater",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "psr0",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75); recomputed here (deterministic, not a gate)"
+    },
+    {
+      "metric": "ret_at_budget",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75, \u00a74.5 classification)"
+    },
+    {
+      "metric": "cost_pct_of_gross",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75); approximated from the trades frame's cost columns"
+    },
+    {
+      "metric": "break_even_spread_multiple",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75); approximated from the trades frame's cost columns"
+    },
+    {
+      "metric": "swap_share_of_costs",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75); approximated from the trades frame's cost columns"
+    },
+    {
+      "metric": "dsr",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "cscv_oos_loss",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "oos_sharpe",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "wfo_oos",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "plateau",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "cost_stress_sharpe",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "positive_years",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "max_year_share",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "holdout_status",
+      "shown": true,
+      "why": "from the ledger's holdout_unlock/holdout_exam rows (never from fresh holdout bars)"
+    },
+    {
+      "metric": "pbo",
+      "shown": true,
+      "why": "diagnostic only; recomputed from the trial store with stats.pbo_cscv"
+    },
+    {
+      "metric": "win_rate_profit_factor",
+      "shown": true,
+      "why": "DESIGN \u00a75, risk type A"
+    },
+    {
+      "metric": "holding_time",
+      "shown": true,
+      "why": "DESIGN \u00a75, risk type A"
+    },
+    {
+      "metric": "expectancy_r",
+      "shown": true,
+      "why": "DESIGN \u00a75, risk type A"
+    },
+    {
+      "metric": "max_losing_streak_r",
+      "shown": true,
+      "why": "DESIGN \u00a75, risk type A"
+    },
+    {
+      "metric": "risk_realisation_error",
+      "shown": true,
+      "why": "DESIGN \u00a75, risk type A"
+    },
+    {
+      "metric": "raw_points_per_trade",
+      "shown": false,
+      "why": "lot size varies with the stop, so raw points are not comparable across trades (use R-multiples)"
+    },
+    {
+      "metric": "pnl_ccy_distribution",
+      "shown": false,
+      "why": "shown as R-multiples instead (risk varies by design; currency P&L mixes that in)"
+    },
+    {
+      "metric": "risk_per_trade_distribution",
+      "shown": false,
+      "why": "risk type A, not B"
+    },
+    {
+      "metric": "mae_mfe",
+      "shown": false,
+      "why": "risk type A, not C"
+    },
+    {
+      "metric": "worst_trade",
+      "shown": false,
+      "why": "risk type A, not C"
+    },
+    {
+      "metric": "turnover_exposure_cost_per_turnover",
+      "shown": false,
+      "why": "type A is a discrete-position system: use R-multiples / trade stats instead"
+    }
+  ],
+  "gate_table": [
+    {
+      "gate": "dsr",
+      "label": "Deflated Sharpe probability",
+      "value": 0.00019700712894813049,
+      "status": "FAIL",
+      "threshold": ">= 0.95"
+    },
+    {
+      "gate": "cscv_oos_loss",
+      "label": "CSCV OOS loss probability",
+      "value": 0.7887334887334887,
+      "status": "FAIL",
+      "threshold": "< 0.1"
+    },
+    {
+      "gate": "oos_sharpe",
+      "label": "OOS Sharpe (CPCV median)",
+      "value": -0.6825940469582321,
+      "status": "FAIL",
+      "threshold": ">= 1.0"
+    },
+    {
+      "gate": "wfo_oos",
+      "label": "Walk-forward procedure OOS",
+      "value": 0.06735869322974737,
+      "status": "FAIL",
+      "threshold": ">= 0.5"
+    },
+    {
+      "gate": "cost_stress_sharpe",
+      "label": "Cost-stress Sharpe",
+      "value": -0.9174275932628458,
+      "status": "FAIL",
+      "threshold": "> 0.5"
+    },
+    {
+      "gate": "plateau",
+      "label": "Parameter plateau",
+      "value": 0.0,
+      "status": "FAIL",
+      "threshold": ">= 0.6"
+    },
+    {
+      "gate": "positive_years",
+      "label": "Positive years",
+      "value": 0.6,
+      "status": "PASS",
+      "threshold": ">= 0.6"
+    },
+    {
+      "gate": "max_year_share",
+      "label": "Max single-year PnL share",
+      "value": null,
+      "status": "FAIL",
+      "threshold": "<= 0.4"
+    },
+    {
+      "gate": "trade_count",
+      "label": "Trade count vs MinTRL",
+      "value": 670.0,
+      "status": "FAIL",
+      "threshold": ">= MinTRL"
+    },
+    {
+      "gate": "mechanism",
+      "label": "Mechanism check",
+      "value": null,
+      "status": "MANUAL",
+      "threshold": "manual None"
+    }
+  ],
+  "risk_profile": {
+    "label": "Trend-like",
+    "evidence": {
+      "max_dd": 0.50167937547218,
+      "longest_dd_days": 2043,
+      "skew": 1.159192294546639,
+      "cvar95": -0.019875615609269946,
+      "max_period_share": Infinity,
+      "max_period_share_kind": "year",
+      "win_rate": 0.29402985074626864,
+      "max_losing_streak": 11,
+      "max_losing_streak_kind": "R-multiple"
+    }
+  },
+  "figures": {
+    "equity_underwater": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/equity_underwater.png",
+    "sharpe_yearly": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/sharpe_yearly.png",
+    "sharpe_monthly": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/sharpe_monthly.png",
+    "monthly_heatmap": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/monthly_heatmap.png",
+    "dd_distribution": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/dd_distribution.png",
+    "cpcv_fan": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/cpcv_fan.png",
+    "plateau_heatmap": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/plateau_heatmap.png",
+    "cost_sensitivity": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/cost_sensitivity.png",
+    "wfo_drift": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/wfo_drift.png"
+  }
+}
