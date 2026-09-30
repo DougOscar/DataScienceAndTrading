@@ -602,13 +602,14 @@ def selected_at_edge(space: Any, selected: Mapping[str, Any]) -> list[str]:
 
 
 def judge_plateau(study: StudyResult, evaluator: Any, *, space: Any, radius: float | Mapping[str, float] | None,
-                  periods_per_year: float = 260.0, n_jobs: Any = 1) -> dict[str, Any]:
+                  periods_per_year: float = 260.0, n_jobs: Any = 1, cost: Any = None) -> dict[str, Any]:
     """Judge-run plateau (DESIGN §4.2 v1.2; red-team N4, N8; round 2b).
 
     Evaluates the selected configuration and every :func:`plateau_perturbations` point that is
     naturally valid and accepted by ``space.is_valid`` (the constraint; search bounds are NOT a
     validity check — points outside them are evaluated and reported) with
-    ``evaluator(params, cost=None)`` (the evaluator's base cost, as in ``run_study``), on
+    ``evaluator(params, cost=cost)`` — ``cost`` is the study's base cost model (``evaluate_gates``
+    passes the one the other gates use, which the ledger check ties to ``run_study``'s), on
     ``opt``'s runner (in-process for ``n_jobs=1``, else its capped process pool).
 
     A point passes if its full-dev Sharpe is ≥ ``PLATEAU_PEAK_FRACTION`` × peak and > 0, peak =
@@ -636,7 +637,7 @@ def judge_plateau(study: StudyResult, evaluator: Any, *, space: Any, radius: flo
             q["status"] = "pending"
     todo = [sel] + [q["params"] for q in pts if q["status"] == "pending"]
     jobs = min(opt._auto_jobs(n_jobs), max(1, len(todo)))
-    runner = opt._Runner(evaluator, None, jobs)
+    runner = opt._Runner(evaluator, cost, jobs)
     try:
         res = list(runner.map(todo))
     finally:
@@ -1316,7 +1317,7 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
         if ispec is not None:
             from .costs import pip_points
             pip_pts = float(pip_points(ispec))
-            stressed = bc.stressed(spec=ispec)
+            stressed = bc.stressed(spec=ispec, book=getattr(evaluator, "book", "FBS"))
             slip_pts = float(stressed.slippage_points - bc.slippage_points)
             sym = getattr(ispec, "symbol", "?")
             med_spread = _median_spread(sym, getattr(evaluator, "book", "FBS"))
@@ -1356,7 +1357,8 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     jspace, space_note = (None, "no evaluator") if evaluator is None else _judge_space(study, ctx, space)
     plateau_detail: dict[str, Any] = {}
     if evaluator is not None and jspace is not None:
-        pj = judge_plateau(study, evaluator, space=jspace, radius=radius, periods_per_year=ppy, n_jobs=n_jobs)
+        pj = judge_plateau(study, evaluator, space=jspace, radius=radius, periods_per_year=ppy, n_jobs=n_jobs,
+                           cost=bc)
         psc = pj["plateau_score"]
         plateau_detail = {**pj, "radius_source": ctx["radius_source"], "kind": "judge-run",
                           "points": [{k: q.get(k) for k in ("param", "offset", "value", "params", "sharpe", "status",
@@ -1637,7 +1639,8 @@ def _build_holdout_band(study: StudyResult, horizon: int | Mapping[str, Any], pp
 
 
 def rebuild_holdout_band(study: StudyResult, *, periods_per_year: float, reason: str,
-                         selected_trades: pl.DataFrame | None = None, ledger_dir: Path | None = None,
+                         selected_trades: pl.DataFrame | None = None, evaluator: Any = None,
+                         ledger_dir: Path | None = None,
                          studies_dir: Path | None = None, symbols: Any = _REMOVED, n_boot: Any = _REMOVED,
                          seed: Any = _REMOVED) -> dict[str, Any]:
     """Rebuild the pre-registered holdout band for the horizon available NOW and re-register it
@@ -1654,7 +1657,12 @@ def rebuild_holdout_band(study: StudyResult, *, periods_per_year: float, reason:
     than the registered band's.  The event is logged as ``holdout_band_registered`` with
     ``reason``, ``band_version`` and the horizon it replaces; the ledger refuses a rebuild after
     an unlock whose exam is pending, after a FAIL or PASS, or without newer data
-    (``ledger._register_holdout_band``, reachable only from here — R3-1).  Returns the new band."""
+    (``ledger._register_holdout_band``, reachable only from here — R3-1).  Returns the new band.
+
+    Without a WFO series the band's trade range comes from the dev-selected trial's trades; they
+    are obtained exactly as :func:`evaluate_gates` does (``evaluator(selected_params, cost=base)``)
+    so the band recomputed at unlock matches.  Such a study needs ``evaluator=`` (or
+    ``selected_trades=``), otherwise this raises."""
     for name, v in (("symbols", symbols), ("n_boot", n_boot), ("seed", seed)):
         if v is not _REMOVED:
             raise TypeError(f"rebuild_holdout_band({name}=) is refused (red-team R2-3): the rebuild uses the same "
@@ -1671,6 +1679,13 @@ def rebuild_holdout_band(study: StudyResult, *, periods_per_year: float, reason:
     if cur.get("horizon_end") and _dt.fromisoformat(horizon["horizon_end"]) <= _dt.fromisoformat(str(cur["horizon_end"])):
         raise GateError(f"no newer data: the manifest ends {horizon['horizon_end']}, the registered band already "
                         f"covers up to {cur['horizon_end']}")
+    has_wfo = study.wfo_oos is not None and study.wfo_oos.height > 0
+    if selected_trades is None and not has_wfo:
+        if evaluator is None:
+            raise GateError(f"study {study.study_id} has no WFO series: the band's trade range comes from the "
+                            f"selected trial's trades; pass evaluator= (or selected_trades=) so the rebuilt band "
+                            f"matches the one recomputed at unlock")
+        selected_trades = evaluator(dict(study.selected_params), cost=_resolve_base_cost(evaluator, None)).trades
     band = _build_holdout_band(study, horizon, float(periods_per_year), n_boot=st.HOLDOUT_BAND_N_BOOT,
                                seed=st.holdout_band_seed(study.study_id),
                                selected_trades=selected_trades).as_dict()

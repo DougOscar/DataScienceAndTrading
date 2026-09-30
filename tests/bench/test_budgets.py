@@ -73,9 +73,14 @@ def test_pipeline_under_budget(symbol, htf):
     warnings.filterwarnings("ignore")
     _run_pipeline(symbol, htf)  # warm-up: resample cache, OS page cache, numba JIT
 
-    t0 = time.perf_counter()
-    bars, m1, result, sized, daily = _run_pipeline(symbol, htf)
-    elapsed = time.perf_counter() - t0
+    # best of 3: background load only ever makes a run slower, so the minimum is the
+    # machine-noise-robust estimate (a real regression slows every run)
+    times = []
+    for _ in range(3):
+        t0 = time.perf_counter()
+        bars, m1, result, sized, daily = _run_pipeline(symbol, htf)
+        times.append(time.perf_counter() - t0)
+    elapsed = min(times)
 
     assert result.trades.height > 0, f"{symbol} {htf}: benchmark strategy produced no trades over the dev window"
     assert daily.height > 0
@@ -185,12 +190,14 @@ def test_single_process_throughput_floor():
     grid = _param_grid(40)
     run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1, timeframe=htf)  # warm-up
 
-    t0 = time.perf_counter()
-    for params in grid:
-        sig = sma_cross_atr_signals(bars, **params)
-        run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf)
-    elapsed = time.perf_counter() - t0
-    per_sec = len(grid) / elapsed
+    best = float("inf")
+    for _ in range(3):  # best of 3 rounds (noise-robust; see test_pipeline_under_budget)
+        t0 = time.perf_counter()
+        for params in grid:
+            sig = sma_cross_atr_signals(bars, **params)
+            run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf)
+        best = min(best, time.perf_counter() - t0)
+    per_sec = len(grid) / best
 
     # Measured ~20-25 trials/sec on the dev laptop; floor of 8 gives a wide
     # margin for slower CI hardware while still catching a large regression.
@@ -220,41 +227,48 @@ def test_process_pool_throughput_beats_single_process():
     # real but not what this test is checking.
     grid = _param_grid(150)
 
-    # single-process reference (also proves the pool's answers are correct)
-    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1, timeframe=htf)
-    t0 = time.perf_counter()
-    reference = []
-    for params in grid:
-        sig = sma_cross_atr_signals(bars, **params)
-        reference.append(run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf).trades.height)
-    single_elapsed = time.perf_counter() - t0
-    single_per_sec = len(grid) / single_elapsed
-
     n_workers = max(2, min(8, (os.cpu_count() or 4) - 2))  # DESIGN §7: leave 2 threads for the system
-    h1_handles, h1_spec = bars_to_shm(bars)
-    m1_handles, m1_spec = bars_to_shm(m1)
-    try:
-        t0 = time.perf_counter()
-        with ProcessPoolExecutor(
-            max_workers=n_workers, initializer=_pool_worker.init,
-            initargs=(h1_spec, m1_spec, spec, cost),
-        ) as ex:
-            pool_results = list(ex.map(_pool_worker.run_one, grid, chunksize=4))
-        pool_elapsed = time.perf_counter() - t0
-    finally:
-        close_and_unlink(h1_handles)
-        close_and_unlink(m1_handles)
+    run_backtest(bars, sma_cross_atr_signals(bars), spec, cost, m1=m1, timeframe=htf)  # warm-up
 
-    pool_per_sec = len(grid) / pool_elapsed
-    assert [r["n_trades"] for r in pool_results] == reference, (
-        "process-pool trade counts diverged from the single-process reference "
-        "-- shared-memory reconstruction is not bit-identical to the real bars/M1 frames"
-    )
-    # Lenient (>= 1.2x, not the ~3x this repo's laptop actually sees) because
-    # this is a shared/noisy box and the fixed per-worker startup cost (numba
-    # warm-up + shared-memory attach) matters more at small grid sizes like
-    # this test's -- see the perf engineer's report for the fuller sweep.
-    assert pool_per_sec >= single_per_sec * 1.2, (
-        f"pool ({n_workers} workers) throughput {pool_per_sec:.1f}/s did not beat "
-        f"single-process {single_per_sec:.1f}/s by the expected margin"
-    )
+    def _attempt():
+        t0 = time.perf_counter()
+        reference = []
+        for params in grid:
+            sig = sma_cross_atr_signals(bars, **params)
+            reference.append(run_backtest(bars, sig, spec, cost, m1=m1, timeframe=htf).trades.height)
+        single_per_sec = len(grid) / (time.perf_counter() - t0)
+        h1_handles, h1_spec = bars_to_shm(bars)
+        m1_handles, m1_spec = bars_to_shm(m1)
+        try:
+            t0 = time.perf_counter()
+            with ProcessPoolExecutor(
+                max_workers=n_workers, initializer=_pool_worker.init,
+                initargs=(h1_spec, m1_spec, spec, cost),
+            ) as ex:
+                pool_results = list(ex.map(_pool_worker.run_one, grid, chunksize=4))
+            pool_per_sec = len(grid) / (time.perf_counter() - t0)
+        finally:
+            close_and_unlink(h1_handles)
+            close_and_unlink(m1_handles)
+        # correctness is checked on every attempt, never retried away
+        assert [r["n_trades"] for r in pool_results] == reference, (
+            "process-pool trade counts diverged from the single-process reference "
+            "-- shared-memory reconstruction is not bit-identical to the real bars/M1 frames"
+        )
+        return single_per_sec, pool_per_sec
+
+    # Lenient (>= 1.2x, not the ~3x this repo's laptop actually sees) because this is a
+    # shared/noisy box and the fixed per-worker startup cost (numba warm-up + shared-memory
+    # attach) matters at this grid size -- see the perf engineer's report for the fuller
+    # sweep.  Timing only: up to 3 attempts, since a transient background load can hit
+    # either side; a real regression (per-task pickling) fails all three.
+    seen = []
+    for _ in range(3):
+        single_per_sec, pool_per_sec = _attempt()
+        seen.append((single_per_sec, pool_per_sec))
+        if pool_per_sec >= single_per_sec * 1.2:
+            break
+    else:
+        raise AssertionError(
+            f"pool ({n_workers} workers) throughput did not beat single-process by 1.2x in 3 attempts: "
+            + ", ".join(f"{p:.1f}/s vs {q:.1f}/s" for q, p in seen))

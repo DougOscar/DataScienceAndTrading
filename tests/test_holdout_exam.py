@@ -324,3 +324,37 @@ def test_load_bars_serves_holdout_only_up_to_the_exam_horizon(monkeypatch):
     acc["end"] = None                                                               # after a PASS
     bars = data.load_bars("EURUSD", "H1", end="2025-07-01", include_holdout=True, system="probe")
     assert bars["ts"].max() >= datetime(2025, 6, 30)
+
+
+class _TradesEvaluator:
+    """Returns the selected configuration's trades, as a real evaluator would."""
+
+    cost = None
+
+    def __init__(self, trades):
+        self.trades, self.calls = trades, 0
+
+    def __call__(self, params, *, cost=None):
+        from quantlab.contracts import Outcome
+        self.calls += 1
+        return Outcome(daily=pl.DataFrame({"date": [], "ret": []}), trades=self.trades, metrics={})
+
+
+def test_rebuild_without_wfo_gets_trades_like_evaluate_gates(manifest, clean_tree, tmp_path):
+    """PR #22 review: without a WFO series the band's trade range comes from the selected trial's
+    trades.  The rebuild used to ignore them (selected_trades=None), so the band recomputed at
+    unlock (which fetches them from the evaluator) never matched and the unlock was refused."""
+    study, trades = make_study(seed=5, wfo_sr=None)
+    ld = register(study, tmp_path)
+    G.evaluate_gates(study, None, periods_per_year=260.0, selected_trades=trades, ledger_dir=ld,
+                     holdout_symbols="EURUSD", log=True)
+    manifest(TWO_YEARS_END)
+    with pytest.raises(G.GateError, match="no WFO series"):
+        G.rebuild_holdout_band(study, periods_per_year=260.0, reason="newer data", ledger_dir=ld)
+    ev = _TradesEvaluator(trades)
+    new = G.rebuild_holdout_band(study, periods_per_year=260.0, reason="newer data", evaluator=ev, ledger_dir=ld)
+    assert ev.calls == 1 and new["trades_lo"] is not None
+    horizon = data.holdout_horizon("FBS", ["EURUSD"], periods_per_year=260.0)
+    same = G._build_holdout_band(study, horizon, 260.0, n_boot=S.HOLDOUT_BAND_N_BOOT,
+                                 seed=S.holdout_band_seed(study.study_id), selected_trades=trades).as_dict()
+    assert new == same

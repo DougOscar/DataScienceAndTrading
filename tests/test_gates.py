@@ -1089,3 +1089,30 @@ def test_explicit_spec_must_match_evaluator_symbol(good):
     with pytest.raises(G.GateError, match="N7"):
         run(study, trades, evaluator=ev, spec=xau)
     assert run(study, trades, evaluator=ev, spec=EURUSD)[0].row("cost_stress_sharpe").status == "PASS"
+
+
+class _CostSpy:
+    """Wraps an evaluator and records the ``cost`` it is called with."""
+
+    def __init__(self, inner):
+        self.inner, self.seen = inner, []
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def __call__(self, params, *, cost=None):
+        self.seen.append(cost)
+        return self.inner(params, cost=cost)
+
+
+def test_judge_plateau_uses_the_study_cost_model(tmp_path):
+    """PR #22 review: the judge re-ran the perturbations at the evaluator's default cost instead of
+    the study's base cost, so a study selected at 1.3× spread was judged at 1.0×."""
+    from quantlab.costs import CostModel
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 100, 10, plateau_step=20)])
+    ev = SyntheticEvaluator(bounds={"a": (0, 100)}, bumps=({"center": {"a": 50}, "height": 2.0, "width": 0.3},),
+                            base_sharpe=0.5, rho=1.0, seed=3)
+    res = _study_run(ev, sp, tmp_path, "plateau-cost")
+    spy, cm = _CostSpy(ev), CostModel(spread_multiplier=1.3)
+    G.judge_plateau(res, spy, space=sp, radius=0.2, periods_per_year=PPY, cost=cm)
+    assert len(spy.seen) == 5 and all(c is cm for c in spy.seen)
