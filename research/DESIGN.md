@@ -104,9 +104,11 @@ The model split follows your answer: Opus for judgment roles, Sonnet for mechani
 S0 Idea ─► hypothesis card (GitHub issue, label `hypothesis`)
    ★ A  you approve the batch of ideas to test
 S1 Power check      statistician: can the dev period (2016-05→2025-05) even show this edge?
-                    (MinTRL given the expected Sharpe and trade frequency) ─► may kill early
+                    (MinTRL at the expected Sharpe, and the DSR hurdle at the grid's trial
+                    count) ─► may kill early
 S2 Implement        engineer + look-ahead tests; red team audits the code          label `testing`
 S3 Baseline         prior parameters, costs on. Is the gross edge larger than the costs?
+                    (logged; kill if the gross edge's upper 95 % bound ≤ cost per trade)
 S4 Optimise         optimizer: CPCV/walk-forward, every trial logged, plateau selection
 S5 Validate         statistician: gates (§4)
 S6 Attack           red team
@@ -143,7 +145,7 @@ D1 MQL5/ONNX port + parity test ─► MT5
 | OOS Sharpe (CPCV path median) | ≥ 1.0 annualised | The minimum edge needed to enter a book |
 | Walk-forward procedure OOS | Sharpe ≥ 0.5 over the whole WFO OOS span, and > 0 over its most recent third | The re-optimisation procedure (§4.6) still works, and recently (v1.2, new) |
 | Cost stress | Sharpe > 0.5 at 1.5× spread + 1 pip-equivalent adverse slippage on every market and stop fill (FX 1 pip; gold 0.1, silver 0.01; crypto 1× median spread; B3 1 tick) | The edge must survive worse fills |
-| Parameter plateau | The judge re-runs the system at ±r/2 and ±r on each parameter axis and on a joint axis (all parameters together); on the **weakest axis** ≥ 60% of points keep ≥ 50% of the peak Sharpe (and > 0). Each numeric parameter pre-registers its scale (relative, r = 0.20 default, floor 0.10; or an absolute step), reviewed by the red team at S2; a move is never smaller than 5% of the declared range. Numeric categoricals are refused (use numeric parameters with levels); unordered categoricals are not judged and are reviewed at S2 | Rejects sharp, fragile optima, independent of grid resolution and parametrisation tricks |
+| Parameter plateau | The judge re-runs the system at ±r/2 and ±r on each parameter axis and on a joint axis (all parameters together); on the **weakest axis** ≥ 60% of points keep ≥ 50% of the peak Sharpe (and > 0). Each numeric parameter pre-registers its scale (relative, r = 0.20 default, floor 0.10; or an absolute step), reviewed by the red team at S2; the outer move is never smaller than 5% of the declared range (the inner move 2.5%). A selected configuration that loses money in-sample (peak Sharpe ≤ 0) fails the plateau gate as "not assessable". Numeric categoricals are refused (use numeric parameters with levels); unordered categoricals are not judged and are reviewed at S2 | Rejects sharp, fragile optima, independent of grid resolution and parametrisation tricks |
 | Time stability | Positive in ≥ 60% of years, and no single year > 40% of total PnL | Your own finding: past edges were concentrated in 2016–18 and 2021–22 |
 | Trade count | ≥ MinTRL | Enough evidence for the claimed Sharpe |
 | Mechanism check | Component ablation matches the hypothesis (statistician runs `stats.ablation_compare`, red team attacks it; the main session records the decision with its evidence via `ledger.record_mechanism_review`, reviewed by the user at checkpoint B) | The system must make money *for the stated reason* |

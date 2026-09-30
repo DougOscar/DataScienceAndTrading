@@ -21,12 +21,22 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
   positive params whose zero is economically meaningful (lookbacks, multipliers), else an absolute
   step — with a one-line justification. A scale much finer than the card's economic neighbourhood,
   a relative scale on an offset/threshold, a radius below 0.10, or a range declared narrower than
-  the mechanism justifies (the judge's floor is 5 % of the declared range) is a finding. The code's
-  `SearchSpace` must carry exactly the card's scales and radius.
+  the mechanism justifies (the judge's outer move is never below 5 % of the declared range, the
+  inner 2.5 %) is a finding.
 - Numeric knobs declared as categoricals (refused by `opt`); unordered categoricals not named and
-  justified on the card (the plateau does not judge them).
+  justified on the card (the plateau does not judge them). Preview the judge's actual moves with
+  `quantlab.gates.plateau_perturbations(space, params, radius)` at the prior and the range ends;
+  flag axes that barely bind (e.g. a time exit that rarely fires) as near-duplicate grid dimensions.
 - Risk type (A–D), book/symbols/timeframe, expected Sharpe and trade frequency (consistent with the
-  S1 power check), and a mechanism ablation that could actually contradict the mechanism.
+  S1 power check, including the DSR hurdle at the grid's trial count), fixed constants and their
+  definitions (e.g. which ATR), and a mechanism ablation that could actually contradict the
+  mechanism: run out of sample or with re-selection inside each null draw (an in-sample best-of-N
+  vs a fixed-configuration null is biased towards "confirmed"), with its power stated.
+- The null for a full system is the entry-signal null (random side at the same timestamps).
+- Cost-model status (is `data/broker/` calibrated for these symbols? uncalibrated = swap 0) and
+  prior work on the same data (legacy notebooks, earlier grids): those trials must be added to the
+  DSR's N via `prior_trials=`.
+- The code's `SearchSpace` vs the card is checked at S4, once the space exists (S2 can't check it).
 
 ## Attack checklist (run probes with code; don't just read)
 **Look-ahead / leakage**

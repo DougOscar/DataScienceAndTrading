@@ -53,24 +53,47 @@ to publish) create the issue with `gh issue create --label hypothesis`. Card tem
 **Falsifiable prediction:** what we should observe if true, and what result kills it
 **Mechanism ablation:** which component to switch off / randomise to test the mechanism, and the
   result that would contradict it (DESIGN §4.2 mechanism gate)
-**Rules:** exact entry / exit / stop / sizing, unambiguous enough to code without asking
+**Rules:** exact entry / exit / stop / sizing, unambiguous enough to code without asking. A strategy
+  only emits signals from bars; it cannot see its own position, so do not write rules that depend
+  on whether a stop was hit (the engine resolves stops, targets and reversals)
+**Fixed constants:** named constants that are not searched (e.g. ATR period 14) and their definition
+  (e.g. ATR = simple mean of true range, MT5 `iATR`; or Wilder RMA)
 **Risk semantics:** type A | B | C | D (DESIGN §5) + stop/target definition
 **Symbols:** …   **Timeframe:** …
 **Expected Sharpe (annualised, net of costs):** …   **Expected trades/year (per symbol):** …
-  (both feed the S1 power check — state how you estimated them)
+  (both feed the S1 power check — state how you estimated them). The Sharpe is for the prior
+  (mid-grid) configuration, before optimisation. Trades = entries (round trips); also give the
+  expected share of time in the market. S1 checks MinTRL **and** the DSR hurdle at the grid's
+  trial count, so a large grid needs a larger expected Sharpe
 **Free parameters (pre-registered; reviewed by the red team at S2):**
-| name | type | range [lo, hi] (or levels) | plateau scale | economic justification (1 line) |
-|---|---|---|---|---|
-| e.g. lookback | int | [20, 120] | relative | a 20 % longer/shorter lookback is the same idea |
-| e.g. z_entry | float | [1.0, 3.0] | step 0.25 | threshold; zero is arbitrary, so absolute |
+| name | type | range [lo, hi] | grid step (or levels) | prior (mid-grid) | plateau scale | economic justification (1 line) |
+|---|---|---|---|---|---|---|
+| e.g. lookback | int | [20, 120] | 10 | 70 | relative | a 20 % longer/shorter lookback is the same idea |
+| e.g. z_entry | float | [1.0, 3.0] | 0.25 | 2.0 | step 0.25 | threshold; zero is arbitrary, so absolute |
   Plateau scale: `relative` (±r/2, ±r of the value; strictly positive params whose zero is
   meaningful — lookbacks, multipliers) or an absolute `step` in the param's units (offsets,
   thresholds). Optional plateau radius r (default 0.20, floor 0.10). The judge never perturbs
   less than 5 % of the declared range, so declare the range the mechanism justifies, not a
   narrow one. Numeric knobs are never categoricals (use explicit levels); any unordered
-  categorical is named and justified here (the plateau does not judge it).
-**Cost sensitivity:** expected gross edge/trade vs spread (+ swap if multi-day)
-**Null / benchmark for component tests:** (e.g., random filter with same selectivity)
+  categorical is named and justified here (the plateau does not judge it). The judge evaluates
+  integer parameters off-grid, snapping to the next distinct integer, and the outer move is
+  never smaller than 5 % of the declared range (inner move 2.5 %), so near the low end of a
+  range a "relative" scale behaves like an absolute step. Prefer parameters that bind on a
+  meaningful share of trades (a time exit that almost never fires is a near-duplicate axis).
+**Cost sensitivity:** expected gross edge/trade vs spread (+ swap if multi-day). State whether the
+  cost model is calibrated for these symbols (`data/broker/` export present); without it, swap and
+  commission are charged as 0 and the costs are optimistic. Note rollover-hour fills (FBS widens
+  the spread for the whole 00:00 hour)
+**Mechanism ablation — in/out of sample:** run the ablation on walk-forward OOS trades, or re-select
+  the best configuration inside each null draw; comparing the in-sample best-of-N with a
+  fixed-configuration null is biased towards "confirmed". State the expected power; an underpowered
+  ablation can only be "inconclusive"
+**Null / benchmark:** for a **component** (filter / risk rule / entry signal) the DESIGN §4.2 component
+  null; for a **full system**, the entry-signal null (random side at the same timestamps and
+  holding times, `stats.random_side_null`), with stops as in the real system. State the pass rule
+**Prior work on the same data:** legacy notebooks, earlier studies or mining on the same
+  symbols/timeframe (with their number of configurations). These trials are added to the DSR's N
+  (`prior_trials=`)
 **Sources:** full citations
 **Provenance:** literature | forum | mined (N candidates scanned)
 ```
