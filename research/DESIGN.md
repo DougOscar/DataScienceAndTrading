@@ -140,7 +140,7 @@ D1 MQL5/ONNX port + parity test ─► MT5
 
 | Gate | Threshold | Why |
 |---|---|---|
-| Deflated Sharpe probability | ≥ 0.95 | Is the Sharpe real after accounting for *all* trials? Hurdle from the null sampling variance 1/(T−1) and the **raw** trial count of the study plus every other ledger study sharing its normalised system name or issue (earlier attempts, bug-fix re-runs, renamed variants), plus data-mining trials declared on the card (v1.2; effective-N estimates are diagnostics only) |
+| Deflated Sharpe probability | ≥ 0.95 | Is the Sharpe real after accounting for *all* trials? Hurdle from the null sampling variance 1/(T−1) and the **raw** trial count of the study plus every other ledger study sharing its normalised system name or issue (earlier attempts, bug-fix re-runs, renamed variants) and their logged diagnostic evaluations (`ledger.log_diagnostic`), plus data-mining and prior-work trials declared on the card (v1.2; effective-N estimates are diagnostics only) |
 | CSCV out-of-sample loss | P(OOS Sharpe of the in-sample best < 0) < 0.10 | Does the chosen configuration lose money out of sample? (v1.2: replaces PBO < 0.30, which stays as a diagnostic) |
 | OOS Sharpe (CPCV path median) | ≥ 1.0 annualised | The minimum edge needed to enter a book |
 | Walk-forward procedure OOS | Sharpe ≥ 0.5 over the whole WFO OOS span, and > 0 over its most recent third | The re-optimisation procedure (§4.6) still works, and recently (v1.2, new) |
@@ -198,7 +198,7 @@ Fail → `killed`, with no re-tries on the same holdout. NOT_DECISIVE is not a f
 
 Edges decay, so a system is validated as a **procedure**, not as one fixed parameter set.
 
-1. **The re-optimisation schedule is part of the system.** The optimizer fixes a schedule (e.g., re-fit quarterly on an anchored or rolling window of length L) and validates *that schedule* with an anchored walk-forward. Every re-fit uses only data available at that moment. CPCV (full dev window) feeds the OOS-Sharpe and CSCV-loss gates; the walk-forward OOS series feeds the `wfo_oos` gate and the holdout band; the plateau is judge-run on the full dev window (§4.2).
+1. **The re-optimisation schedule is part of the system.** The optimizer fixes a schedule (e.g., re-fit quarterly on an anchored or rolling window of length L) and validates *that schedule* with an anchored walk-forward. Every re-fit uses only data available at that moment. A final test window shorter than a quarter of the median window (`WFOConfig.min_test_rows`) is merged into the previous re-fit's window rather than traded on a few days of evidence. CPCV (full dev window) feeds the OOS-Sharpe and CSCV-loss gates; the walk-forward OOS series feeds the `wfo_oos` gate and the holdout band; the plateau is judge-run on the full dev window (§4.2).
 2. **The holdout exam runs the procedure.** The scheduled re-fits happen *inside* the holdout, exactly as they would live. The procedure is frozen; the parameters are allowed to move.
 3. **Parameter drift is a diagnostic.** If the chosen parameters jump between very different regions from one re-fit to the next, the edge is probably unstable. This counts as a red-team finding.
 4. **Decay review** (`/decay-review <system>`, run when you ask). Each promoted system is re-run on all data after its holdout (newer MT5 exports). Checks:

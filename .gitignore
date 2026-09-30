@@ -70,3 +70,4 @@ research/systems/_drafts/
 .claude/worktrees/
 research/calibration/output/
 research/dryrun/studies/
+.pytest_scratch/

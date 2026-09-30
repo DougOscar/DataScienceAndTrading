@@ -18,6 +18,7 @@ from .. import stats as st
 from ..contracts import RiskType
 from ..gates import GATE_LABELS, GATE_THRESHOLDS, WFO_RECENT_FRACTION
 from . import _applicability as appl
+from ._fmt import dash, gate_threshold_text
 
 Row = dict[str, Any]
 
@@ -49,7 +50,8 @@ def returns_and_risk(daily: pl.DataFrame | None, ppy: float, budget: Any
     if daily is None or daily.height < 2:
         why = "no daily-returns series for the selected configuration (trial store has no matching column)"
         for name in ("cagr", "mean_monthly", "ret_at_budget", "sharpe", "sortino", "calmar", "psr0",
-                    "max_dd", "longest_dd_days", "ulcer", "cvar95", "worst_month", "pct_time_underwater"):
+                    "max_dd", "longest_dd_days", "ulcer", "cvar95", "worst_month", "pct_time_underwater",
+                    "skew", "kurtosis"):
             rows.append(_row(name, False, why))
         return metrics, interp, rows
 
@@ -72,8 +74,15 @@ def returns_and_risk(daily: pl.DataFrame | None, ppy: float, budget: Any
     interp["cvar95"] = f"Daily CVaR95 {s['cvar95']:.2%}: mean return on the worst 5% of days."
     interp["worst_month"] = f"Worst calendar month {s['worst_month']:.2%}."
     interp["pct_time_underwater"] = f"{metrics['pct_time_underwater']:.0%} of trading days were below the running peak."
+    sk = s["skew"]
+    tail = ("right tail (occasional large wins)" if np.isfinite(sk) and sk > 0 else
+           "left tail (occasional large losses)" if np.isfinite(sk) and sk < 0 else
+           "roughly symmetric" if np.isfinite(sk) else "undefined")
+    interp["skew"] = f"Skew {dash(sk, '.2f')}: {tail} in the daily-return distribution."
+    interp["kurtosis"] = (f"Kurtosis {dash(s['kurtosis'], '.2f')}: normal = 3; higher means fatter tails "
+                          "than a normal distribution.")
     for name in ("cagr", "mean_monthly", "sharpe", "sortino", "calmar", "max_dd", "longest_dd_days",
-                "ulcer", "cvar95", "worst_month", "pct_time_underwater"):
+                "ulcer", "cvar95", "worst_month", "pct_time_underwater", "skew", "kurtosis"):
         rows.append(_row(name, True, "always reported (DESIGN §5)"))
 
     # PSR against zero: deterministic, not a §4.2 gate (DSR — the deflated, N-trial-adjusted
@@ -102,7 +111,17 @@ def returns_and_risk(daily: pl.DataFrame | None, ppy: float, budget: Any
 
 
 # --------------------------------------------------------------------------- costs
-def costs(trades: pl.DataFrame | None) -> tuple[dict[str, Any], dict[str, str], list[Row]]:
+def _cost_model_uncalibrated(evaluator: Any) -> tuple[bool, str | None]:
+    """(is the evaluator's cost model the uncalibrated broker-export fallback?, its version
+    string) -- ``costs.CostModel.version`` always carries the substring "uncalibrated" for the
+    fallback (its class default and every specialised fallback spec), so this needs no new
+    calibration flag of its own (#50)."""
+    cost_model = getattr(evaluator, "cost", None)
+    version = getattr(cost_model, "version", None) if cost_model is not None else None
+    return bool(version) and "uncalibrated" in str(version), version
+
+
+def costs(trades: pl.DataFrame | None, evaluator: Any = None) -> tuple[dict[str, Any], dict[str, str], list[Row]]:
     names = ("cost_pct_of_gross", "break_even_spread_multiple", "swap_share_of_costs")
     if trades is None or trades.height == 0:
         why = "no trades (no evaluator given, or the selected configuration produced none)"
@@ -112,18 +131,33 @@ def costs(trades: pl.DataFrame | None) -> tuple[dict[str, Any], dict[str, str], 
         why = "trades frame lacks the sizing cost columns (spread_cost_points / swap / commission / value_per_point)"
         return {}, {}, [_row(n, False, why) for n in names]
     metrics = {n: cb[n] for n in names}
+
+    if cb.get("cost_pct_of_gross_note"):
+        cpg_txt = (f"Costs as % of gross P&L: {cb['cost_pct_of_gross_note']} (gross {cb['gross_pnl_ccy']:,.0f}, "
+                  f"net {cb['net_pnl_ccy']:,.0f}, cost {cb['cost_total_ccy']:,.0f}, 100k nominal).")
+    else:
+        cpg_txt = (f"Costs are {cb['cost_pct_of_gross']:.1%} of gross P&L "
+                  f"(gross {cb['gross_pnl_ccy']:,.0f}, net {cb['net_pnl_ccy']:,.0f}, "
+                  f"cost {cb['cost_total_ccy']:,.0f}, 100k nominal).")
+
+    uncalibrated, cm_version = _cost_model_uncalibrated(evaluator)
+    swap_is_zero = np.isfinite(cb["swap_ccy"]) and abs(cb["swap_ccy"]) < 1e-9
+    if swap_is_zero and uncalibrated:
+        swap_txt = (f"Swap is 0% of total cost -- the cost model ('{cm_version}') is uncalibrated, so this is "
+                   "the broker-export fallback's silent swap=0, not a measured zero-swap edge (#50).")
+    elif np.isfinite(cb["swap_share_of_costs"]):
+        swap_txt = f"Swap is {cb['swap_share_of_costs']:.0%} of total cost."
+    else:
+        swap_txt = "Swap share of costs: not defined (no net cost, or swap was a net credit)."
+
     interp = {
-        "cost_pct_of_gross": (f"Costs are {cb['cost_pct_of_gross']:.1%} of gross P&L "
-                              f"(gross {cb['gross_pnl_ccy']:,.0f}, net {cb['net_pnl_ccy']:,.0f}, "
-                              f"cost {cb['cost_total_ccy']:,.0f}, 100k nominal)."),
+        "cost_pct_of_gross": cpg_txt,
         "break_even_spread_multiple": ("Break-even spread multiple "
                                        f"{cb['break_even_spread_multiple']:.2f}x: spread would have to widen by "
                                        "this multiple (other costs held fixed) to erase the net P&L."
                                        if np.isfinite(cb["break_even_spread_multiple"]) else
                                        "Break-even spread multiple: not defined (net P&L <= 0 or no spread cost)."),
-        "swap_share_of_costs": (f"Swap is {cb['swap_share_of_costs']:.0%} of total cost."
-                                if np.isfinite(cb["swap_share_of_costs"]) else
-                                "Swap share of costs: not defined (no net cost, or swap was a net credit)."),
+        "swap_share_of_costs": swap_txt,
     }
     rows = [_row(n, True, "always reported (DESIGN §5); approximated from the trades frame's cost columns")
            for n in names]
@@ -136,39 +170,83 @@ def robustness(gates_event: dict[str, Any] | None, pbo: dict[str, Any] | None, h
     metrics: dict[str, Any] = {}
     interp: dict[str, str] = {}
     rows: list[Row] = []
+    # DESIGN §4.2's full gate list (GATE_ORDER): trade_count and mechanism used to be left off
+    # both this table and its interpretations (#64) even though the gates event logs them like
+    # every other gate.
     gate_names = ("dsr", "cscv_oos_loss", "oos_sharpe", "wfo_oos", "plateau", "cost_stress_sharpe",
-                 "positive_years", "max_year_share")
+                 "positive_years", "max_year_share", "trade_count", "mechanism")
     if gates_event is None:
         metrics["gate_verdict"] = "not validated"
+        interp["gate_verdict"] = "No gates event logged for this study yet (S5 has not run)."
         for n in gate_names:
             rows.append(_row(n, False, "no gates event logged for this study yet (S5 has not run)"))
     else:
         gv = gates_event.get("gates") or {}
         gs = gates_event.get("gate_status") or {}
         plateau = gates_event.get("plateau") or {}
-        metrics["gate_verdict"] = gates_event.get("verdict")
+        verdict = gates_event.get("verdict")
+        metrics["gate_verdict"] = verdict
+        interp["gate_verdict"] = (f"Gate verdict {verdict} (gate_run {gates_event.get('gate_run')}): "
+                                  "PASS needs every statistical gate PASS and the mechanism gate PASS "
+                                  "(DESIGN §4.2); FAIL is a kill unless an improvement attempt remains.")
+        oos_sharpe = gv.get("oos_sharpe")
+        oos_nonpositive = isinstance(oos_sharpe, (int, float)) and np.isfinite(oos_sharpe) and oos_sharpe <= 0
         for n in gate_names:
             v = gv.get(n)
             metrics[n] = v
             status = gs.get(n)
-            thr = GATE_THRESHOLDS.get(n)
-            thr_txt = f"{thr[0]} {thr[1]}" if thr else ""
+            thr_txt = gate_threshold_text(GATE_THRESHOLDS.get(n))
             label = GATE_LABELS.get(n, n)
+            v_txt = dash(v, ".2f" if n in ("plateau", "wfo_oos") else ".0f" if n == "trade_count" else ".3g")
             if n == "plateau":
-                interp[n] = (f"{label} {('%.2f' % v) if v is not None else '—'} ({thr_txt}, status {status}): "
-                            f"weakest parameter axis '{plateau.get('weakest_axis')}' keeps >= half the peak "
-                            f"Sharpe on {('%.0f%%' % (v * 100)) if v is not None else 'n/a'} of its judge-run "
-                            f"perturbations.")
+                peak = plateau.get("peak_sharpe")
+                peak_nonpositive = peak is not None and np.isfinite(peak) and peak <= 0
+                if peak_nonpositive:
+                    # #39/#49: a losing centre gives the judge no signal at all -- "sharp, fragile
+                    # optimum" (the FAIL wording for a *real* plateau failure) would be misleading.
+                    interp[n] = (f"{label} {v_txt} ({thr_txt}, status {status}): not assessable -- the "
+                                f"selected configuration loses money in-sample (peak Sharpe {dash(peak, '.2f')} "
+                                "<= 0), so there is no peak for the plateau judge to test around.")
+                else:
+                    interp[n] = (f"{label} {v_txt} ({thr_txt}, status {status}): "
+                                f"weakest parameter axis '{plateau.get('weakest_axis')}' keeps >= half the peak "
+                                f"Sharpe on {('%.0f%%' % (v * 100)) if v is not None else 'n/a'} of its judge-run "
+                                f"perturbations.")
             elif n == "wfo_oos":
                 rec_txt = (f"; recent third (recomputed from the stored WFO OOS series, same "
                           f"{WFO_RECENT_FRACTION:.0%} window the gate uses) {wfo_recent['sharpe_recent']:.2f}"
                           if wfo_recent and wfo_recent.get("available") else "; recent third: not available")
-                interp[n] = (f"{label} {('%.2f' % v) if v is not None else '—'} ({thr_txt}, status {status})"
-                            f"{rec_txt}.")
+                interp[n] = f"{label} {v_txt} ({thr_txt}, status {status}){rec_txt}."
+            elif n == "trade_count":
+                # #52: MinTRL (the threshold this gate compares against) is infinite at a
+                # non-positive claimed Sharpe -- no finite trade count could ever clear it. The
+                # exact MinTRL figure isn't logged (only this gate's own trade/day count is,
+                # DESIGN §8), so this reads the situation off the already-logged oos_sharpe
+                # rather than recomputing MinTRL itself.
+                base = f"{label}: {v_txt} observed ({thr_txt}, status {status})"
+                if status in ("FAIL", "SKIPPED") and oos_nonpositive:
+                    interp[n] = (base + ": MinTRL is not reachable at this Sharpe -- a non-positive edge "
+                                "needs an infinite trade count to clear the 95% MinTRL bar.")
+                else:
+                    interp[n] = base + "."
+            elif n == "mechanism":
+                if status == "MANUAL":
+                    interp[n] = (f"{label}: MANUAL -- no automated mechanism_check was supplied; a human "
+                                "records the component-ablation decision (ledger.record_mechanism_review, "
+                                "DESIGN §4.2, checkpoint B).")
+                else:
+                    verb = "matches" if status == "PASS" else "does not match"
+                    interp[n] = f"{label}: {status} -- the component ablation {verb} the stated hypothesis."
             else:
-                interp[n] = f"{label} {('%.3g' % v) if v is not None else '—'} ({thr_txt}, status {status})."
+                interp[n] = f"{label} {v_txt} ({thr_txt}, status {status})."
             rows.append(_row(n, True, f"logged gates event, gate_run {gates_event.get('gate_run')}"))
         metrics["wfo_oos_recent"] = (wfo_recent or {}).get("sharpe_recent")
+        if wfo_recent and wfo_recent.get("available"):
+            interp["wfo_oos_recent"] = (f"WFO OOS Sharpe, recent {WFO_RECENT_FRACTION:.0%} of the stored "
+                                        f"series {dash(metrics['wfo_oos_recent'], '.2f')}: same series as the "
+                                        "wfo_oos gate above, not a second measurement of it.")
+        else:
+            interp["wfo_oos_recent"] = "WFO OOS recent-third Sharpe: not available (no stored WFO OOS series)."
 
     hs = holdout.get("status")
     metrics["holdout_status"] = hs if holdout.get("unlocked") else "not unlocked"
@@ -216,7 +294,12 @@ def trade_level(risk_type: RiskType, trades: pl.DataFrame | None, dates: pl.Seri
     metrics["profit_factor"] = ts.get("profit_factor")
     metrics["n_trades"] = ts.get("n_trades")
     interp["win_rate"] = f"Win rate {ts.get('win_rate', float('nan')):.0%} over {ts.get('n_trades', 0):.0f} trades."
-    interp["profit_factor"] = f"Profit factor {ts.get('profit_factor', float('nan')):.2f} (gross win / gross loss)."
+    pf = ts.get("profit_factor", float("nan"))
+    pf_txt = "∞" if pf == float("inf") else dash(pf, ".2f")
+    interp["profit_factor"] = (f"Profit factor {pf_txt} (gross win / gross loss)"
+                               + (": no losing trades, so there is no loss to divide by." if pf == float("inf")
+                                  else "."))
+    interp["n_trades"] = f"{ts.get('n_trades', 0):.0f} trades went into the metrics on this page (skipped trades excluded)."
     if risk_type is RiskType.D:
         r = appl.not_relevant_reason(risk_type, "win_rate_profit_factor")
         excl("win_rate_profit_factor", r)
@@ -232,6 +315,8 @@ def trade_level(risk_type: RiskType, trades: pl.DataFrame | None, dates: pl.Seri
         metrics["hold_days_p95"] = hs.get("hold_days_p95")
         interp["holding_time"] = (f"Holding time: median-scale {hs.get('avg_hold_bars', float('nan')):.1f} bars; "
                                   f"95th percentile {hs.get('hold_days_p95', float('nan')):.0f} trading days.")
+        interp["expectancy_points"] = f"Mean P&L per trade {dash(metrics['expectancy_points'], '+.1f')} points."
+        interp["hold_days_p95"] = f"95th percentile holding time: {dash(metrics['hold_days_p95'], '.0f')} trading days."
         incl("holding_time")
     else:
         excl("holding_time", "no entry_ts/exit_ts in the trades frame")
@@ -266,6 +351,7 @@ def trade_level(risk_type: RiskType, trades: pl.DataFrame | None, dates: pl.Seri
             exp_pts = float(tnp["pnl_points"].mean()) if tnp.height else float("nan")
             metrics["expectancy_points"] = exp_pts
             interp["raw_points_per_trade"] = f"Mean P&L per trade {exp_pts:+.1f} points."
+            interp["expectancy_points"] = interp["raw_points_per_trade"]
             incl("raw_points_per_trade")
         else:
             excl("raw_points_per_trade", "no pnl_points column in the trades frame")

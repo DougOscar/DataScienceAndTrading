@@ -3,8 +3,9 @@
 Two git-tracked JSONL files under ``research/ledger/``:
 
 * ``studies.jsonl`` — one *event* per line (``study_created``, ``gates``,
-  ``decision``, ``note`` …).  A study's current state is the fold of its events;
-  nothing is ever rewritten.
+  ``gates_preview`` (an unlogged ``evaluate_gates(log=False)`` run: visible, never a gate run,
+  never a registered band), ``diagnostic`` (:func:`log_diagnostic`), ``decision``, ``note`` …).
+  A study's current state is the fold of its events; nothing is ever rewritten.
 * ``holdout_access.jsonl`` — ``holdout_unlock`` and ``holdout_exam`` events (one unlock per
   system family, except that a NOT_DECISIVE exam may be followed by a re-exam on a longer
   horizon; DESIGN §4.4, see the "holdout" section below; a FAIL is final) and ``holdout_read``
@@ -261,18 +262,52 @@ def system_prior_trials(book: str, system: str, *, exclude_study: str | None = N
                         ledger_dir: Path | None = None) -> tuple[float, list[str]]:
     """Raw trials of the *other* studies of a system (DESIGN §0.3 / §4.2 v1.2 DSR: N = this
     study's raw trials + earlier attempts').  Studies with ``attempt > max_attempt`` are
-    ignored (re-validating attempt 1 must not count attempt 2).  Returns (total, study ids)."""
+    ignored (re-validating attempt 1 must not count attempt 2).  Each study contributes its own
+    trial count plus its logged diagnostic evaluations (:func:`log_diagnostic`).  Returns
+    (total, study ids)."""
     b = config.get_book(book).name
     total, used = 0.0, []
+    diag = diagnostic_evaluations(ledger_dir=ledger_dir)
     for sid, s in studies(ledger_dir).items():
         if sid == exclude_study or s.get("book") != b or s.get("system") != system:
             continue
         att = s.get("attempt")
         if max_attempt is not None and att is not None and int(att) > int(max_attempt):
             continue
-        total += study_trial_count(s)
+        total += study_trial_count(s) + diag.get(sid, 0.0)
         used.append(sid)
     return total, used
+
+
+def diagnostic_evaluations(study_id: str | None = None, *, ledger_dir: Path | None = None) -> float | dict[str, float]:
+    """Evaluations logged with :func:`log_diagnostic` — for one study (float), or for every study
+    (dict study_id → total) when ``study_id`` is None."""
+    tot: dict[str, float] = {}
+    for r in _read(_ledger_dir(ledger_dir) / STUDIES_FILE):
+        if r.get("event") == "diagnostic":
+            d = r.get("diagnostic") or {}
+            tot[r["study_id"]] = tot.get(r["study_id"], 0.0) + float(d.get("n_evaluations") or 0)
+    return tot if study_id is None else tot.get(study_id, 0.0)
+
+
+def log_diagnostic(study_id: str, *, n_evaluations: int, scope: str, note: str,
+                   ledger_dir: Path | None = None) -> dict[str, Any]:
+    """Record diagnostic evaluations run on a study after (or beside) its search — e.g. the red
+    team's cost-free grid or the same grid on other symbols (dry run #23, #69).  Event
+    ``diagnostic`` with ``diagnostic = {n_evaluations, scope, note}``.
+
+    **Counting rule:** these evaluations are new information about the same idea.  They do not
+    change this study's own DSR (they did not select its configuration), but they count as raw
+    trials of this study for every OTHER related study (same normalised system name or issue):
+    :func:`related_prior_trials` (the S5 DSR's N) and :func:`system_prior_trials` add them to the
+    study's own trial count.  So a follow-up built on what the diagnostics showed is deflated for
+    them.  ``n_evaluations`` must be a positive int; ``scope`` and ``note`` must be non-empty."""
+    if isinstance(n_evaluations, bool) or not isinstance(n_evaluations, int) or n_evaluations < 1:
+        raise LedgerError(f"n_evaluations must be a positive int, got {n_evaluations!r}")
+    if not str(scope).strip() or not str(note).strip():
+        raise LedgerError("a diagnostic needs a scope (what was evaluated) and a note (why)")
+    return log_event(study_id, "diagnostic", ledger_dir=ledger_dir,
+                     diagnostic={"n_evaluations": int(n_evaluations), "scope": str(scope), "note": str(note)})
 
 
 def study_events(study_id: str, event: str | None = None, *,
@@ -302,7 +337,9 @@ def related_prior_trials(study_id: str, *, ledger_dir: Path | None = None
     re-gating attempt 1 after attempts 2–5 exist counts them too) — that shares either the
     normalised system name (:func:`normalise_system`) or the issue number with ``study_id``,
     whatever its attempt label or book (red-team N2: relabelling attempt / system / issue must
-    not shrink the DSR's N).  Each study contributes its own count (:func:`study_trial_count`).
+    not shrink the DSR's N).  Each study contributes its own count (:func:`study_trial_count`)
+    **plus the diagnostic evaluations logged on it** (:func:`log_diagnostic`, dry run #23 #69).
+    The study's own diagnostics are not added to its own N (they did not select it).
 
     Returns ``(total, study ids used, this study's created row)``.  Raises :class:`LedgerError`
     if ``study_id`` is not in the ledger."""
@@ -313,6 +350,7 @@ def related_prior_trials(study_id: str, *, ledger_dir: Path | None = None
     sysn = normalise_system(own.get("system"))
     issue = own.get("issue")
     state = studies(ledger_dir)
+    diag = diagnostic_evaluations(ledger_dir=ledger_dir)
     total, used = 0.0, []
     for r in rows:
         if r.get("event") != "study_created" or r["study_id"] == study_id:
@@ -320,7 +358,7 @@ def related_prior_trials(study_id: str, *, ledger_dir: Path | None = None
         same_sys = bool(sysn) and normalise_system(r.get("system")) == sysn
         same_issue = issue is not None and r.get("issue") is not None and int(r["issue"]) == int(issue)
         if same_sys or same_issue:
-            total += study_trial_count(state.get(r["study_id"], {}))
+            total += study_trial_count(state.get(r["study_id"], {})) + diag.get(r["study_id"], 0.0)
             used.append(r["study_id"])
     return total, used, own
 

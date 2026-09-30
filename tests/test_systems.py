@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -343,7 +344,7 @@ def _kernel_available(name: str = "python3") -> str | None:
     return None
 
 
-def test_notebook_sections_0_to_2_execute_end_to_end(tmp_path, monkeypatch, real_probe_strategy_module):
+def test_notebook_sections_0_to_2_execute_end_to_end(monkeypatch, real_probe_strategy_module):
     pytest.importorskip("ipykernel")
     reason = _kernel_available("python3")
     if reason is not None:
@@ -351,33 +352,49 @@ def test_notebook_sections_0_to_2_execute_end_to_end(tmp_path, monkeypatch, real
     from nbconvert.preprocessors import ExecutePreprocessor
 
     slug = real_probe_strategy_module
-    d = systems.create_system(
-        "FBS", 9001, slug, name="Notebook Probe",
-        card_markdown=_card("**Risk semantics:** type C (no hard stop)."),
-        systems_dir=tmp_path,
-    )
-    nb = nbformat.read(d / f"{slug}.ipynb", as_version=4)
+    # #33: §0's sys.path fix walks UP from the notebook's own folder looking for `quantlab/` --
+    # that only finds anything when the folder is actually nested under the repo root, the same
+    # as every real (or sandboxed, e.g. research/dryrun/systems/) system folder is. An arbitrary
+    # tmp_path used to work here only because the test set PYTHONPATH by hand; now that the
+    # notebook finds its own root, this test has to put the folder somewhere that root exists --
+    # a gitignored scratch folder inside the repo (never the real research/systems/, so a crash
+    # mid-test can't leave a fake system behind).
+    import tempfile
+    scratch_root = config.ROOT / ".pytest_scratch"
+    scratch_root.mkdir(exist_ok=True)
+    sdir = Path(tempfile.mkdtemp(prefix="systems_", dir=scratch_root))
+    d = systems.system_dir("FBS", 9001, slug, systems_dir=sdir)
+    try:
+        systems.create_system(
+            "FBS", 9001, slug, name="Notebook Probe",
+            card_markdown=_card("**Risk semantics:** type C (no hard stop)."), systems_dir=sdir,
+        )
+        nb = nbformat.read(d / f"{slug}.ipynb", as_version=4)
 
-    # Kernel subprocesses inherit os.environ; PYTHONPATH makes `import quantlab` resolve from a
-    # cwd (the system folder, set via resources below) that isn't the repo root.
-    monkeypatch.setenv("PYTHONPATH", str(config.ROOT))
-    ep = ExecutePreprocessor(timeout=120, kernel_name="python3")
-    ep.preprocess(nb, resources={"metadata": {"path": str(d)}})
+        # No PYTHONPATH, and no editable install either -- the kernel subprocess's only way to
+        # `import quantlab` is §0's own sys.path walk-up. Explicitly scrub any PYTHONPATH this
+        # test process inherited, so a passing run proves the notebook's own fix, not the
+        # environment's.
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+        ep = ExecutePreprocessor(timeout=120, kernel_name="python3")
+        ep.preprocess(nb, resources={"metadata": {"path": str(d)}})
 
-    errors = [
-        (i, out.get("ename"), out.get("evalue"))
-        for i, cell in enumerate(nb.cells)
-        for out in cell.get("outputs", [])
-        if out.get("output_type") == "error"
-    ]
-    assert not errors, errors
+        errors = [
+            (i, out.get("ename"), out.get("evalue"))
+            for i, cell in enumerate(nb.cells)
+            for out in cell.get("outputs", [])
+            if out.get("output_type") == "error"
+        ]
+        assert not errors, errors
 
-    stream_text = "".join(
-        out.get("text", "") for cell in nb.cells for out in cell.get("outputs", [])
-        if out.get("output_type") == "stream"
-    )
-    assert "look-ahead audit clean" in stream_text
-    assert "RiskType.C" in stream_text
+        stream_text = "".join(
+            out.get("text", "") for cell in nb.cells for out in cell.get("outputs", [])
+            if out.get("output_type") == "stream"
+        )
+        assert "look-ahead audit clean" in stream_text
+        assert "RiskType.C" in stream_text
+    finally:
+        shutil.rmtree(sdir, ignore_errors=True)
 
 
 def test_create_system_reads_symbols_and_timeframe_from_the_card(tmp_path):
@@ -400,3 +417,117 @@ def test_risk_type_tolerates_markdown_emphasis(tmp_path, line):
     from quantlab import systems
     d = systems.create_system("FBS", 9, "toy_emph", name="T", card_markdown=f"# T\n{line}\n", systems_dir=tmp_path)
     assert systems.read_card(d / "hypothesis.md")["risk_type"] == line.split("type")[1].strip(" *`.")[0]
+
+
+# =============================================================================================
+# set_front_matter / find_study_id / log_baseline / card_space_corners (#28, #35, #31)
+# =============================================================================================
+def test_set_front_matter_merges_and_preserves_body(tmp_path):
+    d = systems.create_system("FBS", 5, "front_matter_probe", name="x", card_markdown=_card(),
+                              systems_dir=tmp_path)
+    path = d / "hypothesis.md"
+    before_body = systems.read_card(path)["body"]
+
+    systems.set_front_matter(path, study_id="fbs-0005-a1", extra=1)
+    card = systems.read_card(path)
+    assert card["study_id"] == "fbs-0005-a1"
+    assert card["extra"] == 1
+    assert card["risk_type"] == "A"          # untouched existing keys survive
+    assert card["body"] == before_body       # card body preserved verbatim
+
+    systems.set_front_matter(path, study_id="fbs-0005-a2")   # overwrite, no duplicate keys
+    assert systems.read_card(path)["study_id"] == "fbs-0005-a2"
+
+
+def test_set_front_matter_requires_front_matter(tmp_path):
+    p = tmp_path / "no_front_matter.md"
+    p.write_text("# no header\n")
+    with pytest.raises(ValueError, match="front matter"):
+        systems.set_front_matter(p, study_id="x")
+
+
+def _create_study(ledger_dir, **over):
+    from quantlab import ledger
+    fields = dict(
+        study_id="fbs-0099-a1", book="FBS", system="probe_baseline", issue=99, attempt=1,
+        dev_window=["2016-05-02", "2020-01-01"], cost_model_version="test-v0", cv_scheme="CPCV(1,1)",
+        git_commit="deadbeef", data_manifest_sha="deadbeef",
+    )
+    fields.update(over)
+    return ledger.create_study(ledger_dir=ledger_dir, **fields)
+
+
+def test_find_study_id_matches_book_system_issue(tmp_path):
+    ledger_dir = tmp_path / "ledger"
+    assert systems.find_study_id("FBS", 99, "probe_baseline", ledger_dir=ledger_dir) is None
+    _create_study(ledger_dir)
+    assert systems.find_study_id("FBS", 99, "probe_baseline", ledger_dir=ledger_dir) == "fbs-0099-a1"
+    # a different issue / a different (normalised) system does not match
+    assert systems.find_study_id("FBS", 100, "probe_baseline", ledger_dir=ledger_dir) is None
+    assert systems.find_study_id("FBS", 99, "not_this_system", ledger_dir=ledger_dir) is None
+    # the highest attempt wins (DESIGN §4.5: a later attempt supersedes an earlier, killed one)
+    _create_study(ledger_dir, study_id="fbs-0099-a2", attempt=2)
+    assert systems.find_study_id("FBS", 99, "probe_baseline", ledger_dir=ledger_dir) == "fbs-0099-a2"
+
+
+def test_log_baseline_is_a_noop_without_a_study_and_idempotent_with_one(tmp_path):
+    from quantlab import ledger
+    ledger_dir = tmp_path / "ledger"
+
+    # no study yet -- not a study row, nothing written (#28)
+    out = systems.log_baseline("FBS", 99, "probe_baseline", params={"lookback": 60},
+                               edge_breakdown={"gross_points_per_trade": 1.0}, cost_model_version="v0",
+                               ledger_dir=ledger_dir)
+    assert out is None
+    assert not (ledger_dir / "studies.jsonl").exists()
+
+    _create_study(ledger_dir)
+    logged = systems.log_baseline("FBS", 99, "probe_baseline", params={"lookback": 60},
+                                  edge_breakdown={"gross_points_per_trade": 1.0}, cost_model_version="v0",
+                                  ledger_dir=ledger_dir)
+    assert logged is not None
+    assert logged["event"] == "baseline" and logged["study_id"] == "fbs-0099-a1"
+    assert logged["params"] == {"lookback": 60}
+    assert logged["cost_model_version"] == "v0"
+
+    events = ledger.study_events("fbs-0099-a1", ledger_dir=ledger_dir)
+    assert [e["event"] for e in events] == ["study_created", "baseline"]
+
+    # idempotent: a second call never logs a second baseline event
+    again = systems.log_baseline("FBS", 99, "probe_baseline", params={"lookback": 60},
+                                 edge_breakdown={}, cost_model_version="v0", ledger_dir=ledger_dir)
+    assert again is None
+    assert len(ledger.study_events("fbs-0099-a1", ledger_dir=ledger_dir)) == 2
+
+
+_CARD_WITH_SPACE = '''## Probe
+**Free parameters (pre-registered; reviewed by the red team at S2):** 2 parameters.
+| name | type | range [lo, hi] (or levels) | plateau scale |
+|---|---|---|---|
+| lookback | int | [10, 120], grid step 10 (12 levels) | relative (r = 0.20) |
+| stop_mult | float | [1.0, 4.0], grid step 0.5 (7 levels) | relative (r = 0.20) |
+
+Some prose after the table.
+'''
+
+
+def test_card_space_corners_parses_the_free_parameters_table():
+    corners = systems.card_space_corners({"body": _CARD_WITH_SPACE})
+    assert len(corners) == 4   # 2**2 parameters
+    assert {"lookback": 10, "stop_mult": 1.0} in corners
+    assert {"lookback": 120, "stop_mult": 4.0} in corners
+    assert all(isinstance(c["lookback"], int) for c in corners)
+    assert all(isinstance(c["stop_mult"], float) for c in corners)
+    # a raw markdown string works too, not just a read_card()-shaped dict
+    assert systems.card_space_corners(_CARD_WITH_SPACE) == corners
+
+
+def test_card_space_corners_is_empty_without_a_parseable_table():
+    assert systems.card_space_corners({"body": "no free parameters table here"}) == []
+    assert systems.card_space_corners({"body": ""}) == []
+    categorical = '''**Free parameters:**
+| name | type | range [lo, hi] (or levels) |
+|---|---|---|
+| mode | categorical | fast, slow |
+'''
+    assert systems.card_space_corners({"body": categorical}) == []

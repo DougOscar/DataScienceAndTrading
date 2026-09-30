@@ -22,10 +22,10 @@ def _snapshot(root: Path) -> dict[str, tuple[int, int]]:
 
 @pytest.fixture(scope="session", autouse=True)
 def real_research_dirs_untouched():
-    """Fail the run if any test writes to the real ledger / trial store (research/ledger,
-    research/studies).  Tests must use tmp dirs or the QUANTLAB_* overrides (dry run #23 found a
+    """Fail the run if any test writes to the real ledger / trial store / system folders
+    (research/ledger, research/studies, research/systems).  Tests must use tmp dirs or the QUANTLAB_* overrides (dry run #23 found a
     test draft that had leaked trial files into research/studies/)."""
-    roots = [config.RESEARCH_DIR / "ledger", config.RESEARCH_DIR / "studies"]
+    roots = [config.RESEARCH_DIR / "ledger", config.RESEARCH_DIR / "studies", config.RESEARCH_DIR / "systems"]
     before = {r: _snapshot(r) for r in roots}
     yield
     changed = {str(r): sorted(set(_snapshot(r).items()) ^ set(before[r].items())) for r in roots}

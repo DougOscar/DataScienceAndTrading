@@ -705,3 +705,163 @@ def test_non_uniform_first_batch_errors_do_not_abort(tmp_path):
     res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "s-mixed", wfo=None)
     assert res.meta["n_error"] == 2 and res.meta["n_ok"] == 9
     assert res.meta["eval_start_effective"] is None and res.meta["data_gaps"] == []
+
+
+# --------------------------------------------------------------------------- Phase 2 dry-run fixes (#34/#44, #36, #37, #41)
+def _ledger_bytes(tmp_path):
+    return {p.name: p.read_bytes() for p in sorted((tmp_path / "ledger").glob("*"))}
+
+
+def _store_files(tmp_path):
+    return sorted(str(p.relative_to(tmp_path)) for p in (tmp_path / "studies").rglob("*"))
+
+
+def _same(a, b):
+    """Equality that treats NaN == NaN (selection dicts carry NaN plateau scores)."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    return a == b
+
+
+def test_load_study_round_trip_is_read_only_and_gates_identically(tmp_path):
+    from polars.testing import assert_frame_equal
+    from quantlab import gates as G
+    ev = SyntheticEvaluator(bounds={"a": (0, 10), "b": (0, 10)}, error_when=({"a": 7},), rho=0.9, seed=4,
+                            bumps=({"center": {"a": 3, "b": 3}, "height": 1.5, "width": 0.2, "kind": "box"},))
+    res = _study(ev, _space2(_no_five), tmp_path, "ld-a1", cv=opt.CPCVConfig(6, 2), wfo=opt.WFOConfig(min_train="3y"))
+    before, files = _ledger_bytes(tmp_path), _store_files(tmp_path)
+    got = opt.load_study("ld-a1", space=_space2(_no_five), ledger_dir=tmp_path / "ledger")  # store dir from the ledger
+    assert _ledger_bytes(tmp_path) == before and _store_files(tmp_path) == files      # read-only
+    assert got.study_id == res.study_id and got.param_names == res.param_names
+    assert_frame_equal(got.trials, res.trials, check_column_order=False)
+    assert got.trials.columns == res.trials.columns
+    for f in ("returns", "cpcv_paths", "wfo_oos", "wfo_params"):
+        assert_frame_equal(getattr(got, f), getattr(res, f)), f
+    assert got.selected_params == res.selected_params and _same(got.selection, res.selection)
+    # every meta key run_study sets is restored with the same value, except the per-split table
+    # (never stored) and the in-process-only diagnostics
+    not_stored = {"cpcv_splits"}
+    for k, v in res.meta.items():
+        if k in not_stored:
+            continue
+        assert k in got.meta, k
+        g = got.meta[k]
+        if isinstance(v, pl.DataFrame):
+            assert_frame_equal(g, v), k
+        elif isinstance(v, opt.SearchSpace):
+            assert g.to_json() == v.to_json()
+        elif k == "runtime_s":
+            assert g == pytest.approx(v, abs=0.01)
+        else:
+            assert _same(opt._canon(g), opt._canon(v)), (k, g, v)
+    assert got.meta["loaded_read_only"] is True
+    # without space= the constrained space is not faked: the gates rebuild it from the ledger json
+    bare = opt.load_study("ld-a1", ledger_dir=tmp_path / "ledger")
+    assert "search_space_obj" not in bare.meta and bare.meta["space"]["constraint"] == "_no_five"
+    with pytest.raises(opt.StudyError, match="differs from the ledger"):
+        opt.load_study("ld-a1", space=_space2(), ledger_dir=tmp_path / "ledger")
+    assert _ledger_bytes(tmp_path) == before and _store_files(tmp_path) == files
+    # the gates accept it and give the same values
+    G.verify_trial_store(got, ledger_dir=tmp_path / "ledger")
+    G.check_evaluator_identity("ld-a1", ev, None, ledger_dir=tmp_path / "ledger")
+    r1 = G.evaluate_gates(res, ev, periods_per_year=260.0, ledger_dir=tmp_path / "ledger")
+    r2 = G.evaluate_gates(got, ev, periods_per_year=260.0, ledger_dir=tmp_path / "ledger")
+    assert r1.values() == r2.values() and r1.verdict == r2.verdict
+    assert [r.status for r in r1.rows] == [r.status for r in r2.rows]
+    # (the gate previews may log their own rows; the loader still adds none)
+    before = _ledger_bytes(tmp_path)
+    opt.load_study("ld-a1", ledger_dir=tmp_path / "ledger")
+    assert _ledger_bytes(tmp_path) == before
+
+
+def test_load_study_refuses_unknown_unfinished_and_foreign_store(tmp_path):
+    with pytest.raises(opt.StudyError, match="not in the ledger"):
+        opt.load_study("nope", ledger_dir=tmp_path / "ledger")
+    ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.9)
+    sp = opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)])
+    _study(ev, sp, tmp_path, "ld-b1", wfo=None)
+    with pytest.raises(opt.StudyError, match="differs from the trial store"):
+        opt.load_study("ld-b1", ledger_dir=tmp_path / "ledger", studies_dir=tmp_path / "elsewhere")
+    got = opt.load_study("ld-b1", ledger_dir=tmp_path / "ledger", studies_dir=tmp_path / "studies")
+    assert got.wfo_oos.height == 0 and got.meta["wfo"] == {"scheme": "none"}
+    # an aborted study (trials event, no selection) cannot be loaded
+    boom = _BoomEvaluator()
+    with pytest.raises(_Abort):
+        _study(boom, sp, tmp_path, "ld-c1", wfo=None)
+    with pytest.raises(opt.StudyError, match="no selection event"):
+        opt.load_study("ld-c1", ledger_dir=tmp_path / "ledger")
+    # a stored OOS artifact edited after the study fails the hash check against the selection event
+    p = tmp_path / "studies" / "ld-b1" / "artifact-cpcv_paths.parquet"
+    df = pl.read_parquet(p)
+    df.with_columns(pl.when(pl.int_range(pl.len()) == 5).then(pl.col("ret") + 0.01).otherwise(pl.col("ret"))
+                    .alias("ret")).write_parquet(p)
+    with pytest.raises(opt.StudyError, match="artifact cpcv_paths"):
+        opt.load_study("ld-b1", ledger_dir=tmp_path / "ledger")
+
+
+def test_cv_scheme_logs_resolved_days_never_autod(tmp_path):
+    ev = SyntheticEvaluator(bounds={"a": (0, 10)}, rho=0.9, hold_days=3)
+    res = _study(ev, opt.SearchSpace([opt.IntParam("a", 0, 10, plateau_step=2)]), tmp_path, "cvs", wfo=None,
+                 cv=opt.CPCVConfig(6, 2))
+    created = ledger.created_row("cvs", ledger_dir=tmp_path / "ledger")
+    sel = ledger.study_events("cvs", "selection", ledger_dir=tmp_path / "ledger")[-1]
+    assert "autod" not in created["cv_scheme"] and "purge=auto(max_hold)" in created["cv_scheme"]
+    e = sel["cpcv_embargo_days"]
+    assert isinstance(e, int) and f"purge={sel['cpcv_purge_days']}d,embargo={e}d" in sel["cv_scheme"]
+    assert res.meta["cv_scheme"] == sel["cv_scheme"]
+    assert opt.CPCVConfig(6, 2, embargo_days=3).describe(3, 3) == "CPCV(n=6,k=2,purge=3d,embargo=3d)"
+
+
+def test_worker_initializer_silences_the_parents_uncalibrated_warning():
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        opt._worker_init(SyntheticEvaluator(bounds={"a": (0, 1)}), None)
+        warnings.warn("no calibrated broker export for FBS/XYZ; using an uncalibrated fallback", UserWarning)
+        warnings.warn("some other warning", UserWarning)
+    assert [str(x.message) for x in w] == ["some other warning"]
+
+
+def test_run_study_warns_uncalibrated_once_in_the_parent(tmp_path, monkeypatch):
+    from quantlab import costs
+    calls = []
+
+    class _Sym(SyntheticEvaluator):
+        symbol = "EURUSD"
+
+    monkeypatch.setattr(costs, "load_instrument", lambda sym, book="FBS": calls.append((sym, book)))
+    opt._warn_parent_once(_Sym(bounds={"a": (0, 1)}), "FBS")
+    assert calls == []                                             # synthetic: nothing to warn about
+
+    class _Real:
+        symbol = "EURUSD"
+    opt._warn_parent_once(_Real(), "FBS")
+    assert calls == [("EURUSD", "FBS")]
+
+
+def test_wfo_short_final_test_window_is_merged_into_the_previous_refit():
+    returns, trials, sp = _wfo_inputs()
+    last = returns["date"][-1]
+    sched = opt.WFOConfig(refit_every="3mo", window="anchored", min_train="2y")
+    # cut the data 8 business days after a refit date: the final refit would trade 8 rows
+    oos_full, par_full, _ = opt.walk_forward(returns, trials, sp, sched)
+    rd = par_full["refit_date"][-2]
+    cut = returns.filter(pl.col("date") >= rd)["date"][7]
+    short = returns.filter(pl.col("date") <= cut)
+    oos, par, meta = opt.walk_forward(short, trials, sp, sched)
+    assert meta["tail_merged"] == {"refit_date": str(rd), "rows": 8, "min_test_rows": meta["min_test_rows"]}
+    assert 8 < meta["min_test_rows"] < 30
+    assert par["refit_date"][-1] < rd and par["test_end"][-1] == cut          # merged into the previous refit
+    assert oos["date"].max() == cut and oos.filter(pl.col("refit_id") == par["refit_id"][-1]).height > 60
+    # disabled: the 8-row refit is traded on its own
+    oos0, par0, meta0 = opt.walk_forward(short, trials, sp, opt.WFOConfig(min_train="2y", min_test_rows=0))
+    assert meta0["tail_merged"] is None and par0["refit_date"][-1] == rd
+    assert oos0.filter(pl.col("refit_id") == par0["refit_id"][-1]).height == 8
+    assert oos0["date"].to_list() == oos["date"].to_list()            # same OOS days, only the tail's pick differs
+    # a full-length final window is untouched
+    assert last >= rd and opt.WFOConfig(min_test_rows=5).describe().endswith(",min_test=5r)")
+    with pytest.raises(ValueError):
+        opt.WFOConfig(min_test_rows=-1)

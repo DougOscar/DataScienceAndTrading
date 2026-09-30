@@ -12,8 +12,10 @@ import math
 from typing import Any
 
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import numpy as np
 import polars as pl
+from matplotlib import patheffects
 
 from .. import metrics as m
 from . import _style as sty
@@ -155,6 +157,14 @@ def fig_cpcv_path_fan(cpcv_paths: pl.DataFrame | None) -> plt.Figure | None:
 
 # --------------------------------------------------------------------------- parameter plateau heatmap
 def fig_plateau_heatmap(plateau_detail: dict[str, Any] | None) -> plt.Figure | None:
+    """#59: plots the **raw** per-point Sharpe on a diverging (blue<->red) scale centred at 0,
+    with the peak (the re-evaluated selected configuration -- not one of the perturbed points,
+    so it isn't a cell of its own) marked on the colour scale. The previous version coloured
+    ``sharpe / peak_sharpe`` on a ``vmin=0`` sequential scale: on a losing peak (peak <= 0) that
+    ratio inverts sign meaning -- a worse (more negative) point divided by a negative peak comes
+    out as the *largest* positive ratio and paints the darkest "best" colour, while the peak
+    itself (ratio = 1) sits in the middle of the scale, not at either end -- so the figure was
+    unreadable exactly when the plateau gate needed reading most."""
     points = (plateau_detail or {}).get("points")
     if not points:
         return None
@@ -168,34 +178,43 @@ def fig_plateau_heatmap(plateau_detail: dict[str, Any] | None) -> plt.Figure | N
         grid = np.full((len(axes), len(offsets)), np.nan)
         passed = np.zeros_like(grid, dtype=bool)
         peak = (plateau_detail or {}).get("peak_sharpe")
+        peak_ok = peak is not None and np.isfinite(peak)
         for p in points:
             i, j = axes.index(p["param"]), offsets.index(p["offset"])
             sr = p.get("sharpe")
             if sr is not None and np.isfinite(sr):
-                grid[i, j] = sr if not peak else sr / peak
+                grid[i, j] = sr                                    # raw Sharpe, never sr / peak
                 passed[i, j] = bool(p.get("pass"))
+        finite = grid[np.isfinite(grid)]
+        vmax = max([1e-6] + ([float(np.max(np.abs(finite)))] if finite.size else [])
+                   + ([abs(float(peak))] if peak_ok else []))
         fig, ax = _fig(max(5.0, 1.1 * len(offsets)), max(2.2, 0.55 * len(axes) + 1.0))
-        im = ax.imshow(grid, cmap=_seq_cmap(), vmin=0, vmax=max(1.0, np.nanmax(grid) if np.isfinite(grid).any() else 1.0),
-                       aspect="auto")
+        im = ax.imshow(grid, cmap=_diverging_cmap(), vmin=-vmax, vmax=vmax, aspect="auto")
         ax.set_xticks(range(len(offsets))); ax.set_xticklabels([str(o) for o in offsets])
         ax.set_yticks(range(len(axes))); ax.set_yticklabels(axes)
         for i in range(len(axes)):
             for j in range(len(offsets)):
                 if np.isfinite(grid[i, j]):
                     mark = "" if passed[i, j] else "x"
-                    ax.text(j, i, mark, ha="center", va="center", fontsize=9, color=sty.RED)
+                    txt = ax.text(j, i, mark, ha="center", va="center", fontsize=9, color="white",
+                                 fontweight="bold")
+                    txt.set_path_effects([patheffects.withStroke(linewidth=1.5, foreground=sty.INK)])
         cb = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
-        cb.set_label("Sharpe / peak Sharpe")
+        cb.set_label("Sharpe (annualised, full dev window)")
+        if peak_ok:
+            cb.ax.axhline(peak, color=sty.INK, linewidth=1.8)
+            trans = mtransforms.blended_transform_factory(cb.ax.transAxes, cb.ax.transData)
+            peak_lbl = cb.ax.text(0.5, peak, f"peak {peak:.2f}", transform=trans, va="center", ha="center",
+                                  fontsize=7.5, color="white", fontweight="bold")
+            peak_lbl.set_path_effects([patheffects.withStroke(linewidth=1.5, foreground=sty.INK)])
+        peak_txt = f"peak Sharpe {peak:.2f}" if peak_ok else "peak Sharpe: not available"
+        not_assessable = " -- not assessable (peak <= 0)" if peak_ok and peak <= 0 else ""
         ax.set_xlabel("Offset from the selected value (pre-registered plateau scale)")
         ax.set_ylabel("Parameter axis")
-        ax.set_title("Parameter plateau (judge-run perturbations; x = fails >=50% of peak)")
+        ax.set_title(f"Parameter plateau (judge-run perturbations; x = fails >=50% of peak; "
+                    f"{peak_txt}{not_assessable})")
         fig.tight_layout()
         return fig
-
-
-def _seq_cmap():
-    from matplotlib.colors import LinearSegmentedColormap
-    return LinearSegmentedColormap.from_list("seq_blue", list(sty.SEQ_BLUE))
 
 
 # --------------------------------------------------------------------------- cost-sensitivity curve

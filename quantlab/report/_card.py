@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import numpy as np
 import polars as pl
 
 from .. import metrics as m
+from ._fmt import dash, fmt_sig
 
 MAX_IDEA_CHARS = 200
 
@@ -102,20 +104,32 @@ def _truncate_idea(idea: str) -> str:
     return idea if len(idea) <= MAX_IDEA_CHARS else idea[: MAX_IDEA_CHARS - 1].rstrip() + "…"
 
 
-def _status_line(status: str, stage: str | None, reason: str | None) -> str:
+def _status_line(status: str, stage: str | None, reason: str | None, scope: str | None = None) -> str:
     if status == "killed":
         detail = ", ".join(x for x in (stage, reason) if x)
+        if scope:
+            detail = f"{detail}, scope: {scope}" if detail else f"scope: {scope}"
         return f"killed ({detail})" if detail else "killed"
     return status
 
 
 def write_card(ts: Any, *, slug: str, name: str, idea: str, status: str, issue: int, book: str,
-               stage: str | None = None, reason: str | None = None,
+               stage: str | None = None, reason: str | None = None, scope: str | None = None,
                vault_dir: Path | None = None) -> Path:
     """Write the DESIGN §6 Obsidian card (exactly the template) and its two chart attachments.
 
     Written for **killed** systems too, with ``stage``/``reason`` folded into the status line,
     so a dead idea is recorded instead of silently forgotten (DESIGN §3 / report-builder charter).
+    ``scope`` (e.g. ``"EURUSD H4"``, #74) records what the kill actually covers -- a red-team
+    finding may apply to one symbol/timeframe and not another -- and, when given, is folded into
+    that same killed-status line.
+
+    Only the two §6 figures (``sharpe_yearly``, ``sharpe_monthly``) are ever written into the
+    shared vault ``attachments/`` folder, and always slug-prefixed (#66): every other figure
+    ``ts.figures()`` can build is rendered into a private scratch directory that is discarded
+    once the two needed PNGs are copied out, so a second system's card can never overwrite a
+    first system's attachments under a generic name (e.g. two systems both writing
+    ``plateau_heatmap.png``).
     """
     from .. import config
     if status == "killed" and not (stage and reason):
@@ -124,35 +138,36 @@ def write_card(ts: Any, *, slug: str, name: str, idea: str, status: str, issue: 
                                                                  config.ROOT / "DocumentationVault" / "systems")
     att_dir = vdir / "attachments"
     att_dir.mkdir(parents=True, exist_ok=True)
-    figs = ts.figures(att_dir)
-    yearly_src, monthly_src = figs.get("sharpe_yearly"), figs.get("sharpe_monthly")
     yearly_dst, monthly_dst = att_dir / f"{slug}_sharpe_yearly.png", att_dir / f"{slug}_sharpe_monthly.png"
-    for src, dst in ((yearly_src, yearly_dst), (monthly_src, monthly_dst)):
-        if src is not None and Path(src) != dst:
-            dst.write_bytes(Path(src).read_bytes())
+    with tempfile.TemporaryDirectory(prefix=f"tear_sheet_figs_{slug}_") as scratch:
+        figs = ts.figures(scratch)                       # every figure the study has data for
+        for name_, dst in (("sharpe_yearly", yearly_dst), ("sharpe_monthly", monthly_dst)):
+            src = figs.get(name_)
+            if src is not None:
+                dst.write_bytes(Path(src).read_bytes())
 
     headline = ts.headline
     rp_label, rp = ts.risk_profile
     result_line = (f"{headline.get('class', 'unclassified')} — "
-                   f"{headline.get('mean_monthly_pct', float('nan')):.1f}%/month at 10% DD budget")
-
-    def _fmt(v, spec=".2f"):
-        return "n/a" if v is None or (isinstance(v, float) and not np.isfinite(v)) else format(v, spec)
+                   f"{fmt_sig(headline.get('mean_monthly_pct'), 2, '%')}/month at 10% DD budget")
 
     robust = headline.get("robustness", {})
-    longest_dd_months = rp.get("longest_dd_days", float("nan")) / 21.0 if rp else float("nan")
+    longest_dd_days = rp.get("longest_dd_days") if rp else None
+    longest_dd_months = longest_dd_days / 21.0 if longest_dd_days is not None else None
     lines = [
         f"# {name}",
-        f"**Book:** {book}   **Status:** {_status_line(status, stage, reason)}   **Issue:** #{issue}",
+        f"**Book:** {book}   **Status:** {_status_line(status, stage, reason, scope)}   **Issue:** #{issue}",
         f"**Idea:** {_truncate_idea(idea)}",
         f"**Result:** {result_line}",
-        f"**Risk profile:** {rp_label} — MaxDD {_fmt(rp.get('max_dd'), '.1%')}, "
-        f"longest DD {_fmt(longest_dd_months, '.1f')} months, "
-        f"max losing streak {_fmt(rp.get('max_losing_streak'), '.0f')}, "
-        f"skew {_fmt(rp.get('skew'))}, CVaR95 {_fmt(rp.get('cvar95'), '.2%')}",
-        f"**Robustness:** DSR {_fmt(robust.get('dsr'))} · CSCV OOS loss {_fmt(robust.get('cscv_oos_loss'))} · "
-        f"WFO OOS Sharpe {_fmt(robust.get('wfo_oos'))} (recent third {_fmt(robust.get('wfo_oos_recent'))}) · "
-        f"holdout {robust.get('holdout_status', 'not unlocked')}",
+        f"**Risk profile:** {rp_label} — MaxDD {dash(rp.get('max_dd'), '.1%')}, "
+        f"longest DD {dash(longest_dd_months, '.1f')} months, "
+        f"max losing streak {dash(rp.get('max_losing_streak'), '.0f')}, "
+        f"skew {dash(rp.get('skew'), '.2f')}, CVaR95 {dash(rp.get('cvar95'), '.2%')}",
+        f"**Robustness:** DSR {dash(robust.get('dsr'), '.2f')} · "
+        f"CSCV OOS loss {dash(robust.get('cscv_oos_loss'), '.2f')} · "
+        f"WFO OOS Sharpe {dash(robust.get('wfo_oos'), '.2f')} "
+        f"(recent third {dash(robust.get('wfo_oos_recent'), '.2f')}) · "
+        f"holdout {robust.get('holdout_status') or 'not unlocked'}",
         f"![[{slug}_sharpe_yearly.png]]",
         f"![[{slug}_sharpe_monthly.png]]",
     ]

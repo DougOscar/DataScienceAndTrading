@@ -10,6 +10,7 @@ any stage of the pipeline.
 
 from __future__ import annotations
 
+import itertools
 import re
 from datetime import date
 from pathlib import Path
@@ -20,7 +21,8 @@ import yaml
 from . import config
 
 __all__ = [
-    "create_system", "system_dir", "find_system", "read_card",
+    "create_system", "system_dir", "find_system", "read_card", "set_front_matter",
+    "find_study_id", "log_baseline", "card_space_corners",
     "build_template_notebook", "write_template_notebook", "TEMPLATE_PATH",
 ]
 
@@ -137,6 +139,144 @@ def read_card(path: str | Path) -> dict[str, Any]:
     return {**front, "body": body.strip("\n"), "path": str(p)}
 
 
+def set_front_matter(path: str | Path, **fields: Any) -> Path:
+    """Merge ``fields`` into ``hypothesis.md``'s YAML front matter in place (#35).
+
+    Used by the notebook template's S4 cell to record the ``study_id`` the first time
+    ``opt.run_study`` (or a ledger lookup, :func:`find_study_id`) resolves one, so a later stage
+    — or a later "Run all", possibly a fresh kernel — can read it straight from :func:`read_card`
+    instead of re-scanning the ledger. The card body (everything after the front matter) is
+    preserved byte-for-byte; existing front-matter keys not in ``fields`` are kept.
+    """
+    p = Path(path)
+    text = p.read_text()
+    m = _FRONT_MATTER_RE.match(text)
+    if not m:
+        raise ValueError(f"{p}: no YAML front matter found (expected '---\\n...\\n---' at the top of the file)")
+    front = yaml.safe_load(m.group(1)) or {}
+    if not isinstance(front, dict):
+        raise ValueError(f"{p}: front matter must be a YAML mapping, got {type(front).__name__}")
+    front.update(fields)
+    front_yaml = yaml.safe_dump(front, sort_keys=False)
+    p.write_text(f"---\n{front_yaml}---\n" + text[m.end():])
+    return p
+
+
+def find_study_id(book: str, issue: int, slug: str, *, ledger_dir: Path | None = None) -> str | None:
+    """The study already in the ledger for this system (book + issue + slug), or ``None``.
+
+    Lets a stage section find "does the ledger already have a study for this system" without a
+    ``study_id`` recorded in ``hypothesis.md``'s front matter yet (:func:`set_front_matter` only
+    records one *after* the first successful lookup/``run_study`` — a fresh clone, or a kernel
+    that never ran S4 this session, has no other way to find it). Matches book +
+    :func:`ledger.normalise_system` (the same identity ``ledger.system_prior_trials`` uses),
+    narrowed to this ``issue`` (DESIGN's own identity key, §4.4) since a slug is occasionally
+    reused across books/issues in tests. When more than one attempt exists (the DESIGN §4.5 kill
+    rule: attempt 2 supersedes a killed attempt 1), the highest ``attempt`` wins.
+    """
+    from . import ledger
+    b = config.get_book(book).name
+    issue = _check_issue(issue)
+    sysn = ledger.normalise_system(slug)
+    best: tuple[int, str] | None = None
+    for sid, state in ledger.studies(ledger_dir=ledger_dir).items():
+        if state.get("book") != b or ledger.normalise_system(state.get("system")) != sysn:
+            continue
+        if state.get("issue") is not None and int(state["issue"]) != issue:
+            continue
+        att = int(state.get("attempt") or 0)
+        if best is None or att > best[0]:
+            best = (att, sid)
+    return best[1] if best else None
+
+
+def log_baseline(book: str, issue: int, slug: str, *, params: dict[str, Any], edge_breakdown: dict[str, Any],
+                 cost_model_version: str, ledger_dir: Path | None = None) -> dict[str, Any] | None:
+    """Log the S3 baseline (#28) to the ledger: params, the edge/cost breakdown
+    (:func:`evaluators.edge_breakdown`) and the cost-model version.
+
+    No optimisation study exists yet the first time S3 runs (DESIGN §3: S3 precedes S4), and
+    ``ledger.log_event`` only appends to a study that already has a ``study_created`` row —
+    creating one here (``ledger.create_study``) would misrepresent a baseline read as an
+    optimisation study, complete with its own ``attempt``/``cv_scheme``/``dev_window``
+    bookkeeping that a baseline has no use for. So this only ever attaches an ordinary event —
+    never a new study row — to the system's study **once one exists** (:func:`find_study_id`):
+    on a fresh system this is a no-op returning ``None`` (S3 is independently re-runnable, #35,
+    so a later "Run all" — after S4 has created the study — logs it then). Idempotent: never logs
+    a second ``baseline`` event for the same study.
+    """
+    from . import ledger
+    study_id = find_study_id(book, issue, slug, ledger_dir=ledger_dir)
+    if study_id is None:
+        return None
+    if ledger.study_events(study_id, "baseline", ledger_dir=ledger_dir):
+        return None
+    return ledger.log_event(
+        study_id, "baseline", ledger_dir=ledger_dir, book=config.get_book(book).name, system=slug,
+        issue=_check_issue(issue), params=dict(params), edge_breakdown=dict(edge_breakdown),
+        cost_model_version=str(cost_model_version),
+    )
+
+
+# --------------------------------------------------------------------------- free-parameter grid corners
+_FREE_PARAMS_ANCHOR_RE = re.compile(r"free\s+parameters", re.IGNORECASE)
+_RANGE_BRACKET_RE = re.compile(r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]")
+
+
+def card_space_corners(card: Any) -> list[dict[str, Any]]:
+    """The 2^n corners of the card's pre-registered free-parameter grid (#31): every combination
+    of each numeric parameter's declared low/high, read straight off the card's "Free parameters"
+    markdown table — no ``opt.SearchSpace`` needed (that isn't built until S4), so the S2
+    look-ahead audit can run at the grid's extremes, not just the prior, as soon as the card
+    exists.
+
+    Best-effort and silent: a card with no such table, or a row whose range cell isn't a
+    ``"[lo, hi]"`` pair (a categorical, a "see levels" note, ...), contributes nothing to the
+    result. Returns ``[]`` rather than raising, so a missing/malformed table degrades to
+    "audit the prior only" (the pre-#31 behaviour), not a broken notebook.
+
+    ``card``: a dict with a ``"body"`` key (:func:`read_card`'s return, or the ``CARD`` dict the
+    notebook template builds from it) or a raw markdown string.
+    """
+    text = card.get("body", "") if isinstance(card, dict) else str(card)
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if _FREE_PARAMS_ANCHOR_RE.search(ln)), None)
+    if start is None:
+        return []
+
+    rows: list[tuple[str, str, str]] = []
+    in_table = False
+    for ln in lines[start + 1:]:
+        s = ln.strip()
+        if not s.startswith("|"):
+            if in_table:
+                break
+            continue
+        in_table = True
+        cells = [re.sub(r"[*`]", "", c).strip() for c in s.strip("|").split("|")]
+        if len(cells) < 3 or cells[0].lower() == "name" or all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
+            continue   # header row, or a "|---|---|...|" separator row (with or without :-alignment)
+        rows.append((cells[0], cells[1].lower(), cells[2]))
+
+    params: dict[str, tuple[Any, Any]] = {}
+    for name, kind, range_cell in rows:
+        if kind not in ("int", "float") or not name:
+            continue
+        m = _RANGE_BRACKET_RE.search(range_cell)
+        if not m:
+            continue
+        cast = int if kind == "int" else float
+        try:
+            params[name] = (cast(float(m.group(1))), cast(float(m.group(2))))
+        except ValueError:
+            continue
+
+    if not params:
+        return []
+    names = list(params)
+    return [dict(zip(names, combo)) for combo in itertools.product(*(params[n] for n in names))]
+
+
 def create_system(book: str, issue: int, slug: str, *, name: str, card_markdown: str,
                   systems_dir: Path | None = None) -> Path:
     """Create ``research/systems/<book>/<issue:04d>_<slug>/`` (checkpoint A: card approved).
@@ -202,15 +342,29 @@ def _system_cells() -> list[dict[str, Any]]:
     from nbformat.v4 import new_code_cell, new_markdown_cell
 
     setup_code = '''
+import sys
 from pathlib import Path
-
-from quantlab import config
-from quantlab.systems import read_card
 
 # Jupyter's default working directory is the notebook's own folder; nbconvert callers should
 # pass resources={"metadata": {"path": <this folder>}} to ExecutePreprocessor if that isn't
 # already true. hypothesis.md lives right next to this notebook.
 SYSTEM_DIR = Path.cwd()
+
+# #33: `quantlab` is not pip-installed, and a fresh kernel subprocess (nbconvert/nbclient) has no
+# PYTHONPATH of its own -- walk up from this folder to whichever ancestor directory holds the
+# `quantlab` package (the repo root) and put that on sys.path, so the import below resolves
+# whatever the kernel's cwd or install, with no environment setup required.
+_root = SYSTEM_DIR
+while not (_root / "quantlab" / "__init__.py").is_file():
+    if _root.parent == _root:
+        raise RuntimeError(f"could not find a 'quantlab' package in any parent of {SYSTEM_DIR}")
+    _root = _root.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from quantlab import config
+from quantlab.systems import read_card
+
 CARD = read_card(SYSTEM_DIR / "hypothesis.md")
 SYSTEM = {
     "book": CARD["book"],
@@ -225,6 +379,9 @@ SYSTEM = {
     "timeframe": CARD.get("timeframe"),
     "start": CARD.get("start"),
     "end": CARD.get("end"),
+    # Set by S4 (quantlab.systems.set_front_matter) the first time it resolves this system's
+    # study -- read here so a later stage / a later "Run all" doesn't have to re-scan the ledger.
+    "study_id": CARD.get("study_id"),
 }
 LEDGER_DIR = config.LEDGER_DIR
 STUDIES_DIR = config.STUDIES_DIR
@@ -243,9 +400,11 @@ display(Markdown(CARD.get("body", "")))
 
     implementation_code = '''
 import inspect
+from dataclasses import asdict
 
 from quantlab.costs import InstrumentSpec
 from quantlab.strategies import get_strategy
+from quantlab.systems import card_space_corners
 from quantlab.testing import (
     assert_engine_causal,
     assert_no_lookahead,
@@ -260,28 +419,36 @@ assert_strategy_source_clean(inspect.getfile(StrategyCls))
 # strategy is built from its declared prior (default) parameters here, so this audit exercises
 # the real class with the card's own prior values, not an arbitrary stand-in.
 _params_cls = getattr(StrategyCls, "params_cls", None) or getattr(StrategyCls, "Params", None)
-_factory = (lambda: StrategyCls(_params_cls())) if _params_cls is not None else StrategyCls
 
-# Generic, book/timeframe-agnostic bars/spec for the audit -- the real per-system test module
-# (tests/, written alongside this notebook at S2) additionally runs assert_engine_causal on real
-# dev data with m1=/timeframe= for the system's actual instrument.
+# #31: audit the prior AND every corner of the card's pre-registered grid, when it declares one
+# parseable this way (opt.SearchSpace itself isn't built until S4) -- {} = the prior (no override).
+_param_overrides = [{}]
+if _params_cls is not None:
+    _param_overrides += card_space_corners(CARD)
+
 _audit_bars = synthetic_bars(600, seed=0, timeframe="H1")
-assert_no_lookahead(_factory, _audit_bars)
-
 _audit_spec = InstrumentSpec(
     symbol="AUDIT", digits=5, point=1e-5, contract_size=100_000.0, tick_size=1e-5,
     volume_min=0.01, volume_step=0.01, volume_max=100.0, base_ccy="EUR", quote_ccy="USD",
     swap_mode="points", swap_long=0.0, swap_short=0.0, swap_3day=2,
     commission_per_lot_rt=0.0, stops_level=0.0, calibrated=True,
 )
-assert_engine_causal(_factory(), _audit_bars, _audit_spec, n_checks=8, seed=1, min_history=60)
+for _override in _param_overrides:
+    if _params_cls is not None:
+        _factory = lambda _o=_override: StrategyCls(_params_cls(**{**asdict(_params_cls()), **_o}))
+    else:
+        _factory = StrategyCls
+    assert_no_lookahead(_factory, _audit_bars)
+    assert_engine_causal(_factory(), _audit_bars, _audit_spec, n_checks=8, seed=1, min_history=60)
 
-print(f"{StrategyCls.name}: look-ahead audit clean (risk_type={StrategyCls.risk_type})")
+print(f"{StrategyCls.name}: look-ahead audit clean at the prior and {len(_param_overrides) - 1} "
+     f"grid corner(s) (risk_type={StrategyCls.risk_type})")
 '''.strip("\n")
 
     baseline_code = '''
 if SYSTEM.get("symbol") and SYSTEM.get("timeframe"):
-    from quantlab.evaluators import RuleEvaluator
+    from quantlab.evaluators import RuleEvaluator, edge_breakdown
+    from quantlab.systems import log_baseline
 
     evaluator = RuleEvaluator(
         StrategyCls, symbol=SYSTEM["symbol"], timeframe=SYSTEM["timeframe"], book=SYSTEM["book"],
@@ -289,50 +456,102 @@ if SYSTEM.get("symbol") and SYSTEM.get("timeframe"):
     )
     baseline = evaluator({})   # {} = the card's prior (default) parameters, costs on
     print(evaluator.describe())
-    baseline.metrics
+    print(baseline.metrics)                              # #24: explicit -- this is the `if`
+                                                            # branch, so auto-display never fires
+    edge = edge_breakdown(baseline, cost=evaluator.cost)   # #25: gross/net/spread/swap/slippage
+    print(edge)                                            # per trade, trades/year, cost % gross
+
+    # #28: an audit-trail event, not a new study row -- see quantlab.systems.log_baseline.
+    _params_used = _params_cls().as_dict() if _params_cls is not None else {}
+    _logged = log_baseline(
+        SYSTEM["book"], SYSTEM["issue"], SYSTEM["slug"],
+        params=_params_used, edge_breakdown=edge, cost_model_version=evaluator.cost_version,
+    )
+    if _logged is None:
+        print("S3: no study in the ledger yet for this system -- baseline not logged to the "
+             "ledger (re-run this cell after S4; #35, S3 is independently re-runnable), or a "
+             "'baseline' event is already logged for it.")
+    else:
+        print(f"S3: baseline logged to the ledger under {_logged['study_id']}")
 else:
     evaluator = None
     baseline = None
+    edge = None
     print("S3 pending: add `symbol:` / `timeframe:` to hypothesis.md's front matter, then re-run.")
 '''.strip("\n")
 
     optimisation_code = '''
 if evaluator is not None:
     from quantlab import opt
+    from quantlab.systems import find_study_id, set_front_matter
 
     # S4 (optimization-architect): declare the real search space here -- every numeric Param
     # needs plateau_scale="relative" or plateau_step=... (DESIGN §4.2, pre-registered on the
     # card) -- then run_study(...). Left unset in the template so it never launches a study with
     # placeholder bounds.
     space = None   # opt.SearchSpace((opt.IntParam(...), ...))
-    study = None
-    if space is not None:
+
+    # #35: a full "Run all" must not repeat a logged run_study -- load the ledger's own study
+    # (found by id, else by a book/issue/slug ledger lookup) instead of re-running it blind.
+    study_id = SYSTEM.get("study_id") or find_study_id(SYSTEM["book"], SYSTEM["issue"], SYSTEM["slug"])
+    if study_id is not None:
+        study = opt.load_study(study_id)
+        print(f"S4: loaded existing study {study_id} read-only (run_study skipped, #35)")
+    elif space is not None:
         study = opt.run_study(
             evaluator, space, book=SYSTEM["book"], system=SYSTEM["slug"], issue=SYSTEM["issue"], attempt=1,
         )
+        study_id = study.study_id
+        print(f"S4: ran a new study {study_id}")
+    else:
+        study = None
+        print("S4 pending: no search space declared yet.")
+
+    if study_id is not None and CARD.get("study_id") != study_id:
+        set_front_matter(SYSTEM_DIR / "hypothesis.md", study_id=study_id)   # #35
+        CARD["study_id"] = study_id
+    SYSTEM["study_id"] = study_id
 else:
     space = None
     study = None
+    study_id = None
     print("S4 pending: needs a baseline (S3) first.")
 '''.strip("\n")
 
     validation_code = '''
-if study is not None:
+if evaluator is not None:
     import polars as pl
 
-    from quantlab import gates
+    from quantlab import gates, ledger, opt
+    from quantlab.systems import find_study_id
 
-    gate_report = gates.evaluate_gates(study, evaluator, periods_per_year=evaluator.periods_per_year, log=True)
-    gate_table = pl.DataFrame([
-        {"gate": r.gate, "value": r.display if r.display is not None else r.value,
-         "threshold": r.threshold, "status": r.status, "interpretation": r.interpretation}
-        for r in gate_report.rows
-    ])
+    # Resolved independently of §4's own `study` variable (#35/#68: this cell must work even if
+    # §4 did not run this kernel session -- only the ledger/trial-store, loaded by id, are trusted).
+    study_id = SYSTEM.get("study_id") or find_study_id(SYSTEM["book"], SYSTEM["issue"], SYSTEM["slug"])
+    study = opt.load_study(study_id) if study_id is not None else None
+
+    if study is None:
+        gate_report = None
+        gate_table = None
+        print("S5 pending: needs an optimisation study (S4) first.")
+    elif ledger.study_events(study.study_id, "gates"):
+        gate_report = None
+        gate_table = None
+        print(f"S5: {study.study_id} already has a logged gates event -- "
+             "evaluate_gates(log=True) skipped (#35: a full 'Run all' must never log it twice).")
+    else:
+        gate_report = gates.evaluate_gates(study, evaluator, periods_per_year=evaluator.periods_per_year, log=True)
+        gate_table = pl.DataFrame([
+            {"gate": r.gate, "value": r.display if r.display is not None else r.value,
+             "threshold": r.threshold, "status": r.status, "interpretation": r.interpretation}
+            for r in gate_report.rows
+        ])
     gate_table
 else:
+    study = None
     gate_report = None
     gate_table = None
-    print("S5 pending: needs an optimisation study (S4) first.")
+    print("S5 pending: needs a baseline (S3) first.")
 '''.strip("\n")
 
     redteam_code = '''
@@ -346,19 +565,28 @@ else:
 '''.strip("\n")
 
     report_code = '''
-if study is not None and gate_report is not None:
-    from quantlab import report
+if evaluator is not None:
+    from quantlab import ledger, report
+    from quantlab.systems import find_study_id
 
-    ts = report.tear_sheet(study.study_id, evaluator=evaluator, risk_type=SYSTEM.get("risk_type"))
-    ts.write_results(RESULTS_DIR)
-    report.write_card(
-        ts, slug=SYSTEM["slug"], name=SYSTEM["name"], idea=CARD.get("idea", ""),
-        status=SYSTEM.get("status", "testing"), issue=SYSTEM["issue"], book=SYSTEM["book"],
-    )
-    ts.headline
+    # #68: resolved independently of §4/§5's own variables -- report.tear_sheet only needs a
+    # study_id + evaluator, reading everything else (including the gates event) from the ledger
+    # and trial store itself, so this cell works even run alone in a fresh kernel.
+    study_id = SYSTEM.get("study_id") or find_study_id(SYSTEM["book"], SYSTEM["issue"], SYSTEM["slug"])
+    if study_id is not None and ledger.study_events(study_id, "gates"):
+        ts = report.tear_sheet(study_id, evaluator=evaluator, risk_type=SYSTEM.get("risk_type"))
+        ts.write_results(RESULTS_DIR)
+        report.write_card(
+            ts, slug=SYSTEM["slug"], name=SYSTEM["name"], idea=CARD.get("idea", ""),
+            status=SYSTEM.get("status", "testing"), issue=SYSTEM["issue"], book=SYSTEM["book"],
+        )
+    else:
+        ts = None
+        print("S7 pending: needs validation (S5, a logged gates event) first.")
 else:
     ts = None
-    print("S7 pending: needs validation (S5) first.")
+    print("S7 pending: needs a baseline (S3) first.")
+ts.headline if ts is not None else None
 '''.strip("\n")
 
     holdout_code = '''

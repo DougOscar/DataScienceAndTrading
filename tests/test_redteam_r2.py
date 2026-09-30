@@ -343,9 +343,9 @@ def test_r2_3_band_is_frozen_at_the_first_gates_run_and_construction_is_fixed(ma
                           holdout_symbols="EURUSD", log=True)
     reg = ledger.registered_holdout_band(study.study_id, ledger_dir=ld)
     assert reg == r1.holdout_band
-    # a later gate run never replaces it: its band is logged as a diagnostic
+    # a later gate run never replaces it: its band is logged as a diagnostic (a logged re-run needs a reason, #45)
     G.evaluate_gates(study, None, periods_per_year=PPY, selected_trades=trades, ledger_dir=ld,
-                     holdout_symbols="EURUSD", log=True)
+                     holdout_symbols="EURUSD", log=True, rerun_reason="test: band freezing")
     ev2 = ledger.study_events(study.study_id, "gates", ledger_dir=ld)[-1]
     assert "holdout_band" not in ev2 and ev2["holdout_band_diagnostic"]["sharpe_lo"] == reg["sharpe_lo"]
     assert ledger.registered_holdout_band(study.study_id, ledger_dir=ld) == reg

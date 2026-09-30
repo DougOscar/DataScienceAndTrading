@@ -81,7 +81,7 @@ from .costs import CostModel, load_instrument
 from .engine import run_backtest
 from .sizing import apply_sizing, daily_equity
 
-__all__ = ["RuleEvaluator", "SyntheticEvaluator", "trade_stats", "clear_cache", "data_gaps"]
+__all__ = ["RuleEvaluator", "SyntheticEvaluator", "trade_stats", "edge_breakdown", "clear_cache", "data_gaps"]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -148,6 +148,89 @@ def trade_stats(trades: pl.DataFrame, *, calendar_days: bool = False,
     out["hold_days_p95"] = float(np.quantile(hold, 0.95))
     out["hold_calendar_days_max"] = float(cal.max())
     out["hold_calendar_days_p95"] = float(np.quantile(cal, 0.95))
+    return out
+
+
+_NEVER_SLIPS_EXITS = ("target", "gap_target")   # engine.py: a resting limit order never slips
+
+
+def edge_breakdown(outcome: Outcome, *, cost: Any = None, gross_eps: float = 1e-9) -> dict[str, Any]:
+    """Gross/net edge and the spread / swap / slippage cost split, per trade, in points (#25 —
+    a reusable version of the dry run #23 S3 baseline's hand derivation, ``results/probes/
+    s2code_baseline.py``). Also ``trades_per_year`` and ``cost_pct_of_gross``.
+
+    Needs the *engine's own* trade columns (``pnl_points``, ``spread_cost_points``,
+    ``swap_points``, ``exit_reason`` — present on every :class:`RuleEvaluator` ``Outcome``, not
+    on :class:`SyntheticEvaluator`'s or a trade-less window): when they are missing, or there are
+    no trades, every per-trade figure below is ``float('nan')`` and ``cost_pct_of_gross`` is
+    ``"n/a"`` rather than raising or dividing by zero.
+
+    Definitions (points, mean per trade; ``pnl_points`` is already net of spread — and of
+    slippage, which ``engine.py`` bakes straight into the fill price with no column of its own):
+
+    * ``spread_points_per_trade`` = mean(``spread_cost_points``) — always >= 0 (a pure cost).
+    * ``swap_points_per_trade`` = ``-mean(swap_points)`` — a *cost* sign (> 0 paid, < 0 a net
+      carry credit), the reverse of the column's own sign convention (``engine.py``: swap is
+      *added* to P&L, so a negative ``swap_points`` is the cost case).
+    * ``slippage_points_per_trade``: not stored per trade — ``engine.py``'s ``slippage_points``
+      is one scalar on the :class:`~quantlab.costs.CostModel`, applied adversely once at entry
+      and once at exit of every trade *except* a target/``gap_target`` exit (a resting limit
+      order never slips). 0 unless ``cost`` (the ``CostModel`` that produced ``outcome`` —
+      ``evaluator.cost``) is passed; the base cost model's default ``slippage_points=0.0`` makes
+      this 0 at an ordinary S3 baseline regardless.
+    * ``gross_points_per_trade`` = mean(``pnl_points``) + spread + slippage: the edge before all
+      three costs (dry run #25 only added back spread; this adds slippage too so the three cost
+      components below sum exactly to ``gross - net``).
+    * ``net_points_per_trade`` = mean(``pnl_points``) + mean(``swap_points``): what the trade
+      actually realised, swap included.
+    * ``cost_points_per_trade`` = spread + swap + slippage = ``gross - net`` exactly.
+    * ``cost_pct_of_gross`` = ``100 * cost / |gross|``, or ``"n/a"`` when
+      ``abs(gross_points_per_trade) < gross_eps`` (#26: undefined/misleading near a zero — or
+      negative — gross; flagged rather than computed).
+    """
+    trades = outcome.trades
+    t = trades.filter(~pl.col("skipped")) if "skipped" in trades.columns else trades
+    n = t.height
+    out: dict[str, Any] = {"n_trades": n}
+
+    d = outcome.daily
+    years: Optional[float] = None
+    if d is not None and d.height >= 2:
+        span_days = (d["date"].max() - d["date"].min()).days
+        if span_days > 0:
+            years = span_days / 365.25
+    out["trades_per_year"] = (n / years) if years else float("nan")
+
+    needed = {"pnl_points", "spread_cost_points", "swap_points"}
+    if n == 0 or not needed.issubset(set(t.columns)):
+        out.update(gross_points_per_trade=float("nan"), net_points_per_trade=float("nan"),
+                   spread_points_per_trade=float("nan"), swap_points_per_trade=float("nan"),
+                   slippage_points_per_trade=float("nan"), cost_points_per_trade=float("nan"),
+                   cost_pct_of_gross="n/a")
+        return out
+
+    pnl = float(t["pnl_points"].mean())
+    spread = float(t["spread_cost_points"].mean())
+    swap_cost = -float(t["swap_points"].mean())
+
+    slip_per_unit = float(getattr(cost, "slippage_points", 0.0) or 0.0)
+    if slip_per_unit and "exit_reason" in t.columns:
+        no_slip_exit = t["exit_reason"].is_in(list(_NEVER_SLIPS_EXITS))
+        legs = 1.0 + (~no_slip_exit).cast(pl.Float64)   # entry always slips + exit unless a target
+        slippage = float((legs * slip_per_unit).mean())
+    else:
+        slippage = 0.0
+
+    gross = pnl + spread + slippage
+    net = pnl - swap_cost                                # = mean(pnl_points) + mean(swap_points)
+    total_cost = spread + swap_cost + slippage            # == gross - net, by construction
+
+    out.update(
+        gross_points_per_trade=gross, net_points_per_trade=net,
+        spread_points_per_trade=spread, swap_points_per_trade=swap_cost,
+        slippage_points_per_trade=slippage, cost_points_per_trade=total_cost,
+        cost_pct_of_gross=("n/a" if abs(gross) < gross_eps else 100.0 * total_cost / abs(gross)),
+    )
     return out
 
 

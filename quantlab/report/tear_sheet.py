@@ -20,6 +20,7 @@ from .. import stats as st
 from ..contracts import RiskType
 from ..gates import GATE_LABELS, GATE_ORDER, GATE_THRESHOLDS
 from . import _card, _figures, _loading, _metrics
+from ._fmt import dash, fmt_metric_value, fmt_sig, gate_threshold_text
 
 _BOOK_PPY = {"FBS": 260.0, "B3": 252.0}
 
@@ -32,6 +33,23 @@ def _json_default(v: Any) -> Any:
     if isinstance(v, np.ndarray):
         return v.tolist()
     return str(v)
+
+
+def _sanitize_json(obj: Any) -> Any:
+    """Recursively replace NaN/+-inf with ``None`` so ``metrics.json`` is strict JSON (#63:
+    ``json.dumps(allow_nan=True)`` used to write the bare ``NaN``/``Infinity`` tokens, which no
+    standard JSON parser accepts). Runs *before* ``json.dumps(..., default=_json_default)``,
+    which then encodes with ``allow_nan=False`` so anything this pass missed raises loudly
+    instead of silently writing invalid JSON."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _sanitize_json(obj.tolist())
+    if isinstance(obj, (float, np.floating)):
+        return None if not np.isfinite(obj) else float(obj)
+    return obj
 
 
 @dataclass
@@ -93,9 +111,11 @@ class TearSheet:
     def to_markdown(self) -> str:
         h = self.headline
         band = h.get("mean_monthly_band", (float("nan"),) * 3)
+        longest_dd = self.risk_profile[1].get("longest_dd_days")
         L = [f"# Tear sheet — {self.study_id}", "",
-            f"**Class:** {h.get('class')} — {h.get('mean_monthly_pct', float('nan')):.1f}%/month at the "
-            f"10% DD budget (bootstrap p5/p50/p95 = {band[0]:.2%}/{band[1]:.2%}/{band[2]:.2%})  ",
+            f"**Class:** {h.get('class')} — {fmt_sig(h.get('mean_monthly_pct'), 2, '%')}/month at the "
+            f"10% DD budget (bootstrap p5/p50/p95 = {dash(band[0], '.2%')}/{dash(band[1], '.2%')}/"
+            f"{dash(band[2], '.2%')})  ",
             f"**Gate verdict:** {h.get('gate_verdict')}  ",
             f"**Risk type:** {self.risk_type.value}  ", ""]
         risks = h.get("key_risks") or []
@@ -108,18 +128,16 @@ class TearSheet:
         for k, v in self.metrics.items():
             if isinstance(v, dict):
                 continue
-            disp = f"{v:.4g}" if isinstance(v, float) else str(v)
-            L.append(f"| {k} | {disp} | {self.interpretations.get(k, '')} |")
+            L.append(f"| {k} | {fmt_metric_value(v)} | {self.interpretations.get(k, '')} |")
         L += ["", "## Gates (as logged in the ledger)", "", "| Gate | Value | Threshold | Status |", "|---|---|---|---|"]
         for r in self.gate_table.iter_rows(named=True):
-            val = "—" if r["value"] is None else f"{r['value']:.3g}" if isinstance(r["value"], float) else r["value"]
-            L.append(f"| {r['label']} | {val} | {r['threshold']} | {r['status']} |")
+            L.append(f"| {r['label']} | {fmt_metric_value(r['value'])} | {r['threshold']} | {dash(r['status'])} |")
         rp_label, rp = self.risk_profile
         L += ["", "## Risk profile", "",
-             f"**{rp_label}** — MaxDD {rp.get('max_dd', float('nan')):.1%}, "
-             f"longest DD {rp.get('longest_dd_days', float('nan')) / 21.0:.1f} months, "
-             f"max losing streak {rp.get('max_losing_streak', 0):.0f}, "
-             f"skew {rp.get('skew', float('nan')):.2f}, CVaR95 {rp.get('cvar95', float('nan')):.2%}", ""]
+             f"**{rp_label}** — MaxDD {dash(rp.get('max_dd'), '.1%')}, "
+             f"longest DD {dash(longest_dd / 21.0 if longest_dd is not None else None, '.1f')} months, "
+             f"max losing streak {dash(rp.get('max_losing_streak'), '.0f')}, "
+             f"skew {dash(rp.get('skew'), '.2f')}, CVaR95 {dash(rp.get('cvar95'), '.2%')}", ""]
         return "\n".join(L)
 
     # ----------------------------------------------------------------- write_results
@@ -133,7 +151,8 @@ class TearSheet:
                   "risk_profile": {"label": self.risk_profile[0], "evidence": self.risk_profile[1]},
                   "figures": {k: str(v) for k, v in fig_paths.items()}}
         metrics_json = out / "metrics.json"
-        metrics_json.write_text(json.dumps(payload, indent=2, default=_json_default, allow_nan=True))
+        metrics_json.write_text(json.dumps(_sanitize_json(payload), indent=2, default=_json_default,
+                                           allow_nan=False))
         md_path = out / "tear_sheet.md"
         md_path.write_text(self.to_markdown())
         return {"metrics_json": metrics_json, "tear_sheet_md": md_path, "figures": fig_paths}
@@ -146,8 +165,7 @@ def _gate_table(gates_event: dict[str, Any] | None) -> pl.DataFrame:
     gv, gs = gates_event.get("gates") or {}, gates_event.get("gate_status") or {}
     rows = []
     for g in GATE_ORDER:
-        thr = GATE_THRESHOLDS.get(g)
-        thr_txt = f"{thr[0]} {thr[1]}" if thr else ""
+        thr_txt = gate_threshold_text(GATE_THRESHOLDS.get(g))
         v = gv.get(g)
         rows.append({"gate": g, "label": GATE_LABELS.get(g, g),
                     "value": float(v) if isinstance(v, (int, float)) and np.isfinite(v) else None,
@@ -215,7 +233,7 @@ def tear_sheet(study_id: str, *, evaluator: Any = None, ledger_dir: Path | None 
     rows: list[dict[str, Any]] = []
     for mdict, idict, rlist in (
         _metrics.returns_and_risk(daily, ppy, budget),
-        _metrics.costs(trades),
+        _metrics.costs(trades, evaluator),
         _metrics.robustness(gates_event, pbo, holdout_data, wfo_recent),
         _metrics.trade_level(rtype, trades, daily["date"] if daily is not None else None),
     ):

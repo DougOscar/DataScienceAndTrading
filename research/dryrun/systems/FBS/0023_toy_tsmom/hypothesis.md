@@ -10,6 +10,7 @@ symbols:
 - EURUSD
 symbol: EURUSD
 timeframe: H4
+study_id: fbs-0023-a1
 ---
 
 **DRY RUN — toy system, not a research candidate** (DESIGN §10 Phase 2 exit test; sandbox `research/dryrun/`)

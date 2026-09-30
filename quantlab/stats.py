@@ -74,7 +74,7 @@ def holdout_band_seed(study_id: str) -> int:
 
 __all__ = [
     "sharpe_per_period", "psr", "expected_max_sharpe", "dsr", "dsr_from_matrix", "DSRResult",
-    "effective_n_trials", "min_trl", "power_check", "pbo_cscv", "PBOResult",
+    "effective_n_trials", "min_trl", "power_check", "dsr_required_sharpe", "dev_years_available", "pbo_cscv", "PBOResult",
     "optimal_block_length", "stationary_bootstrap_indices", "bootstrap_stats", "VEC_STATS",
     "return_at_dd_budget", "BudgetResult", "classify_monthly_return",
     "spa_test", "white_reality_check", "bh_fdr", "time_stability", "regime_split",
@@ -83,6 +83,8 @@ __all__ = [
     "holdout_status", "DECISIVE_MAX_ZERO_EDGE_PASS", "HOLDOUT_STATUSES",
     "HOLDOUT_BAND_N_BOOT", "HOLDOUT_BAND_N_POWER", "holdout_band_seed",
     "random_selectivity_null", "random_entry_null", "empirical_pvalue", "ablation_compare",
+    "random_side_signals", "random_side_null", "ablation_power", "ablation_test", "ablation_verdict",
+    "ABLATION_MIN_POWER", "ABLATION_REFERENCE_EFFECT",
 ]
 
 
@@ -398,20 +400,145 @@ def min_trl(sr: float, target_sr: float = 0.0, skew: float = 0.0, kurt: float = 
     return {"periods": float(periods), "years": float(periods / periods_per_year)}
 
 
-def power_check(expected_sr_annual: float, trades_per_year: float, years_available: float, *,
-                periods_per_year: float = 260.0, skew: float = 0.0, kurt: float = 3.0,
-                prob: float = 0.95) -> dict[str, Any]:
-    """S1 power check: can the dev window reach MinTRL for the card's expected Sharpe?
+def dsr_required_sharpe(n_trials: float, n_obs: int, *, skew: float = 0.0, kurt: float = 3.0,
+                        prob: float = 0.95) -> float:
+    """Per-period Sharpe an estimate over ``n_obs`` daily returns must reach for the gate's DSR to
+    be ≥ ``prob``: the root in SR of PSR(SR | SR0, n_obs) = prob, with the gate's hurdle
+    SR0 = √(1/(n_obs − 1)) · E[max of ``n_trials``] (:class:`DSRResult`; raw N, V0 = 1/(T − 1)).
+    Moments are the ones supplied (normal by default).  inf when unreachable (n_obs ≤ 2)."""
+    if n_obs is None or not np.isfinite(n_obs) or n_obs <= 2:
+        return float("inf")
+    t = float(n_obs)
+    sr0 = expected_max_sharpe(max(float(n_trials), 1.0), 1.0 / (t - 1.0))
+    z = float(sps.norm.ppf(prob))
+    f = lambda s: (s - sr0) * math.sqrt(t - 1.0) / float(_sr_denominator(s, skew, kurt)) - z  # noqa: E731
+    lo, hi = sr0, sr0 + 0.05
+    while f(hi) < 0:
+        lo, hi = hi, hi * 2.0 + 0.05
+        if hi > 1.0:                                   # a daily Sharpe of 1 ≈ 16 annualised: unreachable
+            return float("inf")
+    from scipy.optimize import brentq
+    return float(brentq(f, lo, hi, xtol=1e-12))
 
-    MinTRL is computed on **daily** returns (per-period SR = annual/√ppy).  Also reports the
-    number of trades the dev window will contain and the trades MinTRL implies at the card's
-    trade rate.  ``feasible`` False → recommend early kill (or a redesign raising trade count)."""
-    sr = expected_sr_annual / math.sqrt(periods_per_year)
-    mt = min_trl(sr, 0.0, skew, kurt, prob, periods_per_year)
+
+def dev_years_available(book: str, symbols: str | Sequence[str], timeframe: str | None = None) -> dict[str, Any]:
+    """Years of development data for (book, symbols, timeframe), from the data manifest only
+    (``data.catalog`` metadata; no bar is read).  Every timeframe is resampled from the symbol's
+    M1 file (``data.load_bars``), so the span is the latest M1 start over ``symbols`` → the book's
+    holdout start; ``timeframe`` is validated and recorded.  Returns ``years`` (365.25-day years),
+    ``start``, ``end`` (= holdout start, exclusive) and ``per_symbol`` starts."""
+    from datetime import datetime as _dt
+
+    from . import config, data
+    b = config.get_book(book)
+    syms = [symbols] if isinstance(symbols, str) else list(symbols)
+    if not syms:
+        raise ValueError("dev_years_available needs at least one symbol")
+    if timeframe is not None and timeframe not in data._TF_MINUTES:
+        raise ValueError(f"unknown timeframe {timeframe!r}")
+    cat = data.catalog(b.name)
+    starts = {}
+    for sym in syms:
+        c = cat.filter((pl.col("symbol") == sym) & (pl.col("timeframe") == "M1"))
+        if c.height == 0:
+            raise ValueError(f"no M1 bars for {sym!r} in the {b.name} catalog (data/manifest.json)")
+        row = c.sort("end", descending=True).row(0, named=True)      # the file load_bars reads
+        st0 = row["start"]
+        starts[sym] = st0 if isinstance(st0, _dt) else _dt.fromisoformat(str(st0))
+    start = max(starts.values())
+    end = b.holdout_start
+    years = max(0.0, (end - start).total_seconds() / (365.25 * 86400.0))
+    return {"years": years, "start": start.isoformat(sep=" "), "end": end.isoformat(sep=" "),
+            "per_symbol": {k: v.isoformat(sep=" ") for k, v in starts.items()}, "timeframe": timeframe,
+            "source": "manifest (M1 start → holdout start)"}
+
+
+def power_check(expected_sr_annual: float, trades_per_year: float, years_available: float | None = None, *,
+                n_trials: float = 1.0, periods_per_year: float = 260.0, skew: float = 0.0, kurt: float = 3.0,
+                prob: float = 0.95, book: str | None = None, symbols: str | Sequence[str] | None = None,
+                timeframe: str | None = None) -> dict[str, Any]:
+    """S1 power check: can the dev window confirm the card's expected Sharpe, after deflation?
+
+    Two requirements, both on **daily** returns (per-period SR = annual / √ppy):
+
+    * **MinTRL** [BLdP12]: the days needed for PSR(SR* = 0) ≥ ``prob`` if the observed Sharpe
+      equals the expected one (``min_trl_years``; ``mintrl_feasible``).
+    * **DSR** (the S5 gate, :class:`DSRResult`): with ``n_trials`` = raw N the DSR will use (this
+      study's planned trials + every related earlier study's, :func:`ledger.related_prior_trials`,
+      + any declared prior / scanned-candidate count), the hurdle over the window is
+      SR0 = √(1/(T − 1)) · E[max of N] (``dsr_hurdle_sr_annual``) and the Sharpe needed for
+      DSR ≥ ``prob`` is ``dsr_required_sr_annual`` (:func:`dsr_required_sharpe`);
+      ``dsr_feasible`` = expected ≥ required.  ``dsr_min_years`` is the window length at which
+      the expected Sharpe would just reach DSR = ``prob`` (the hurdle shrinks as √(1/T)).
+
+    ``feasible`` = ``mintrl_feasible`` **and** ``dsr_feasible``; False → recommend early kill.
+    Both are point-estimate criteria: "feasible" means that a strategy whose true Sharpe is the
+    expected one reaches the threshold with only about **50 % probability** (the observed Sharpe
+    falls below its mean half the time) — it is a necessary condition, not adequate power.
+
+    **The trade rate does not enter the daily MinTRL or the DSR** (they are functions of the
+    daily Sharpe and the number of days).  It informs the S5 *trade-count* gate: under iid trades
+    the per-trade Sharpe is ≈ SR_annual / √(trades_per_year), and ``trades_needed_per_trade_mintrl``
+    is the per-trade MinTRL (normal moments) that gate will ask for, against ``expected_trades``
+    in the window (``trade_count_feasible``).  In that approximation the two MinTRLs cover about
+    the same span of years, so raising the trade count only helps if it raises the Sharpe.
+    ``trades_needed`` (= trades_per_year × MinTRL years) is kept for continuity.
+
+    ``years_available``: dev-window years; omitted → derived from the data manifest for
+    (``book``, ``symbols``, ``timeframe``) by :func:`dev_years_available` (metadata only)."""
+    src = "explicit"
+    if years_available is None:
+        if book is None or symbols is None:
+            raise ValueError("power_check: give years_available, or book= and symbols= to read it from the manifest")
+        dy = dev_years_available(book, symbols, timeframe)
+        years_available, src = dy["years"], f"{dy['source']}: {dy['start']} → {dy['end']}"
+    ppy = float(periods_per_year)
+    n_tr = float(n_trials)
+    if not np.isfinite(n_tr) or n_tr < 1:
+        raise ValueError(f"n_trials must be ≥ 1 (raw N for the DSR), got {n_trials!r}")
+    ann = math.sqrt(ppy)
+    sr = expected_sr_annual / ann
+    mt = min_trl(sr, 0.0, skew, kurt, prob, ppy)
+    t_obs = int(round(years_available * ppy))
+    sr0 = expected_max_sharpe(n_tr, 1.0 / (t_obs - 1)) if t_obs > 2 else float("inf")
+    sr_req = dsr_required_sharpe(n_tr, t_obs, skew=skew, kurt=kurt, prob=prob)
+    exp_dsr = psr(sr, sr0, t_obs, skew, kurt) if t_obs > 2 and np.isfinite(sr0) else float("nan")
+    dsr_ok = bool(np.isfinite(sr_req) and sr >= sr_req)
+
+    def _dsr_at(tn: float) -> float:
+        return psr(sr, expected_max_sharpe(n_tr, 1.0 / (tn - 1.0)), tn, skew, kurt)
+
+    if sr <= 0 or not np.isfinite(sr):
+        dsr_min_days = float("inf")
+    else:
+        lo, hi = 3.0, 3.0
+        while _dsr_at(hi) < prob and hi < 1e9:
+            lo, hi = hi, hi * 2.0
+        if _dsr_at(hi) < prob:
+            dsr_min_days = float("inf")
+        else:
+            for _ in range(200):
+                mid = 0.5 * (lo + hi)
+                lo, hi = (mid, hi) if _dsr_at(mid) < prob else (lo, mid)
+            dsr_min_days = hi
+    tpy = float(trades_per_year)
+    sr_trade = expected_sr_annual / math.sqrt(tpy) if tpy > 0 else float("nan")
+    mt_trade = min_trl(sr_trade, 0.0, 0.0, 3.0, prob, 1.0)["periods"] if tpy > 0 else float("inf")
+    exp_trades = tpy * years_available
+    mintrl_ok = bool(mt["years"] <= years_available)
     return {"min_trl_years": mt["years"], "min_trl_days": mt["periods"],
-            "years_available": years_available, "feasible": bool(mt["years"] <= years_available),
-            "expected_trades": trades_per_year * years_available,
-            "trades_needed": trades_per_year * mt["years"] if np.isfinite(mt["years"]) else float("inf")}
+            "years_available": years_available, "years_source": src, "n_obs_days": t_obs,
+            "mintrl_feasible": mintrl_ok,
+            "n_trials": n_tr, "dsr_hurdle_sr_annual": sr0 * ann, "dsr_required_sr_annual": sr_req * ann,
+            "expected_dsr": exp_dsr, "dsr_feasible": dsr_ok,
+            "dsr_min_years": dsr_min_days / ppy, "dsr_min_days": dsr_min_days,
+            "feasible": bool(mintrl_ok and dsr_ok),
+            "expected_trades": exp_trades,
+            "trades_needed": tpy * mt["years"] if np.isfinite(mt["years"]) else float("inf"),
+            "per_trade_sr": sr_trade, "trades_needed_per_trade_mintrl": mt_trade,
+            "trade_count_feasible": bool(np.isfinite(mt_trade) and exp_trades >= mt_trade),
+            "power_note": "feasible = the expected Sharpe, if observed exactly, clears MinTRL and DSR ≥ "
+                          f"{prob:g} (≈ 50 % power); the trade rate informs the trade-count gate only"}
 
 
 # =========================================================================== PBO (CSCV)
@@ -1306,3 +1433,120 @@ def ablation_compare(daily_on, daily_off, *, periods_per_year: float = 260.0, dd
                      "max_dd": metrics.max_drawdown(a), "cvar95": metrics.cvar(a, 0.95),
                      "leverage_at_budget": br.leverage, "monthly_at_budget": br.mean_monthly})
     return pl.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------- random-side null (full-system ablation)
+ABLATION_MIN_POWER = 0.80          # below this power at the reference effect a non-rejection is "inconclusive"
+ABLATION_REFERENCE_EFFECT = 0.5    # default reference effect, annualised Sharpe (= the cost-stress gate's floor)
+
+
+def random_side_signals(signals: pl.DataFrame, rng: np.random.Generator, *, column: str = "signal",
+                        p_long: float = 0.5) -> pl.DataFrame:
+    """Replace the side of every entry row (``column`` ∈ {−1, +1}) with an independent coin
+    (+1 with probability ``p_long``); every other row (0 = hold, flat/exit codes) and every other
+    column (``stop_dist``, ``target_dist``) is unchanged, so entry timestamps, stops, time exits
+    and sizing stay the system's own.  The strategy-side hook for :func:`random_side_null`
+    (dry run #23 probe ``s5_randside.py``).  Engine limitation: when two consecutive entries draw
+    the same side the engine treats the second as "already in position" (no close + reopen, stop
+    not re-anchored) — the null then pays one round trip less spread (conservative against the
+    system)."""
+    coin = np.where(rng.random(signals.height) < p_long, 1, -1).astype(np.int8)
+    dt = signals.schema[column]
+    return signals.with_columns(
+        pl.when(pl.col(column).is_in([-1, 1])).then(pl.Series("__coin", coin))
+        .otherwise(pl.col(column)).cast(dt).alias(column))
+
+
+def random_side_null(evaluate_fn: Callable[[np.ndarray, np.random.Generator], Any], entries, n_draws: int,
+                     rng: np.random.Generator, *, preserve_mix: bool = False, p_long: float = 0.5,
+                     periods_per_year: float = 260.0) -> np.ndarray:
+    """Null distribution for a **full system's direction call** (mechanism ablation, DESIGN §4.2):
+    the same entry timestamps and holding / exit rules, sides randomised.
+
+    ``entries``: the real sides of the system's entries (array of ±1) or their count (int).
+    Each draw builds a side vector — iid coins with P(long) = ``p_long`` (default), or a random
+    permutation of the real sides with ``preserve_mix=True`` (same long/short mix) — and calls
+    ``evaluate_fn(sides, draw_rng)``, which must re-run the system with entry *k* taken on side
+    ``sides[k]`` (same timestamp, stop, time exit, sizing) and return an annualised Sharpe, an
+    Outcome or daily returns.  ``draw_rng`` is an independent child generator for evaluators that
+    randomise the side at the signal level instead (:func:`random_side_signals`, e.g. a strategy
+    wrapper seeded from it) and ignore ``sides``.
+
+    Honest use (dry-run #23 red team M1): compare like with like — an OOS real series (the
+    walk-forward splice) with the same splice under random sides, or re-run the selection inside
+    each null draw.  A best-of-N in-sample Sharpe against a fixed-config null is biased towards
+    "supports".  Judge the result with :func:`ablation_test` / :func:`ablation_verdict`, which
+    report the test's power."""
+    if isinstance(entries, (int, np.integer)):
+        real = None
+        n = int(entries)
+    else:
+        real = np.asarray(entries, dtype=int)
+        n = real.size
+        if not np.isin(real, (-1, 1)).all():
+            raise ValueError("entries must be ±1 sides (or an int count)")
+    if preserve_mix and real is None:
+        raise ValueError("preserve_mix needs the real sides, not a count")
+    out = np.empty(n_draws)
+    children = rng.spawn(n_draws)
+    for i, child in enumerate(children):
+        if preserve_mix:
+            sides = child.permutation(real)
+        else:
+            sides = np.where(child.random(n) < p_long, 1, -1).astype(int)
+        out[i] = _to_sharpe(evaluate_fn(sides, child), periods_per_year)
+    return out
+
+
+def ablation_power(null, effect: float, alpha: float = 0.05) -> float:
+    """Power of the one-sided Monte-Carlo test (:func:`empirical_pvalue` < ``alpha``) against a
+    **location-shift** alternative: the real statistic is distributed like a null draw plus
+    ``effect`` (same units as ``null``, e.g. annualised Sharpe).  Estimated on the null sample
+    itself: the share of shifted draws the test would reject.  NaN if the null has no finite draw."""
+    nl = np.sort(np.asarray(null, float)[np.isfinite(np.asarray(null, float))])
+    if nl.size == 0:
+        return float("nan")
+    x = nl + float(effect)
+    n_ge = nl.size - np.searchsorted(nl, x, side="left")          # #{null ≥ x}
+    p = (1.0 + n_ge) / (1.0 + nl.size)
+    return float(np.mean(p < alpha))
+
+
+def ablation_test(real: float, null, alpha: float = 0.05, *, effect: float | None = None,
+                  min_power: float = ABLATION_MIN_POWER) -> dict[str, Any]:
+    """Judge an ablation (real statistic vs its null draws) with its power (dry run #23, #72).
+
+    * ``supports`` — one-sided p = :func:`empirical_pvalue` < ``alpha``: the real statistic beats
+      the null's upper tail.
+    * ``contradicts`` — p ≥ ``alpha`` **and** the test was adequately powered: under a location
+      shift of ``effect`` it would have rejected with probability ≥ ``min_power`` (default 0.80).
+    * ``inconclusive`` — p ≥ ``alpha`` but the test is **underpowered**: ablation_power(null,
+      effect, alpha) < ``min_power``, i.e. the null's spread is so wide that a real effect of the
+      reference size would usually not be detected either; a non-rejection is then not evidence
+      against the mechanism.
+
+    ``effect``: the reference effect, in the null's units — pass the card's expected improvement
+    (e.g. its expected Sharpe for a side ablation); default :data:`ABLATION_REFERENCE_EFFECT`
+    (0.5 annualised Sharpe, the cost-stress gate's floor).  Never the observed difference (that is
+    "observed power", which only restates the p-value).  Returns verdict, p_value, power, effect,
+    min_power, alpha, null summary (median, p95 at 1 − alpha, sd, n) and real − median."""
+    nl = np.asarray(null, float)
+    nl = nl[np.isfinite(nl)]
+    if nl.size == 0 or not np.isfinite(real):
+        raise ValueError("ablation_test needs a finite real statistic and at least one finite null draw")
+    eff = ABLATION_REFERENCE_EFFECT if effect is None else float(effect)
+    p = empirical_pvalue(real, nl)
+    pw = ablation_power(nl, eff, alpha)
+    verdict = "supports" if p < alpha else ("contradicts" if pw >= min_power else "inconclusive")
+    return {"verdict": verdict, "p_value": p, "power": pw, "effect": eff, "min_power": float(min_power),
+            "alpha": float(alpha), "real": float(real), "null_median": float(np.median(nl)),
+            "null_upper": float(np.quantile(nl, 1.0 - alpha)),
+            "null_sd": float(np.std(nl, ddof=1)) if nl.size > 1 else float("nan"),
+            "real_minus_median": float(real - np.median(nl)), "n_draws": int(nl.size)}
+
+
+def ablation_verdict(real: float, null, alpha: float = 0.05, *, effect: float | None = None,
+                     min_power: float = ABLATION_MIN_POWER) -> str:
+    """"supports" / "contradicts" / "inconclusive" — see :func:`ablation_test` (which also returns
+    the p-value and the power behind the verdict)."""
+    return ablation_test(real, null, alpha, effect=effect, min_power=min_power)["verdict"]

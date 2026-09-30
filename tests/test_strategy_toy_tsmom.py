@@ -9,6 +9,7 @@ prices, which row) is inlined in each test so every expected value is auditable 
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -20,12 +21,34 @@ from quantlab.costs import CostModel, InstrumentSpec
 from quantlab.engine import run_backtest
 from quantlab.strategies import toy_tsmom
 from quantlab.strategies.toy_tsmom import ToyTsmom, ToyTsmomParams
+from quantlab.systems import card_space_corners
 from quantlab.testing import (
     assert_engine_causal,
     assert_no_lookahead,
     assert_strategy_source_clean,
     synthetic_bars,
 )
+
+# Mirrors hypothesis.md's own "Free parameters" table verbatim (research/dryrun/systems/FBS/
+# 0023_toy_tsmom/hypothesis.md) -- kept as a literal here rather than read from that (sandbox,
+# throwaway per DESIGN §10 Phase 2) path, so this test stays hermetic and the card text audited
+# below is exactly what's asserted against.
+_CARD_FREE_PARAMS = """
+**Free parameters (pre-registered; reviewed by the red team at S2):** 3 parameters, full grid of
+12 x 7 x 10 = **840 configurations** (all count as trials).
+| name | type | range [lo, hi] (or levels) | plateau scale | economic justification (1 line) |
+|---|---|---|---|---|
+| lookback | int | [10, 120], grid step 10 (12 levels) | relative (r = 0.20) | ... |
+| stop_mult | float | [1.0, 4.0], grid step 0.5 (7 levels) | relative (r = 0.20) | ... |
+| hold | int | [6, 60], grid step 6 (10 levels) | relative (r = 0.20) | ... |
+"""
+
+# #31: the grid's 2^3 = 8 corners, plus the mid-grid prior itself.
+_GRID_CORNERS = card_space_corners(_CARD_FREE_PARAMS)
+assert len(_GRID_CORNERS) == 8, _GRID_CORNERS
+_AUDIT_PARAM_SETS = [ToyTsmomParams()] + [
+    ToyTsmomParams(**{**asdict(ToyTsmomParams()), **corner}) for corner in _GRID_CORNERS
+]
 
 # A generic FX-like spec (point=1e-5), independent of any real broker export -- same pattern as
 # quantlab.systems' own template notebook audit cell and tests/test_evaluators.py's SmaCross spec.
@@ -79,16 +102,22 @@ def _bars_from_close(
 # =============================================================================================
 # mandatory audits
 # =============================================================================================
-def test_no_lookahead_audit():
-    """Exhaustive (no ``max_forced_cuts``) truncation + future-perturbation audit, default
-    (mid-grid) parameters -- the exact class the S3 baseline and every evaluator call use."""
+@pytest.mark.parametrize("params", _AUDIT_PARAM_SETS,
+                         ids=["prior"] + [f"corner{i}" for i in range(len(_GRID_CORNERS))])
+def test_no_lookahead_audit(params):
+    """Exhaustive (no ``max_forced_cuts``) truncation + future-perturbation audit, at the
+    mid-grid prior -- the exact class the S3 baseline and every evaluator call use -- AND at
+    every corner of the card's pre-registered grid (#31: the judge perturbs there too, not only
+    around the centre)."""
     bars = synthetic_bars(700, seed=11, timeframe="H4")
-    assert_no_lookahead(ToyTsmom, bars)
+    assert_no_lookahead(lambda: ToyTsmom(params), bars)
 
 
-def test_engine_causal_h4():
+@pytest.mark.parametrize("params", _AUDIT_PARAM_SETS,
+                         ids=["prior"] + [f"corner{i}" for i in range(len(_GRID_CORNERS))])
+def test_engine_causal_h4(params):
     bars = synthetic_bars(500, seed=12, timeframe="H4")
-    assert_engine_causal(ToyTsmom(), bars, SPEC, timeframe="H4", n_checks=8, seed=1, min_history=150)
+    assert_engine_causal(ToyTsmom(params), bars, SPEC, timeframe="H4", n_checks=8, seed=1, min_history=150)
 
 
 def test_strategy_source_is_clean():

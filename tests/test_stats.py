@@ -486,3 +486,102 @@ def test_ablation_compare_rows():
     out = S.ablation_compare(on, off, n_boot=300)
     assert out["rule"].to_list() == ["on", "off"]
     assert out["leverage_at_budget"][0] > out["leverage_at_budget"][1]
+
+
+# ------------------------------------------------------------------ dry run #23 fixes: S1 power check (#8–#10)
+def test_power_check_reports_the_dsr_requirement_and_needs_both():
+    """#8: an 840-trial grid needs SR ≥ ~1.07 just to clear the hurdle; MinTRL alone said feasible."""
+    pc = S.power_check(0.6, 90, 9.0, n_trials=840)
+    assert pc["mintrl_feasible"] and not pc["dsr_feasible"] and not pc["feasible"]
+    assert pc["dsr_hurdle_sr_annual"] == pytest.approx(1.07, abs=0.01)
+    assert pc["dsr_required_sr_annual"] > pc["dsr_hurdle_sr_annual"]
+    # the required Sharpe is exactly the one at which the gate's DSR = 0.95 over the window
+    t = pc["n_obs_days"]
+    sr0 = S.expected_max_sharpe(840, 1.0 / (t - 1))
+    assert S.psr(pc["dsr_required_sr_annual"] / math.sqrt(260), sr0, t) == pytest.approx(0.95, abs=1e-9)
+    # dsr_min_years: at that window length the expected Sharpe just reaches DSR = 0.95
+    tn = pc["dsr_min_days"]
+    assert S.psr(0.6 / math.sqrt(260), S.expected_max_sharpe(840, 1 / (tn - 1)), tn) == pytest.approx(0.95, abs=1e-6)
+    # one trial: the DSR requirement collapses to MinTRL (hurdle 0)
+    one = S.power_check(2.0, 50, 9.0)
+    assert one["n_trials"] == 1 and one["dsr_hurdle_sr_annual"] == 0 and one["feasible"]
+    with pytest.raises(ValueError, match="n_trials"):
+        S.power_check(1.0, 50, 9.0, n_trials=0)
+
+
+def test_power_check_trade_rate_feeds_the_trade_count_flag_only():
+    """#9: the trade rate changes the trade-count requirement, not the daily MinTRL / DSR."""
+    a, b = S.power_check(1.0, 20, 9.0, n_trials=10), S.power_check(1.0, 400, 9.0, n_trials=10)
+    for k in ("min_trl_years", "dsr_required_sr_annual", "feasible"):
+        assert a[k] == b[k]
+    assert a["trades_needed_per_trade_mintrl"] < b["trades_needed_per_trade_mintrl"]
+    assert a["per_trade_sr"] == pytest.approx(1.0 / math.sqrt(20))
+    assert "trade-count" in a["power_note"]
+
+
+def test_power_check_years_from_the_manifest(monkeypatch):
+    """#10: years_available may be omitted and read from the manifest (latest M1 start → holdout)."""
+    from datetime import datetime
+
+    from quantlab import data
+    cat = pl.DataFrame({"symbol": ["EURUSD", "EURUSD", "GBPUSD"], "market": ["forex"] * 3, "book": ["FBS"] * 3,
+                        "timeframe": ["M1", "H1", "M1"], "kind": ["bars"] * 3, "file": ["a", "b", "c"],
+                        "start": [datetime(2016, 5, 2), datetime(2010, 1, 1), datetime(2018, 5, 15)],
+                        "end": [datetime(2026, 5, 15)] * 3, "rows": [1, 1, 1]})
+    monkeypatch.setattr(data, "catalog", lambda book=None, include_ticks=False: cat)
+    dy = S.dev_years_available("FBS", ["EURUSD", "GBPUSD"], "H4")
+    assert dy["start"].startswith("2018-05-15") and dy["years"] == pytest.approx(7.0, abs=0.01)
+    pc = S.power_check(1.0, 50, book="FBS", symbols="EURUSD", timeframe="H4", n_trials=5)
+    assert pc["years_available"] == pytest.approx(9.03, abs=0.01) and pc["years_source"].startswith("manifest")
+    with pytest.raises(ValueError, match="years_available"):
+        S.power_check(1.0, 50)
+    with pytest.raises(ValueError, match="no M1 bars"):
+        S.dev_years_available("FBS", "USDJPY")
+
+
+# ------------------------------------------------------------------ dry run #23 fixes: random-side null (#47, #72)
+def test_random_side_signals_changes_only_entry_sides():
+    sig = pl.DataFrame({"signal": pl.Series([0, 1, 0, -1, 1, 0, -1], dtype=pl.Int8),
+                        "stop_dist": [np.nan, 1.0, np.nan, 2.0, 3.0, np.nan, 4.0], "target_dist": [np.nan] * 7})
+    seen = set()
+    for s in range(20):
+        out = S.random_side_signals(sig, np.random.default_rng(s))
+        assert out.schema == sig.schema and out["stop_dist"].equals(sig["stop_dist"], null_equal=True)
+        assert (out["signal"] == 0).to_list() == (sig["signal"] == 0).to_list()
+        seen.add(tuple(out["signal"].to_list()))
+    assert len(seen) > 5
+
+
+def test_random_side_null_draws_sides_and_is_reproducible():
+    real = np.array([1, 1, 1, -1, 1, 1, -1, 1])
+    got = []
+
+    def ev(sides, child):
+        got.append(sides.copy())
+        return float(np.mean(sides))           # "Sharpe" = mean side (a stand-in statistic)
+
+    a = S.random_side_null(ev, real, 50, np.random.default_rng(1))
+    b = S.random_side_null(ev, real, 50, np.random.default_rng(1))
+    assert np.array_equal(a, b) and a.size == 50
+    assert all(np.isin(s, (-1, 1)).all() and s.size == real.size for s in got)
+    got.clear()
+    S.random_side_null(ev, real, 30, np.random.default_rng(2), preserve_mix=True)
+    assert all(sorted(s) == sorted(real) for s in got)            # same long/short mix
+    with pytest.raises(ValueError, match="preserve_mix"):
+        S.random_side_null(ev, 8, 5, np.random.default_rng(0), preserve_mix=True)
+
+
+def test_ablation_verdict_is_power_aware():
+    """#72: a wide null makes a non-rejection 'inconclusive', not 'contradicts'."""
+    rng = np.random.default_rng(0)
+    wide = rng.normal(-0.28, 0.30, 2000)          # dry-run #23 null: sd ≈ 0.3 annualised Sharpe
+    narrow = rng.normal(-0.28, 0.05, 2000)
+    assert S.ablation_power(wide, 0.2) == pytest.approx(0.15, abs=0.08)
+    assert S.ablation_power(narrow, 0.5) > 0.99
+    assert S.ablation_power(wide, 0.0) <= 0.06                     # size ≈ alpha under the null
+    assert S.ablation_verdict(-0.12, wide, effect=0.2) == "inconclusive"
+    assert S.ablation_verdict(-0.25, narrow, effect=0.5) == "contradicts"
+    assert S.ablation_verdict(0.9, wide) == "supports"
+    t = S.ablation_test(-0.12, wide, effect=0.2)
+    assert t["verdict"] == "inconclusive" and t["power"] < S.ABLATION_MIN_POWER and t["p_value"] >= 0.05
+    assert S.ablation_test(-0.12, wide)["effect"] == S.ABLATION_REFERENCE_EFFECT

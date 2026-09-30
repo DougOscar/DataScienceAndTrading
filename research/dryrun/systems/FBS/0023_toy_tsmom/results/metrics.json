@@ -60,9 +60,9 @@
       ],
       "label": "unprofitable"
     },
-    "cost_pct_of_gross": 18.08435522803448,
-    "break_even_spread_multiple": NaN,
-    "swap_share_of_costs": -0.0,
+    "cost_pct_of_gross": null,
+    "break_even_spread_multiple": null,
+    "swap_share_of_costs": 0.0,
     "gate_verdict": "FAIL",
     "dsr": 0.00019700712894813049,
     "cscv_oos_loss": 0.7887334887334887,
@@ -72,6 +72,8 @@
     "cost_stress_sharpe": -0.9174275932628458,
     "positive_years": 0.6,
     "max_year_share": null,
+    "trade_count": 670.0,
+    "mechanism": null,
     "wfo_oos_recent": -0.07403172677579248,
     "holdout_status": "not unlocked",
     "pbo": 0.5312354312354313,
@@ -100,24 +102,33 @@
     "cvar95": "Daily CVaR95 -1.99%: mean return on the worst 5% of days.",
     "worst_month": "Worst calendar month -10.50%.",
     "pct_time_underwater": "98% of trading days were below the running peak.",
+    "skew": "Skew 1.16: right tail (occasional large wins) in the daily-return distribution.",
+    "kurtosis": "Kurtosis 12.28: normal = 3; higher means fatter tails than a normal distribution.",
     "psr0": "PSR(SR*=0) 0.36: probability the true per-period Sharpe exceeds 0, given its skew/kurtosis over 2352 days -- NOT deflated for multiple testing (see DSR under Robustness for that).",
     "ret_at_budget": "Return at the 10% DD budget: -0.01%/month at leverage k=0.11 (bootstrap band p5/p50/p95 = -0.08%/-0.02%/0.05%) -> classified **unprofitable** (DESIGN \u00a74.5).",
-    "cost_pct_of_gross": "Costs are 1808.4% of gross P&L (gross 1,221, net -20,863, cost 22,084, 100k nominal).",
+    "cost_pct_of_gross": "Costs as % of gross P&L: n/a (gross \u2248 0: gross is 5.5% of total cost, below the 10% floor) (gross 1,221, net -20,863, cost 22,084, 100k nominal).",
     "break_even_spread_multiple": "Break-even spread multiple: not defined (net P&L <= 0 or no spread cost).",
-    "swap_share_of_costs": "Swap is -0% of total cost.",
+    "swap_share_of_costs": "Swap is 0% of total cost -- the cost model ('fbs-v2-uncalibrated') is uncalibrated, so this is the broker-export fallback's silent swap=0, not a measured zero-swap edge (#50).",
+    "gate_verdict": "Gate verdict FAIL (gate_run 1): PASS needs every statistical gate PASS and the mechanism gate PASS (DESIGN \u00a74.2); FAIL is a kill unless an improvement attempt remains.",
     "dsr": "Deflated Sharpe probability 0.000197 (>= 0.95, status FAIL).",
     "cscv_oos_loss": "CSCV OOS loss probability 0.789 (< 0.1, status FAIL).",
     "oos_sharpe": "OOS Sharpe (CPCV median) -0.683 (>= 1.0, status FAIL).",
     "wfo_oos": "Walk-forward procedure OOS 0.07 (>= 0.5, status FAIL); recent third (recomputed from the stored WFO OOS series, same 33% window the gate uses) -0.07.",
-    "plateau": "Parameter plateau 0.00 (>= 0.6, status FAIL): weakest parameter axis 'lookback' keeps >= half the peak Sharpe on 0% of its judge-run perturbations.",
+    "plateau": "Parameter plateau 0.00 (>= 0.6, status FAIL): not assessable -- the selected configuration loses money in-sample (peak Sharpe -0.12 <= 0), so there is no peak for the plateau judge to test around.",
     "cost_stress_sharpe": "Cost-stress Sharpe -0.917 (> 0.5, status FAIL).",
     "positive_years": "Positive years 0.6 (>= 0.6, status PASS).",
     "max_year_share": "Max single-year PnL share \u2014 (<= 0.4, status FAIL).",
+    "trade_count": "Trade count vs MinTRL: 670 observed (>= MinTRL, status FAIL): MinTRL is not reachable at this Sharpe -- a non-positive edge needs an infinite trade count to clear the 95% MinTRL bar.",
+    "mechanism": "Mechanism check: MANUAL -- no automated mechanism_check was supplied; a human records the component-ablation decision (ledger.record_mechanism_review, DESIGN \u00a74.2, checkpoint B).",
+    "wfo_oos_recent": "WFO OOS Sharpe, recent 33% of the stored series -0.07: same series as the wfo_oos gate above, not a second measurement of it.",
     "holdout_status": "Holdout: not unlocked (checkpoint B has not run).",
     "pbo": "PBO 0.53 (diagnostic, not a v1.2 gate \u2014 replaced by CSCV OOS loss): probability the in-sample-best configuration ranks at or below the out-of-sample median.",
     "win_rate": "Win rate 29% over 670 trades.",
     "profit_factor": "Profit factor 0.93 (gross win / gross loss).",
+    "n_trades": "670 trades went into the metrics on this page (skipped trades excluded).",
     "holding_time": "Holding time: median-scale 5.4 bars; 95th percentile 3 trading days.",
+    "expectancy_points": "Mean P&L per trade -12.3 points.",
+    "hold_days_p95": "95th percentile holding time: 3 trading days.",
     "expectancy_r": "Expectancy -0.02 R over 670 trades (mean P&L / planned risk).",
     "max_losing_streak_r": "Longest losing streak: 11 trades in a row with a negative R-multiple.",
     "risk_realisation_error": "Risk-realisation error: mean -0.2% of target, 95th percentile |error| 0.4% (lot-step rounding / gaps vs the planned A-type risk)."
@@ -175,6 +186,16 @@
     },
     {
       "metric": "pct_time_underwater",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "skew",
+      "shown": true,
+      "why": "always reported (DESIGN \u00a75)"
+    },
+    {
+      "metric": "kurtosis",
       "shown": true,
       "why": "always reported (DESIGN \u00a75)"
     },
@@ -240,6 +261,16 @@
     },
     {
       "metric": "max_year_share",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "trade_count",
+      "shown": true,
+      "why": "logged gates event, gate_run 1"
+    },
+    {
+      "metric": "mechanism",
       "shown": true,
       "why": "logged gates event, gate_run 1"
     },
@@ -378,7 +409,7 @@
       "label": "Mechanism check",
       "value": null,
       "status": "MANUAL",
-      "threshold": "manual None"
+      "threshold": "manual"
     }
   ],
   "risk_profile": {
@@ -388,7 +419,7 @@
       "longest_dd_days": 2043,
       "skew": 1.159192294546639,
       "cvar95": -0.019875615609269946,
-      "max_period_share": Infinity,
+      "max_period_share": null,
       "max_period_share_kind": "year",
       "win_rate": 0.29402985074626864,
       "max_losing_streak": 11,
@@ -396,14 +427,14 @@
     }
   },
   "figures": {
-    "equity_underwater": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/equity_underwater.png",
-    "sharpe_yearly": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/sharpe_yearly.png",
-    "sharpe_monthly": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/sharpe_monthly.png",
-    "monthly_heatmap": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/monthly_heatmap.png",
-    "dd_distribution": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/dd_distribution.png",
-    "cpcv_fan": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/cpcv_fan.png",
-    "plateau_heatmap": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/plateau_heatmap.png",
-    "cost_sensitivity": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/cost_sensitivity.png",
-    "wfo_drift": "research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/wfo_drift.png"
+    "equity_underwater": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/equity_underwater.png",
+    "sharpe_yearly": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/sharpe_yearly.png",
+    "sharpe_monthly": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/sharpe_monthly.png",
+    "monthly_heatmap": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/monthly_heatmap.png",
+    "dd_distribution": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/dd_distribution.png",
+    "cpcv_fan": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/cpcv_fan.png",
+    "plateau_heatmap": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/plateau_heatmap.png",
+    "cost_sensitivity": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/cost_sensitivity.png",
+    "wfo_drift": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/systems/FBS/0023_toy_tsmom/results/figures/wfo_drift.png"
   }
 }

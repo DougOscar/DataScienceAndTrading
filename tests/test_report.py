@@ -28,6 +28,9 @@ import test_gates as tg  # noqa: E402  (sibling test module; ledger/study helper
 
 from quantlab import ledger, metrics as m, report  # noqa: E402
 from quantlab.contracts import Outcome, RiskType  # noqa: E402
+from quantlab.costs import CostModel  # noqa: E402
+from quantlab.report import _metrics as rm  # noqa: E402
+from quantlab.report._fmt import dash, fmt_sig  # noqa: E402
 from quantlab.report._loading import ReportError  # noqa: E402
 
 PPY = 260.0
@@ -199,6 +202,40 @@ def test_figures_are_nonempty_pngs(tmp_path):
     for name, p in paths.items():
         assert p.exists() and p.stat().st_size > 0, name
     assert {"equity_underwater", "sharpe_yearly", "sharpe_monthly", "monthly_heatmap"} <= paths.keys()
+
+
+def test_plateau_heatmap_diverging_scale_on_losing_peak():
+    """#59: raw Sharpe on a diverging scale centred at 0, not ``sharpe / peak`` on a ``vmin=0``
+    scale (which inverted on a losing peak)."""
+    from quantlab.report import _figures
+
+    plateau_detail = {
+        "peak_sharpe": -0.12,
+        "points": [
+            {"param": "lookback", "offset": "-r", "sharpe": -0.30, "pass": False},
+            {"param": "lookback", "offset": "-r/2", "sharpe": -0.18, "pass": False},
+            {"param": "lookback", "offset": "+r/2", "sharpe": -0.05, "pass": False},
+            {"param": "lookback", "offset": "+r", "sharpe": 0.20, "pass": True},
+        ],
+    }
+    fig = _figures.fig_plateau_heatmap(plateau_detail)
+    assert fig is not None
+    ax = fig.axes[0]
+    im = [a for a in ax.get_images()][0]
+    # centred at 0: symmetric vmin/vmax, and the colour scale itself must span > 0 as well as
+    # < 0 (a diverging scale), never clipped to [0, ...] like the old sharpe/peak ratio.
+    vmin, vmax = im.get_clim()
+    assert vmin == pytest.approx(-vmax)
+    assert vmin < 0 < vmax
+    # raw Sharpe values plotted, not sharpe / peak (which would all be positive here, since
+    # both sharpe and the negative peak share a sign for the losing points)
+    grid = im.get_array()
+    assert np.nanmin(grid) == pytest.approx(-0.30)
+    assert np.nanmax(grid) == pytest.approx(0.20)
+    assert fig.axes[0].get_title()  # peak is reported in the title text
+    assert "peak" in fig.axes[0].get_title().lower()
+    import matplotlib.pyplot as plt
+    plt.close(fig)
 
 
 # =========================================================================== risk-profile label
@@ -409,3 +446,232 @@ def test_risk_per_trade_ccy_type_b():
     r = m.risk_per_trade_ccy(trades)
     assert r.size == trades.height
     assert (r > 0).all()
+
+
+# =========================================================================== dry-run #23 fix batch
+def _cost_trades(n=10, swap_points=0.0, swap_money_per_lot=0.0, spread_cost_points=1.0,
+                 commission_per_lot=0.0, pnl_points=5.0) -> pl.DataFrame:
+    """A minimal trades frame with exactly ``cost_breakdown``'s needed columns, one P&L per
+    trade so the test can dial gross/cost to a chosen ratio."""
+    return pl.DataFrame({
+        "pnl_ccy": np.full(n, pnl_points * 10.0), "spread_cost_points": np.full(n, spread_cost_points),
+        "swap_points": np.full(n, swap_points), "swap_money_per_lot": np.full(n, swap_money_per_lot),
+        "commission_per_lot": np.full(n, commission_per_lot), "value_per_point_acct": np.full(n, 10.0),
+        "value_per_point_acct_exit": np.full(n, 10.0), "lots": np.full(n, 1.0),
+    })
+
+
+def test_cost_pct_of_gross_reports_na_when_gross_near_zero():
+    """#60: gross well below GROSS_NEAR_ZERO_FRACTION of total cost -> NaN + a plain-language note,
+    not a percentage that reads past 1000%."""
+    # gross = net_pnl + spread_tot; dial net_pnl negative so gross sits just above 0 but far
+    # below the cost total.
+    trades = _cost_trades(n=20, pnl_points=-4.7, spread_cost_points=5.0, commission_per_lot=0.2)
+    cb = m.cost_breakdown(trades)
+    assert cb["gross_pnl_ccy"] > 0
+    assert cb["cost_total_ccy"] > 0
+    assert cb["gross_pnl_ccy"] < m.GROSS_NEAR_ZERO_FRACTION * cb["cost_total_ccy"]
+    assert math.isnan(cb["cost_pct_of_gross"])
+    assert cb["cost_pct_of_gross_note"] is not None and "gross" in cb["cost_pct_of_gross_note"]
+
+    mdict, idict, _ = rm.costs(trades)
+    assert "n/a (gross" in idict["cost_pct_of_gross"]
+    assert "1808" not in idict["cost_pct_of_gross"]  # never a blown-up percentage (dry-run #23 finding)
+
+
+def test_cost_pct_of_gross_stays_defined_well_above_threshold():
+    trades = _cost_trades(n=20, pnl_points=50.0, spread_cost_points=1.0, commission_per_lot=0.1)
+    cb = m.cost_breakdown(trades)
+    assert cb["gross_pnl_ccy"] >= m.GROSS_NEAR_ZERO_FRACTION * cb["cost_total_ccy"]
+    assert math.isfinite(cb["cost_pct_of_gross"])
+    assert cb["cost_pct_of_gross_note"] is None
+
+
+def test_swap_share_of_costs_no_signed_zero():
+    """#61: swap exactly 0 must format as "0%", never "-0%" (``max(-0.0, 0.0) == -0.0`` in
+    Python was the root cause)."""
+    trades = _cost_trades(n=10, swap_points=0.0, swap_money_per_lot=0.0, pnl_points=5.0)
+    cb = m.cost_breakdown(trades)
+    assert cb["swap_share_of_costs"] == 0.0
+    assert math.copysign(1.0, cb["swap_share_of_costs"]) == 1.0
+    assert format(cb["swap_share_of_costs"], ".0%") == "0%"
+
+
+def test_costs_interp_notes_uncalibrated_zero_swap():
+    """#50: swap = 0 *and* the cost model is the uncalibrated fallback -> the cost section says
+    so, instead of reading like a measured zero-swap edge."""
+    trades = _cost_trades(n=10, swap_points=0.0, swap_money_per_lot=0.0, pnl_points=5.0)
+
+    class _Ev:
+        cost = CostModel()  # class default version_tag is "...-uncalibrated"
+
+    assert "uncalibrated" in _Ev.cost.version
+    _, idict, _ = rm.costs(trades, _Ev())
+    assert "uncalibrated" in idict["swap_share_of_costs"]
+
+
+def test_fmt_sig_two_significant_figures():
+    """#67: 2 significant figures, never a fixed decimal count that rounds a small number to
+    "-0.0"."""
+    assert fmt_sig(-0.0148, 2) == "-0.015"
+    assert fmt_sig(4.2, 2) == "4.2"
+    assert fmt_sig(12.345, 2) == "12"
+    assert fmt_sig(0.0, 2) == "0"
+    assert fmt_sig(None) == "—"
+    assert fmt_sig(float("nan")) == "—"
+
+
+def test_dash_helper_missing_vs_real_values():
+    """#62: None/NaN -> em dash everywhere; a real (if extreme) value is never treated as
+    missing."""
+    assert dash(None) == "—"
+    assert dash(float("nan"), ".2f") == "—"
+    assert dash(0.966, ".2f") == "0.97"
+    assert dash(float("inf"), ".2f") == "inf"  # a real value -- the caller translates it (#52)
+
+
+def _synthetic_gates_event(*, plateau_peak, trade_count_status="FAIL", oos_sharpe=-0.4, mechanism_status="MANUAL"):
+    return {
+        "verdict": "FAIL", "gate_run": 1,
+        "gates": {"dsr": 0.01, "cscv_oos_loss": 0.8, "oos_sharpe": oos_sharpe, "wfo_oos": -0.1,
+                 "plateau": 0.0, "cost_stress_sharpe": -0.5, "positive_years": 0.3, "max_year_share": 0.6,
+                 "trade_count": 150.0, "mechanism": None},
+        "gate_status": {"dsr": "FAIL", "cscv_oos_loss": "FAIL", "oos_sharpe": "FAIL", "wfo_oos": "FAIL",
+                       "plateau": "FAIL", "cost_stress_sharpe": "FAIL", "positive_years": "FAIL",
+                       "max_year_share": "FAIL", "trade_count": trade_count_status, "mechanism": mechanism_status},
+        "plateau": {"peak_sharpe": plateau_peak, "weakest_axis": "lookback"},
+    }
+
+
+def test_plateau_interpretation_not_assessable_on_losing_peak():
+    """#39/#49: a peak Sharpe <= 0 gets "not assessable", never the FAIL wording for a real
+    sharp/fragile optimum."""
+    ev = _synthetic_gates_event(plateau_peak=-0.12)
+    _, idict, rows = rm.robustness(ev, None, {"unlocked": False}, None)
+    assert "not assessable" in idict["plateau"]
+    assert "fragile" not in idict["plateau"]
+    names = {r["metric"] for r in rows}
+    assert {"trade_count", "mechanism"} <= names  # #64
+
+
+def test_plateau_interpretation_normal_wording_on_winning_peak():
+    ev = _synthetic_gates_event(plateau_peak=1.4)
+    _, idict, _ = rm.robustness(ev, None, {"unlocked": False}, None)
+    assert "not assessable" not in idict["plateau"]
+    assert "weakest parameter axis" in idict["plateau"]
+
+
+def test_trade_count_not_reachable_at_nonpositive_oos_sharpe():
+    """#52: MinTRL translated into plain language when the claimed edge is non-positive (the
+    exact MinTRL count isn't logged, so this can't just print a number)."""
+    ev = _synthetic_gates_event(plateau_peak=-0.12, oos_sharpe=-0.3, trade_count_status="FAIL")
+    _, idict, _ = rm.robustness(ev, None, {"unlocked": False}, None)
+    assert "not reachable" in idict["trade_count"]
+
+
+def test_trade_count_normal_wording_when_sharpe_positive():
+    ev = _synthetic_gates_event(plateau_peak=1.4, oos_sharpe=1.2, trade_count_status="PASS")
+    _, idict, _ = rm.robustness(ev, None, {"unlocked": False}, None)
+    assert "not reachable" not in idict["trade_count"]
+
+
+def test_mechanism_interpretation_manual_and_decided():
+    ev = _synthetic_gates_event(plateau_peak=1.4, mechanism_status="MANUAL")
+    _, idict, _ = rm.robustness(ev, None, {"unlocked": False}, None)
+    assert "MANUAL" in idict["mechanism"]
+    ev2 = _synthetic_gates_event(plateau_peak=1.4, mechanism_status="FAIL")
+    _, idict2, _ = rm.robustness(ev2, None, {"unlocked": False}, None)
+    assert "does not match" in idict2["mechanism"]
+
+
+def test_applicability_and_interpretations_include_trade_count_and_mechanism():
+    """#64 end to end: a real gated study's tear sheet shows both gates."""
+    study, trades, gate_report, ev, ledger_dir = _study_and_ledger(seed=1)
+    ts = report.tear_sheet(study.study_id, evaluator=ev, ledger_dir=ledger_dir, risk_type="A")
+    shown = {r["metric"]: r["shown"] for r in ts.applicability.iter_rows(named=True)}
+    assert shown["trade_count"] is True and shown["mechanism"] is True
+    assert ts.interpretations["trade_count"] and ts.interpretations["mechanism"]
+
+
+def test_every_shown_metric_has_an_interpretation():
+    """#65: every metric this tear sheet actually reports gets a non-blank interpretation
+    line (skew/kurtosis/n_trades/gate_verdict/expectancy/hold p95/wfo recent used to be blank)."""
+    study, trades, gate_report, ev, ledger_dir = _study_and_ledger(seed=7)
+    rng = np.random.default_rng(3)
+    rich_ev = RichEvaluator(_full_trades(rng, risk_type=RiskType.A))
+    ts = report.tear_sheet(study.study_id, evaluator=rich_ev, ledger_dir=ledger_dir, risk_type="A")
+    for k, v in ts.metrics.items():
+        if isinstance(v, dict):
+            continue
+        assert ts.interpretations.get(k), f"metric {k!r} has no interpretation"
+
+
+def test_metrics_table_renders_dash_not_literal_nan_or_none(tmp_path):
+    """#62: a NaN/None metric value must never show up as the literal text "nan"/"None"."""
+    ts = _minimal_tear_sheet(tmp_path)
+    ts.metrics["fake_nan"] = float("nan")
+    ts.metrics["fake_none"] = None
+    ts.interpretations["fake_nan"] = "x"
+    ts.interpretations["fake_none"] = "y"
+    md = ts.to_markdown()
+    assert "| fake_nan | — |" in md
+    assert "| fake_none | — |" in md
+    assert " nan " not in md and " nan|" not in md
+    assert "| None |" not in md
+
+
+def test_headline_uses_two_significant_figures(tmp_path):
+    ts = _minimal_tear_sheet(tmp_path, mean_monthly_pct=-0.0148)
+    md = ts.to_markdown()
+    assert "-0.015%/month" in md
+    assert "-0.0%/month" not in md
+
+
+def test_write_results_metrics_json_is_strict_json(tmp_path):
+    """#63: metrics.json must never contain a bare NaN/Infinity token."""
+    study, trades, gate_report, ev, ledger_dir = _study_and_ledger(seed=8)
+    ts = report.tear_sheet(study.study_id, evaluator=ev, ledger_dir=ledger_dir, risk_type="C")
+    out = ts.write_results(tmp_path / "results")
+    raw = out["metrics_json"].read_text()
+    assert "NaN" not in raw and "Infinity" not in raw
+    json.loads(raw)  # still valid, parseable JSON
+
+
+# =========================================================================== write_card (#66, #74)
+def test_write_card_two_systems_share_one_vault_attachments_dir(tmp_path):
+    """#66: only the two §6 figures are copied into the shared vault, always slug-prefixed --
+    a second system must never see (or overwrite) the first system's attachments."""
+    vault = tmp_path / "vault"
+    ts1 = _minimal_tear_sheet(tmp_path, mean_monthly_pct=4.2)
+    ts2 = _minimal_tear_sheet(tmp_path, mean_monthly_pct=7.5)
+    report.write_card(ts1, slug="sys-one", name="Sys One", idea="First idea.", status="testing",
+                      issue=1, book="FBS", vault_dir=vault)
+    report.write_card(ts2, slug="sys-two", name="Sys Two", idea="Second idea.", status="testing",
+                      issue=2, book="FBS", vault_dir=vault)
+    att_dir = vault / "attachments"
+    names = sorted(p.name for p in att_dir.iterdir())
+    assert names == ["sys-one_sharpe_monthly.png", "sys-one_sharpe_yearly.png",
+                     "sys-two_sharpe_monthly.png", "sys-two_sharpe_yearly.png"]
+    for n in names:
+        assert (att_dir / n).stat().st_size > 0
+    # the first system's files are untouched by writing the second
+    assert (vault / "sys-one.md").exists() and (vault / "sys-two.md").exists()
+
+
+def test_write_card_scope_appears_in_killed_status_line(tmp_path):
+    """#74: an optional ``scope`` (e.g. "EURUSD H4") is folded into the killed-status line."""
+    ts = _minimal_tear_sheet(tmp_path, gate_verdict="FAIL")
+    card = report.write_card(ts, slug="scoped-kill", name="Scoped Kill", idea="x", status="killed",
+                             stage="S5", reason="failed the plateau gate", scope="EURUSD H4",
+                             issue=9, book="FBS", vault_dir=tmp_path / "vault")
+    text = card.read_text()
+    assert "**Status:** killed (S5, failed the plateau gate, scope: EURUSD H4)" in text
+
+
+def test_write_card_scope_is_optional(tmp_path):
+    ts = _minimal_tear_sheet(tmp_path, gate_verdict="FAIL")
+    card = report.write_card(ts, slug="no-scope-kill", name="No Scope Kill", idea="x", status="killed",
+                             stage="S5", reason="failed the plateau gate", issue=10, book="FBS",
+                             vault_dir=tmp_path / "vault")
+    status_line = next(l for l in card.read_text().splitlines() if l.startswith("**Book:**"))
+    assert status_line == "**Book:** FBS   **Status:** killed (S5, failed the plateau gate)   **Issue:** #10"

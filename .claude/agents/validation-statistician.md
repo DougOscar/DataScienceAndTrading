@@ -46,8 +46,16 @@ The single-system gates (DESIGN §4.2 v1.2) are computed by `quantlab.gates.eval
 - **Time stability** (≥ 60% positive years, no year > 40% of PnL), **regime splits** (volatility
   terciles, trend/range).
 - **Component tests / mechanism ablation** (`stats.random_selectivity_null`, `random_entry_null`,
-  `ablation_compare`): filter vs random filter of equal selectivity; entry vs random entries with
-  identical exits/holding distribution; risk rule on vs off — against the ablation on the card.
+  `random_side_null` / `random_side_signals` for a full system, `ablation_compare`): filter vs random
+  filter of equal selectivity; entry vs random entries (or random sides at the same timestamps)
+  with identical exits/holding distribution; risk rule on vs off — against the ablation on the card.
+  Judge with `stats.ablation_test` / `ablation_verdict` (supports / contradicts / **inconclusive**
+  when underpowered), passing the card's expected effect, never the observed difference. Run it
+  out of sample (walk-forward trades) or with re-selection inside each null draw.
+- **Diagnostics**: every evaluation outside the study (costs-off reruns, other symbols, ablation
+  draws) is logged with `ledger.log_diagnostic(study_id, n_evaluations=…, scope=…, note=…)`; it
+  counts toward the DSR's N of later related studies. `evaluate_gates(log=False)` previews are
+  logged as `gates_preview` automatically.
 - **Batch level**: Benjamini–Hochberg FDR across the batch; Hansen SPA for best-of-batch vs benchmark.
 - **Decay review**: rolling performance vs predicted band, CUSUM / sequential Sharpe test (§4.6).
 
@@ -56,10 +64,17 @@ t-stats. Never use a p-value from a single test as evidence after a search.
 
 ## S1 power check
 Given the card's expected Sharpe and trades/year, compute whether 2016-05→2025-05 can reach the
-MinTRL (`quantlab.stats.power_check(expected_sr_annual, trades_per_year, years_available)`).
-If not → recommend **early kill** (or a redesign that raises trade count).
+MinTRL **and** the DSR hurdle at the grid's trial count:
+`quantlab.stats.power_check(expected_sr_annual, trades_per_year, n_trials=<grid size + prior>,
+book=…, symbols=…, timeframe=…)` (years come from the manifest). `feasible` needs both
+`mintrl_feasible` and `dsr_feasible` (≈ 50 % power); report `dsr_required_sr_annual`. If not →
+recommend **early kill** (or a redesign: a smaller grid lowers the hurdle; more trades only help the
+trade-count gate).
 
 ## S5 gate run
+Load the study read-only with `opt.load_study(study_id)`. `evaluate_gates(log=True)` runs once; a
+second logged run raises unless `rerun_reason=` is given (and is flagged).
+
 Run `quantlab.gates.evaluate_gates(study, evaluator, periods_per_year=…, mechanism_check=…, log=True)`
 once for the official verdict. `log=True` is the only way a gate result reaches the ledger (there is
 no `log_gates`); the first logged run's band becomes the **registered holdout band**, later runs are

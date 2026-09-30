@@ -256,6 +256,14 @@ def risk_per_trade_ccy(trades: pl.DataFrame | None) -> np.ndarray:
     return r[np.isfinite(r)]
 
 
+# Below this fraction of total cost, gross P&L is treated as "~= 0": cost_pct_of_gross is
+# reported as not meaningful rather than as a percentage that can read past 1000% for a
+# razor-thin, sign-noisy gross edge (dry run #23 finding #60: gross at ~5.5% of total cost
+# printed as "1808%", which does not mean "costs ate 18x the edge" in any useful sense -- the
+# edge itself is indistinguishable from zero at that scale). Documented, not tuned.
+GROSS_NEAR_ZERO_FRACTION = 0.10
+
+
 def cost_breakdown(trades: pl.DataFrame | None) -> dict[str, float]:
     """Approximate cost decomposition of a sized-trades frame, in account currency.
 
@@ -270,17 +278,21 @@ def cost_breakdown(trades: pl.DataFrame | None) -> dict[str, float]:
     trades frame lacks the needed columns (no evaluator, or a non-engine trade source).
 
     ``cost_total_ccy`` = spread + commission + (swap only when it drags, i.e. ``-swap_ccy`` when
-    positive).  ``cost_pct_of_gross`` = cost_total / gross P&L (gross > 0 only, else NaN).
-    ``break_even_spread_multiple`` = the multiple of the *current* spread cost at which total
-    net P&L would hit zero, holding every other cost fixed: ``1 + net_pnl / spread_cost_ccy``
-    (only meaningful when both are positive)."""
+    positive; never a signed zero -- #61).  ``cost_pct_of_gross`` = cost_total / gross P&L,
+    defined only when gross is positive *and* not "≈ 0" next to the cost total (below
+    :data:`GROSS_NEAR_ZERO_FRACTION` of it, #60); ``cost_pct_of_gross_note`` is ``None`` when it
+    is defined, else the plain-language reason it isn't (always a string, never left for the
+    caller to reverse-engineer from a bare NaN).  ``break_even_spread_multiple`` = the multiple
+    of the *current* spread cost at which total net P&L would hit zero, holding every other cost
+    fixed: ``1 + net_pnl / spread_cost_ccy`` (only meaningful when both are positive)."""
     need = {"pnl_ccy", "spread_cost_points", "swap_points", "swap_money_per_lot", "commission_per_lot",
             "value_per_point_acct", "value_per_point_acct_exit", "lots"}
     t = _trades_not_skipped(trades)
     nan = float("nan")
     out = {"gross_pnl_ccy": nan, "net_pnl_ccy": nan, "cost_total_ccy": nan, "spread_cost_ccy": nan,
-          "commission_ccy": nan, "swap_ccy": nan, "cost_pct_of_gross": nan, "swap_share_of_costs": nan,
-          "break_even_spread_multiple": nan}
+          "commission_ccy": nan, "swap_ccy": nan, "cost_pct_of_gross": nan,
+          "cost_pct_of_gross_note": "no trades, or the trades frame lacks the sizing cost columns",
+          "swap_share_of_costs": nan, "break_even_spread_multiple": nan}
     if t is None or not need <= set(t.columns) or t.height == 0:
         return out
     lots = t["lots"].to_numpy().astype(float)
@@ -293,11 +305,24 @@ def cost_breakdown(trades: pl.DataFrame | None) -> dict[str, float]:
     net_pnl = float(t["pnl_ccy"].sum())
     spread_tot, swap_tot, commission_tot = float(spread_ccy.sum()), float(swap_ccy.sum()), float(commission_ccy.sum())
     gross = net_pnl + spread_tot
-    swap_cost = max(-swap_tot, 0.0)
+    swap_cost = -swap_tot if swap_tot < 0.0 else 0.0     # #61: max(-0.0, 0.0) is -0.0 in Python
     cost_total = spread_tot + commission_tot + swap_cost
+
+    if gross <= 0:
+        cost_pct_of_gross, cpg_note = nan, "undefined (gross P&L <= 0: costs can't be a share of a negative edge)"
+    elif cost_total > 0 and gross < GROSS_NEAR_ZERO_FRACTION * cost_total:
+        cost_pct_of_gross = nan
+        cpg_note = (f"n/a (gross ≈ 0: gross is {gross / cost_total:.1%} of total cost, below the "
+                    f"{GROSS_NEAR_ZERO_FRACTION:.0%} floor)")
+    else:
+        cost_pct_of_gross, cpg_note = cost_total / gross, None
+
     out.update(gross_pnl_ccy=gross, net_pnl_ccy=net_pnl, cost_total_ccy=cost_total, spread_cost_ccy=spread_tot,
               commission_ccy=commission_tot, swap_ccy=swap_tot,
-              cost_pct_of_gross=(cost_total / gross if gross > 0 else nan),
+              cost_pct_of_gross=cost_pct_of_gross, cost_pct_of_gross_note=cpg_note,
               swap_share_of_costs=(swap_cost / cost_total if cost_total > 0 else nan),
               break_even_spread_multiple=(1.0 + net_pnl / spread_tot if net_pnl > 0 and spread_tot > 0 else nan))
+    for k, v in out.items():                             # #61: belt-and-suspenders, no -0.0 anywhere
+        if isinstance(v, float) and v == 0.0:
+            out[k] = 0.0
     return out

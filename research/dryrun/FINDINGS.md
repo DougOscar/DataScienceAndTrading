@@ -100,3 +100,14 @@ Card-content majors that a real cycle would send back to checkpoint A: ablation 
 74. Kill scope should be recorded per symbol (USDJPY looked different) — card / ledger has no "scope of kill" field.
 
 ## Exit test (DESIGN §10 Phase 2): MET — the toy ran S0→S7 end to end (card → issue → power check → folder → strategy + look-ahead audits → baseline → study → gates → attack → tear sheet → killed card), every hand-off verified, sandbox isolation held (real research/ledger and research/studies untouched; a leak from an earlier test draft was found and guarded). 74 process findings; 4 real bugs found and fixed during the run (card parser, test leak, ATR docstring/parity, and 2 report bugs queued: #59, #66).
+
+## Resolution (Phase 2 fix batch)
+**Fixed in code:** 8–10 (DSR-aware `power_check`, years from the manifest) · 12 · 24 · 25–26 (`evaluators.edge_breakdown`) · 27 · 28 (`baseline` event via `systems.log_baseline`) · 31 (audits at grid corners) · 33 (notebook finds the repo root) · 34/44/68 (`opt.load_study`, read-only) · 35 (stages re-runnable, logged actions guarded) · 36 · 37 · 41 (short final WFO window merged) · 43 · 45 (`rerun_reason=`) · 47 (`stats.random_side_null` / `random_side_signals`) · 49–51 · 56 (`GateReport.to_json`) · 59–67 (report) · 69 (`ledger.log_diagnostic`, counted in related trials) · 70 (`gates_preview` events) · 71 (`CostModel.frictionless`, `costs.frictionless_spec`) · 72 (`stats.ablation_verdict`: supports / contradicts / inconclusive) · 74 (card kill scope).
+**Fixed in the card template / skills / DESIGN:** 1–7 · 11 · 13–20 · 22–23 · 29 (S3 kill rule with uncertainty) · 30 · 32 · 39 · 40 (min_trades documented as S4 choice) · 42/58 (early-kill short-circuit) · 46 (real systems never pass `mechanism_check`) · 55 (prior-work field) · 57.
+**Accepted / documented:** 53 (band registered on FAIL is harmless; the unlock recomputes every gate) · 54 (horizon_end minute detail).
+**Deferred (need a decision or a later phase):**
+- 38 plateau centre guard on mostly-losing surfaces — user decision (options analysed; a behaviour change needs re-calibration).
+- 47b fully unbiased ablation (re-selection inside every null draw, ~3 h per system) — build when the first real candidate reaches S5.
+- 48 engine cannot close+reopen on a same-side signal; engine commission knob for `frictionless()` — engine change, next time the engine is touched.
+- 73 rollover-hour spread share — cost-model calibration (needs the broker export).
+- Test hygiene added on top: session guard over research/ledger, studies, systems; notebook test uses a gitignored scratch dir; wall-clock guards best-of-N.
