@@ -179,4 +179,4 @@ Use both metrics together for robust overfit detection:
 1. **DSR** answers: "Is this Sharpe ratio likely real given how many things I tried?"
 2. **PBO** answers: "Does my strategy selection process have any predictive power?"
 
-If DSR > 0.95 AND PBO < 0.20, the strategy has strong evidence of genuine edge. If either metric fails, additional out-of-sample testing (preferably paper trading) is essential before deploying capital.
+In this repo the binding rules are the DESIGN v1.2 §4.2 gates (DSR ≥ 0.95 with the null-variance hurdle and raw trial count; CSCV P(OOS loss) < 0.10, with PBO only a diagnostic) — not a DSR/PBO pair. If either metric fails, additional out-of-sample testing (preferably paper trading) is essential before deploying capital.

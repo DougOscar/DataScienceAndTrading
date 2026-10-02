@@ -11,10 +11,12 @@ disable-model-invocation: true
    component type), a pointer to `research/DESIGN.md`, and the list of already-tested ideas
    (ledger + closed issues + `DocumentationVault/systems/`).
 2. The scout drafts cards in `research/systems/_drafts/`. Review them yourself against the card
-   template (every field filled, rules unambiguous, prior ranges justified, sources cited,
-   provenance honest). Send back incomplete cards once.
+   template (every field filled, rules unambiguous, prior ranges justified, a plateau scale with a
+   one-line justification for every numeric parameter, risk type A–D, expected Sharpe and
+   trades/yr, a mechanism ablation, book/symbols/timeframe, sources cited, provenance honest).
+   Send back incomplete cards once.
 3. Present the batch to the user as a ranked table: name · book · component · mechanism (1 line) ·
-   expected trades/yr · cost headroom · source. **Checkpoint A**: ask which to approve.
+   expected Sharpe · expected trades/yr · cost headroom · source. **Checkpoint A**: ask which to approve.
 4. For approved cards only: create GitHub issues (`gh issue create --label hypothesis`) and note
    the approval in each issue body ("Approved for testing by the user on <date>"). Rejected drafts
    are deleted, not kept as issues.

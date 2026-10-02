@@ -51,6 +51,7 @@ __all__ = [
     "swap_currency_for",
     "pip_points",
     "stress_slippage_points",
+    "frictionless_spec",
 ]
 
 # --------------------------------------------------------------------------- InstrumentSpec
@@ -263,6 +264,22 @@ class CostModel:
         """Effective spread in points; works elementwise on scalars, numpy arrays or Series."""
         return spread_points * self.spread_multiplier + self.extra_spread_points
 
+    @classmethod
+    def frictionless(cls, base: Optional["CostModel"] = None) -> "CostModel":
+        """Costs-off preset for diagnostics (dry run #23, #71: every S6 "is it the costs?" check):
+        zero spread (``spread_multiplier=0``, ``extra_spread_points=0``), zero slippage, zero swap
+        (``swap_multiplier=0``) and ``stop_fill="level"``.  ``base`` (default the class default)
+        supplies ``version_tag``; the returned ``version`` carries the ``spread_mult0`` /
+        ``swap_mult0`` suffixes, so a frictionless run can never be mistaken for a costed one.
+
+        Commission is **not** a CostModel knob: it is the spec's ``commission_per_lot_rt``
+        (``engine.run_backtest`` copies it onto every trade).  Every uncalibrated fallback spec
+        has commission 0; for a calibrated spec also pass :func:`frictionless_spec` ``(spec)``.
+        Diagnostic only — never the cost model of a gated study."""
+        b = base if base is not None else cls()
+        return replace(b, spread_multiplier=0.0, extra_spread_points=0.0, slippage_points=0.0,
+                       swap_multiplier=0.0, stop_fill="level")
+
     def stressed(self, spread_mult: float = 1.5, extra_slippage_pips: float = 1.0,
                  stop_fill: str = "bar_extreme", *, spec: Optional["InstrumentSpec"] = None,
                  extra_slippage: Optional[float] = None, book: str = "FBS",
@@ -342,6 +359,12 @@ class CostModel:
             slippage_points=self.slippage_points + added_points,
             stop_fill=stop_fill,
         )
+
+
+def frictionless_spec(spec: InstrumentSpec) -> InstrumentSpec:
+    """``spec`` with zero commission and zero swap rates (``swap_long = swap_short = 0``) — the
+    spec-side half of a costs-off diagnostic (see :meth:`CostModel.frictionless`)."""
+    return replace(spec, commission_per_lot_rt=0.0, swap_long=0.0, swap_short=0.0)
 
 
 # --------------------------------------------------------------------------- pip / stress-slippage conventions

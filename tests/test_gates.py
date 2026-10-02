@@ -297,7 +297,7 @@ def test_all_pass(good):
     cs = rep.row("cost_stress_sharpe").interpretation
     assert "1 stress unit of slippage" in cs and "on all market and stop fills" in cs
     # minor (cost-stress text): the real slippage in points and as a multiple of the median spread
-    assert "slippage 10 points per fill for EURUSD" in cs and "× the median dev spread of" in cs
+    assert "slippage 10 points per fill for EURUSD" in cs and "× the median dev H1 spread of" in cs
     d = rep.diagnostics["cost_stress_pip_points"]
     assert d["added_slippage_points"] == 10 and 0 < d["slippage_x_median_spread"] < 5
     assert hb["trades_source"] == "wfo_oos.n_trades" and hb["trades_joint"] is True
@@ -886,11 +886,17 @@ def test_log_gates_counts_own_trials_and_flags_reruns(tmp_path, good):
     r2, _ = run(s2, trades, ledger_dir=tmp_path, log=True)
     assert r2.effective_trials["n_trials_prior"] == 25
     assert ledger.system_prior_trials("FBS", "toy", exclude_study="fbs-0099-a3", ledger_dir=tmp_path)[0] == 50
-    # re-run on the same study → flagged
-    again, _ = run(s1, trades, ledger_dir=tmp_path, log=True)
+    # re-run on the same study → refused without a reason (dry run #23 #45), then flagged
+    with pytest.raises(G.GateError, match="rerun_reason"):
+        run(s1, trades, ledger_dir=tmp_path, log=True)
+    with pytest.raises(G.GateError, match="rerun_reason"):
+        run(s1, trades, ledger_dir=tmp_path, log=True, rerun_reason="  ")
+    again, _ = run(s1, trades, ledger_dir=tmp_path, log=True, rerun_reason="data correction")
     assert len(again.prior_gate_runs) == 1 and again.prior_gate_runs[0]["verdict"] == "PASS"
     assert "gated 1 time(s) before" in again.to_markdown()
-    assert ledger.studies(tmp_path)[s1.study_id]["gate_run"] == 2
+    st1 = ledger.studies(tmp_path)[s1.study_id]
+    assert st1["gate_run"] == 2 and st1["rerun"] is True and st1["rerun_reason"] == "data correction"
+    assert ledger.study_events(s1.study_id, "gates", ledger_dir=tmp_path)[0].get("rerun") is None
     ledger.verify_chain(tmp_path)
 
 
@@ -1116,3 +1122,76 @@ def test_judge_plateau_uses_the_study_cost_model(tmp_path):
     spy, cm = _CostSpy(ev), CostModel(spread_multiplier=1.3)
     G.judge_plateau(res, spy, space=sp, radius=0.2, periods_per_year=PPY, cost=cm)
     assert len(spy.seen) == 5 and all(c is cm for c in spy.seen)
+
+
+# =========================================================================== dry run #23 fixes
+def test_preview_runs_are_logged_but_never_a_gate_run(tmp_path, good):
+    """#70: log=False writes a gates_preview event (verdict + values), never a gate run or band."""
+    study, trades = good
+    ld = register(study, tmp_path / "led")
+    rep, _ = run(study, trades, ledger_dir=ld)
+    ev = ledger.study_events(study.study_id, "gates_preview", ledger_dir=ld)
+    assert len(ev) == 1 and rep.preview_row == ev[0] and rep.ledger_row is None
+    assert ev[0]["preview_verdict"] == rep.verdict and ev[0]["counts_as_gate_run"] is False
+    assert ev[0]["preview_gates"] == rep.values() and ev[0]["preview_gate_status"] == rep.statuses()
+    assert "holdout_band" not in ev[0] and ledger.registered_holdout_band(study.study_id, ledger_dir=ld) is None
+    state = ledger.studies(ld)[study.study_id]
+    assert "verdict" not in state and "gate_run" not in state
+    # the first LOGGED run is still gate run 1 and needs no rerun_reason; it registers the band
+    rep2, _ = run(study, trades, ledger_dir=ld, log=True)
+    assert rep2.prior_gate_runs == [] and rep2.ledger_row["gate_run"] == 1 and rep2.preview_row is None
+    assert rep2.diagnostics["gates_preview_runs_before"] == 1
+    assert ledger.registered_holdout_band(study.study_id, ledger_dir=ld) == rep2.holdout_band
+    rep3, _ = run(study, trades, ledger_dir=ld)                 # a later preview: still no gate run
+    assert rep3.preview_row["preview_run"] == 2 and len(ledger.study_events(study.study_id, "gates", ledger_dir=ld)) == 1
+    ledger.verify_chain(ld)
+
+
+def test_gate_report_to_json_is_strict(tmp_path, good):
+    """#56: to_dict / to_json give strict JSON (NaN / inf → null)."""
+    study, trades = good
+    rep, _ = run(study, trades, ledger_dir=register(study, tmp_path / "led"))
+    rep.diagnostics["weird"] = {"nan": float("nan"), "inf": np.inf, "arr": np.array([1.0, np.nan]),
+                                "tup": (np.int64(3), np.float32(0.5)), "frame": pl.DataFrame({"x": [1]})}
+    rep.rows[0].value = float("inf")
+    txt = rep.to_json(tmp_path / "out" / "gates.json")
+    back = json.loads((tmp_path / "out" / "gates.json").read_text())
+    assert txt == (tmp_path / "out" / "gates.json").read_text()
+    assert back["verdict"] == rep.verdict and [r["gate"] for r in back["rows"]] == [r.gate for r in rep.rows]
+    assert back["rows"][0]["value"] is None and back["diagnostics"]["weird"] == {
+        "nan": None, "inf": None, "arr": [1.0, None], "tup": [3, 0.5], "frame": [{"x": 1}]}
+    assert back["holdout_band"]["sharpe_lo"] == pytest.approx(rep.holdout_band["sharpe_lo"])
+    json.dumps(rep.to_dict(), allow_nan=False)
+
+
+def test_plateau_text_on_a_losing_peak(tmp_path):
+    """#49: a selected configuration with Sharpe ≤ 0 → plateau FAIL, 'not assessable' text."""
+    study, trades = make_study(seed=3, peak_sr=-0.8, slope=0.1, oos_sr=-0.5, wfo_sr=-0.5)
+    rep, _ = run(study, trades, ledger_dir=register(study, tmp_path / "led"))
+    r = rep.row("plateau")
+    assert r.status == "FAIL" and r.value == 0
+    assert r.interpretation.startswith("Not assessable: the selected configuration loses money in-sample")
+    assert "fragile" not in r.interpretation
+
+
+class _NoSwapEvaluator(FakeEvaluator):
+    """Cost drag from spread / slippage only (the swap multiplier has nothing to scale)."""
+
+    def describe(self):
+        return FAKE_DESC
+
+    def __call__(self, params, *, cost=None):
+        c = cost or self.cost
+        return super().__call__(params, cost=replace(c, swap_multiplier=1.0))
+
+
+def test_cost_stress_text_says_the_swap_band_did_nothing_at_swap_zero(tmp_path, good):
+    """#50: EURUSD's uncalibrated spec has swap 0 → the band cannot bite; the text says so."""
+    study, trades = good
+    assert EURUSD.swap_long == 0 and EURUSD.swap_short == 0
+    rep, _ = run(study, trades, evaluator=_NoSwapEvaluator(study, trades), ledger_dir=register(study, tmp_path / "led"))
+    cs = rep.row("cost_stress_sharpe").interpretation
+    assert "the swap band had no effect: swap is 0 in the cost model" in cs and "uncalibrated" in cs
+    assert rep.diagnostics["cost_stress_swap_no_effect"] and rep.diagnostics["cost_stress_swap_zero"]
+    rep2, _ = run(study, trades, ledger_dir=register(study, tmp_path / "led2"))   # swap-sensitive fake
+    assert "no effect" not in rep2.row("cost_stress_sharpe").interpretation

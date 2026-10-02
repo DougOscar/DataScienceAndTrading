@@ -107,7 +107,11 @@ Walk-forward re-optimisation (``WFOConfig``, DESIGN §4.6)
 Refit dates start at ``first date + min_train`` and repeat every ``refit_every``.  At
 refit date *d* the selection procedure sees only rows with date < *d* (anchored: from
 the first date; rolling: from *d* − ``window_length``) and its pick trades rows
-[*d*, next refit).  **This holds only if the candidate set (the columns of the matrix)
+[*d*, next refit).  A final test window shorter than ``WFOConfig.min_test_rows`` (default: a
+quarter of the median full test window in rows, ~¼ of ``refit_every``; 20 rows if there is no
+full window) is not a refit of its own: its rows are appended to the previous refit's test
+window (``meta["wfo"]["tail_merged"]``; FINDINGS #41 — the dev window ending a few days after a
+refit date otherwise produced a refit traded for ~2 weeks).  **This holds only if the candidate set (the columns of the matrix)
 does not itself depend on the data** — ``grid``, ``sobol`` and ``random`` candidate sets
 are fixed before any evaluation; a ``tpe`` candidate set is chosen with the full-dev
 objective, so it already encodes the test folds / the future (red-team B3, probe p07:
@@ -186,7 +190,7 @@ __all__ = [
     "neighbourhoods", "plateau_select", "cpcv_splits", "cpcv_path_map", "cpcv_paths",
     "walk_forward", "run_study", "StudyError", "candidate_set", "METHODS", "DATA_INDEPENDENT_METHODS",
     "WORKER_THREAD_ENV", "PLATEAU_RADIUS_DEFAULT", "PLATEAU_RADIUS_MIN", "normalise_plateau_radius",
-    "space_from_json",
+    "space_from_json", "load_study",
 ]
 
 log = logging.getLogger("quantlab.opt")
@@ -696,7 +700,13 @@ class CPCVConfig:
     purge_days: Optional[int] = None    # None → same as embargo
 
     def describe(self, embargo: Any = "auto", purge: Any = "auto") -> str:
-        return f"CPCV(n={self.n_groups},k={self.k_test},purge={purge}d,embargo={embargo}d)"
+        """``CPCV(n=…,k=…,purge=<rows>d,embargo=<rows>d)``.  Before the trials exist an automatic
+        value is not known yet and is written ``auto(max_hold)`` (FINDINGS #36: never ``autod``);
+        the resolved values (trading-day rows) are logged in the ``selection`` event's
+        ``cv_scheme`` / ``cpcv_purge_days`` / ``cpcv_embargo_days``."""
+        def _d(v: Any) -> str:
+            return f"{int(v)}d" if _is_number(v) else "auto(max_hold)"
+        return f"CPCV(n={self.n_groups},k={self.k_test},purge={_d(purge)},embargo={_d(embargo)})"
 
 
 @dataclass(frozen=True)
@@ -705,14 +715,22 @@ class WFOConfig:
     window: str = "anchored"            # "anchored" | "rolling"
     window_length: str = "3y"           # rolling only
     min_train: str = "2y"
+    # FINDINGS #41: a final refit whose test window has fewer rows than this is not traded on its
+    # own; its rows are appended to the previous refit's test window.  None → a quarter of the
+    # median row count of the full (non-final) test windows, i.e. ~¼ of ``refit_every`` in rows
+    # (20 rows when there is no full window to measure); 0 disables the merge.
+    min_test_rows: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.window not in ("anchored", "rolling"):
             raise ValueError("window must be 'anchored' or 'rolling'")
+        if self.min_test_rows is not None and (isinstance(self.min_test_rows, bool) or int(self.min_test_rows) < 0):
+            raise ValueError("min_test_rows must be None or an int >= 0")
 
     def describe(self) -> str:
         w = self.window if self.window == "anchored" else f"rolling:{self.window_length}"
-        return f"WFO(refit={self.refit_every},window={w},min_train={self.min_train})"
+        extra = "" if self.min_test_rows is None else f",min_test={int(self.min_test_rows)}r"
+        return f"WFO(refit={self.refit_every},window={w},min_train={self.min_train}{extra})"
 
 
 # =========================================================================== neighbourhoods / plateau
@@ -821,6 +839,11 @@ def plateau_select(scores: np.ndarray, nbr: np.ndarray, *, eligible: Optional[np
         "plateau_score": _pscore(g, w), "plateau_score_objective": _pscore(s, w),
         "raw_plateau_score": _pscore(g, raw),
         "n_neighbours": int(n_nb[w]), "gate_value": float(g[w]) if np.isfinite(g[w]) else float("nan"),
+        # diagnostics only (dry run #23 / FINDINGS #38, option d): how the centre sits on the surface
+        "centre_pct_rank": float(np.mean(s[elig] <= s[w])),
+        "centre_minus_smoothed": float(s[w] - smoothed[w]),
+        "gap_to_argmax": float(s[raw] - s[w]),
+        "share_objective_positive": float(np.mean(s[elig] > 0)),
         "smoothed_all": smoothed,
     }
 
@@ -1061,6 +1084,8 @@ def walk_forward(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace
     param_<name>…, train_objective, plateau_score); ``meta`` with drift diagnostics.
     Every refit sees only rows with date < refit_date (and, for a data-dependent candidate set
     such as TPE's, the columns themselves were chosen with the full sample — see module docstring).
+    A final test window shorter than ``schedule.min_test_rows`` is merged into the previous
+    refit's (``meta["tail_merged"]`` = its refit date and row count, else None).
     """
     S = _surface or _build_surface(returns, trials, space, selection, trade_counts, method, entry_counts)
     cfg = PlateauConfig(**{**asdict(selection), "neighbourhood": S.mode})
@@ -1074,13 +1099,26 @@ def walk_forward(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace
         raise StudyError(f"min_train={schedule.min_train} leaves no out-of-sample period")
     refits = pl.date_range(first_refit, d_last, interval=schedule.refit_every, eager=True).to_list()
     refit_np = np.array(refits, dtype="datetime64[D]")
-    oos_parts, prow, sel_units = [], [], []
-    rid = 0
+    windows: list[tuple[np.datetime64, np.ndarray]] = []
     for k, rd in enumerate(refit_np):
         nxt = refit_np[k + 1] if k + 1 < refit_np.size else dates[-1] + np.timedelta64(1, "D")
         test = np.flatnonzero((dates >= rd) & (dates < nxt))
-        if test.size == 0:
-            continue
+        if test.size:
+            windows.append((rd, test))
+    # FINDINGS #41: a short final test window (the data end a few days after the last refit
+    # date) is merged into the previous refit's test window instead of being traded for ~2 weeks
+    # by a configuration re-fitted for it.
+    full_sizes = [t.size for _, t in windows[:-1]]
+    min_rows = (int(schedule.min_test_rows) if schedule.min_test_rows is not None else
+                (max(1, int(round(0.25 * float(np.median(full_sizes))))) if full_sizes else 20))
+    tail_merged = None
+    if len(windows) >= 2 and windows[-1][1].size < min_rows:
+        (rd_prev, t_prev), (rd_last, t_last) = windows[-2], windows[-1]
+        windows[-2:] = [(rd_prev, np.concatenate([t_prev, t_last]))]
+        tail_merged = {"refit_date": str(rd_last), "rows": int(t_last.size), "min_test_rows": min_rows}
+    oos_parts, prow, sel_units = [], [], []
+    rid = 0
+    for rd, test in windows:
         if schedule.window == "anchored":
             ts = dates[0]
         else:
@@ -1113,6 +1151,7 @@ def walk_forward(returns: pl.DataFrame, trials: pl.DataFrame, space: SearchSpace
                else pl.DataFrame(schema={"date": pl.Date, "ret": pl.Float64, "refit_id": pl.Int32, "n_trades": pl.Int64}))
     wfo_params = pl.DataFrame(prow) if prow else pl.DataFrame()
     meta = {"schedule": asdict(schedule), "scheme": schedule.describe(), "n_refits": rid,
+            "min_test_rows": min_rows, "tail_merged": tail_merged,
             **_drift(sel_units, space, [r["selected_trial"] for r in prow])}
     return wfo_oos, wfo_params, meta
 
@@ -1209,12 +1248,36 @@ def _worker_threads(_: Any = None) -> dict[str, Any]:
             **{k: os.environ.get(k) for k in WORKER_THREAD_ENV}}
 
 
+# Warnings a worker must not repeat because the parent emits them once (regex on the message start).
+_WORKER_SILENCED_WARNINGS = (r"no calibrated broker export for ",)
+
+
+def _warn_parent_once(evaluator: Any, book: str) -> None:
+    """Emit the evaluator's instrument-spec warnings (the uncalibrated-broker fallback) once, in the
+    parent, before any worker starts (FINDINGS #37).  ``costs.load_instrument`` warns once per
+    (book, symbol) per process, so this is a no-op when the parent already warned."""
+    from .evaluators import SyntheticEvaluator
+    sym = getattr(evaluator, "symbol", None)
+    if not sym or isinstance(evaluator, SyntheticEvaluator) or getattr(evaluator, "is_synthetic", False):
+        return
+    try:
+        from .costs import load_instrument
+        load_instrument(sym, book=book)
+    except Exception:  # noqa: BLE001 — diagnostic only; the evaluator reports real failures per trial
+        pass
+
+
 def _worker_init(evaluator: Any, cost: Any) -> None:
     # Receive the evaluator config once, load its data once per worker.  The thread caps
     # are already in this process's environment from launch (spawn, F1); setting them
     # here is only a fallback for fork pools and has no effect on an initialised Polars.
     for k, v in WORKER_THREAD_ENV.items():
         os.environ.setdefault(k, v)
+    # FINDINGS #37: the parent already emitted the uncalibrated-broker warning once
+    # (run_study → _warn_parent_once); a spawned worker has a fresh once-per-symbol registry
+    # and would repeat it n_jobs times.
+    for msg in _WORKER_SILENCED_WARNINGS:
+        warnings.filterwarnings("ignore", message=msg, category=UserWarning)
     _W["ev"], _W["cost"], _W["init_error"] = evaluator, cost, None
     try:
         prep = getattr(evaluator, "prepare", None)
@@ -1694,6 +1757,7 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
             raise ValueError(f"plateau_radius names {absolute}, which declare an absolute plateau_step: the radius "
                              f"does not apply to them (R2-1) — pre-register the step itself")
     n_planned = len(grid) if method != "tpe" else int(n_trials)
+    _warn_parent_once(evaluator, bname)          # #37: before _evaluator_symbols' silenced lookup and the workers
     row: dict[str, Any] = {}
     if resume:
         row = ledger.created_row(sid, ledger_dir=ledger_dir) or {}
@@ -1813,6 +1877,8 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
             "raw_argmax_trial": int(S.trial_ids[raw]), "raw_argmax_params": _py_params(S.params[raw]),
             "raw_argmax_objective": full["raw_objective"], "raw_argmax_smoothed": full["raw_smoothed"],
             "raw_argmax_plateau_score": full["raw_plateau_score"], "objective_spec": objective.describe(),
+            "centre_pct_rank": full["centre_pct_rank"], "centre_minus_smoothed": full["centre_minus_smoothed"],
+            "gap_to_argmax": full["gap_to_argmax"], "share_objective_positive": full["share_objective_positive"],
         }
 
     paths, splits_df, cmeta = cpcv_paths(returns, trials, space, cv, objective=objective, selection=cfg,
@@ -1874,10 +1940,198 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
                      wfo_drift_mean=wmeta.get("drift_mean"), wfo_drift_max=wmeta.get("drift_max"),
                      dev_window_actual=meta["dev_window"], runtime_s=round(runtime, 2), n_jobs=jobs,
                      eval_start_effective=eval_start_eff, data_gaps=gaps,
-                     m_trades_across_data_gap=gap_trades)
+                     m_trades_across_data_gap=gap_trades,
+                     # #34: what load_study needs to rebuild meta without re-running anything
+                     periods_per_year=ppy, cpcv_n_groups=cv.n_groups, cpcv_k_test=cv.k_test,
+                     cpcv_embargo_cap=cmeta.get("embargo_cap"), cpcv_n_no_selection=cmeta.get("n_no_selection"),
+                     wfo_schedule=wmeta.get("schedule"), wfo_min_test_rows=wmeta.get("min_test_rows"),
+                     wfo_tail_merged=wmeta.get("tail_merged"), method_requested=method_requested,
+                     tpe_batch=meta["tpe_batch"], n_tpe_duplicates=n_dupes, resumed=resume,
+                     optuna_storage=storage, mp_start_method=runner.start_method, worker_threads=worker_threads,
+                     median_trades_ok=_py(med_trades), train_trades_per_param_per_fold=_py(budget))
     return StudyResult(study_id=sid, param_names=space.names, trials=trials, returns=returns,
                        selected_params=selected, selection=sel_info, cpcv_paths=paths,
                        wfo_oos=wfo_oos, wfo_params=wfo_params, meta=meta)
+
+
+_NONFINITE = {"nan": float("nan"), "inf": float("inf"), "-inf": float("-inf")}
+
+
+def _unpy(x: Any) -> Any:
+    """Inverse of :func:`_py` for ledger JSON: the strings ``"nan"`` / ``"inf"`` / ``"-inf"`` back to
+    floats (a categorical choice can never be such a string — numeric-like choices are refused)."""
+    if isinstance(x, dict):
+        return {k: _unpy(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_unpy(v) for v in x]
+    if isinstance(x, str) and x in _NONFINITE:
+        return _NONFINITE[x]
+    return x
+
+
+_CPCV_RE = r"CPCV\(n=(\d+),k=(\d+)"
+
+
+def load_study(study_id: str, *, space: Optional[SearchSpace] = None, ledger_dir: Optional[Path] = None,
+               studies_dir: Optional[Path] = None) -> StudyResult:
+    """Rebuild a finished study's :class:`contracts.StudyResult` **read-only** (FINDINGS #34 / #44).
+
+    Nothing is evaluated, re-selected or written — no ledger row, no trial-store file.  Sources:
+
+    * the trial store (``trials-*`` / ``returns-*`` / ``opt_aux-*`` parts) → ``trials``, ``returns``
+      and the trade / entry count matrices, through the same code :func:`run_study` uses on resume;
+    * the stored OOS artifacts (``artifact-*.parquet``) → ``cpcv_paths``, ``wfo_oos``, ``wfo_params``,
+      ``meta['trade_counts']`` / ``['entry_counts']``;
+    * the ledger's ``study_created`` row (identity, space, radius, method, seed, evaluator, cost
+      version, symbols, …) and the **last** ``selection`` event (selected params, selection dict,
+      resolved CV scheme, run diagnostics).
+
+    ``studies_dir``: default = the one recorded in the ``study_created`` row, else
+    ``config.STUDIES_DIR``; an explicit value that differs from the recorded one raises.
+    ``space``: the study's :class:`SearchSpace` *with* its constraint callable (a constraint is not
+    serialisable); it must equal the ledger's ``search_space`` json, else :class:`StudyError`.  It
+    becomes ``meta['search_space_obj']`` (the gates' judge-run plateau uses its ``is_valid``).
+    Without it, ``search_space_obj`` is the space rebuilt from the ledger when that space has no
+    constraint, and is left out when it has one (the gates then rebuild it and note the lost
+    constraint) — never a constraint-less object posing as the study's.
+    Raises :class:`StudyError` when the study is unknown, has no ``selection`` event (aborted /
+    unfinished — resume it with ``run_study(resume=True)``), or has trials recorded after its last
+    selection.  The result is then checked with :func:`gates.verify_trial_store` (trial ids,
+    statuses, sources, returns, selection and artifact hashes vs the ledger); the evaluator identity
+    is checked by the gates themselves (``evaluate_gates(evaluator=…)``) — the loader has no evaluator.
+
+    ``meta`` carries every key :func:`run_study` sets except the few the ledger does not hold:
+    ``cpcv_splits`` (per-split table, never stored) and, for studies run before this loader existed,
+    the keys their ``selection`` event did not log yet (``periods_per_year``, ``method_requested``,
+    ``tpe_batch``, ``n_tpe_duplicates``, ``storage``, ``mp_start_method``, ``worker_threads``,
+    ``cpcv['embargo_cap']`` / ``['n_no_selection']``, ``wfo['schedule']`` / ``['min_test_rows']`` /
+    ``['tail_merged']``) — those are absent (not guessed).  ``meta['loaded_read_only'] = True``.
+    """
+    import re
+    from . import gates
+    sid = study_id
+    row = ledger.created_row(sid, ledger_dir=ledger_dir)
+    if row is None:
+        raise StudyError(f"load_study: study {sid} is not in the ledger")
+    sels = ledger.study_events(sid, "selection", ledger_dir=ledger_dir)
+    if not sels:
+        raise StudyError(f"load_study: study {sid} has no selection event (aborted or unfinished) — "
+                         f"finish it with run_study(resume=True)")
+    sel = sels[-1]
+    tev = ledger.study_events(sid, "trials", ledger_dir=ledger_dir)
+    rec_dir = row.get("studies_dir")
+    if studies_dir is not None and rec_dir and Path(studies_dir).resolve() != Path(rec_dir).resolve():
+        raise StudyError(f"load_study: studies_dir={studies_dir} differs from the trial store recorded in the "
+                         f"ledger ({rec_dir})")
+    sdir = Path(studies_dir) if studies_dir is not None else (Path(rec_dir) if rec_dir else Path(config.STUDIES_DIR))
+    js_space = row["search_space"]
+    if space is not None:
+        if _canon(space.to_json()) != _canon(js_space):
+            raise StudyError(f"load_study: space= differs from the ledger's search_space of {sid}")
+        space_obj: Optional[SearchSpace] = space
+    else:
+        space = space_from_json(js_space)
+        space_obj = space if js_space.get("constraint") is None else None
+    method = row.get("method")
+    recs = _load_existing(sid, sdir, default_source=str(method or ""))
+    if not recs:
+        raise StudyError(f"load_study: no trial store for {sid} under {sdir}")
+    if tev and (int(tev[-1].get("n_trials") or 0) != len(recs) or int(tev[-1]["seq"]) > int(sel["seq"])):
+        raise StudyError(f"load_study: study {sid} has {len(recs)} recorded trials, its last trials event logs "
+                         f"{tev[-1].get('n_trials')} and its last selection predates it — the stored OOS series "
+                         f"do not describe the current trial set; finish it with run_study(resume=True)")
+
+    trials = _trials_frame(recs, space)
+    returns = _matrix(recs, "ret")
+    art = {n: ledger.load_study_artifact(sid, n, sdir) for n in ledger.STUDY_ARTIFACTS}
+    tcounts = art["trade_counts"] if art["trade_counts"] is not None else _matrix(recs, "counts")
+    ecounts = art["entry_counts"] if art["entry_counts"] is not None else _matrix(recs, "entries")
+    cpcv_df = art["cpcv_paths"] if art["cpcv_paths"] is not None else pl.DataFrame()
+    wfo_oos = art["wfo_oos"] if art["wfo_oos"] is not None else pl.DataFrame()
+    wfo_params = art["wfo_params"] if art["wfo_params"] is not None else pl.DataFrame()
+
+    counts = {s: sum(r.status == s for r in recs) for s in STATUSES}
+    by_source: dict[str, int] = {}
+    for r in recs:
+        by_source[r.source or "unknown"] = by_source.get(r.source or "unknown", 0) + 1
+    cv_scheme = sel.get("cv_scheme") or row.get("cv_scheme") or ""
+    m = re.search(_CPCV_RE, cv_scheme)
+    n_groups = sel.get("cpcv_n_groups", int(m.group(1)) if m else None)
+    k_test = sel.get("cpcv_k_test", int(m.group(2)) if m else None)
+    cpcv_scheme, _, wfo_scheme = cv_scheme.partition("+")
+    cmeta: dict[str, Any] = {
+        "n_groups": n_groups, "k_test": k_test,
+        "n_splits": math.comb(n_groups, k_test) if n_groups and k_test else None,
+        "n_paths": sel.get("cpcv_paths"), "embargo_days": sel.get("cpcv_embargo_days"),
+        "purge_days": sel.get("cpcv_purge_days"), "scheme": cpcv_scheme,
+        "embargo_capped": bool(sel.get("embargo_capped")), "embargo_days_uncapped": sel.get("embargo_days_uncapped")}
+    for k_led, k_meta in (("cpcv_embargo_cap", "embargo_cap"), ("cpcv_n_no_selection", "n_no_selection")):
+        if k_led in sel:
+            cmeta[k_meta] = sel[k_led]
+    if wfo_scheme and wfo_scheme != "none":
+        units, picks = [], []
+        if wfo_params.height:
+            for r in wfo_params.iter_rows(named=True):
+                picks.append(r["selected_trial"])
+                units.append(None if r["selected_trial"] is None else
+                             space.unit_coords([{n: r[f"param_{n}"] for n in space.names}])[0])
+        wmeta: dict[str, Any] = {"scheme": wfo_scheme, "n_refits": sel.get("wfo_refits", wfo_params.height),
+                                 **_drift(units, space, picks)}
+        for k_led, k_meta in (("wfo_schedule", "schedule"), ("wfo_min_test_rows", "min_test_rows"),
+                              ("wfo_tail_merged", "tail_merged")):
+            if k_led in sel:
+                wmeta[k_meta] = sel[k_led]
+    else:
+        wmeta = {"scheme": "none"}
+    ok_trades = trials.filter(pl.col("status") == "ok")
+    med_trades = (float(ok_trades["m_n_trades"].median()) if ok_trades.height and "m_n_trades" in ok_trades.columns
+                  else float("nan"))
+    budget = (med_trades / len(space.params) / n_groups * (n_groups - k_test)
+              if med_trades == med_trades and n_groups and k_test else float("nan"))
+    selection = _unpy(sel.get("selection") or {})
+    meta: dict[str, Any] = {
+        "study_id": sid, "book": row.get("book"), "system": row.get("system"), "issue": row.get("issue"),
+        "attempt": row.get("attempt"), "space": row.get("search_space"), "candidate_set": row.get("candidate_set", method),
+        "candidate_set_data_dependent": ledger.candidate_set_data_dependent(sid, ledger_dir=ledger_dir),
+        "embargo_capped": bool(sel.get("embargo_capped")),
+        "embargo_days_uncapped": sel.get("embargo_days_uncapped"),
+        "cv_scheme": cv_scheme, "cpcv": cmeta, "wfo": wmeta, "method": method, "seed": row.get("seed"),
+        "n_trials": len(recs), "n_ok": counts["ok"], "n_low_trades": counts["low_trades"],
+        "n_invalid": counts["invalid"], "n_error": counts["error"],
+        "errors": [{"trial_id": r.trial_id, "error": r.error} for r in recs if r.error][:50],
+        "runtime_s": sel.get("runtime_s"), "cost_model_version": row.get("cost_model_version"),
+        "n_jobs": sel.get("n_jobs"),
+        "plateau_radius": normalise_plateau_radius(row.get("plateau_radius"), space.names),
+        "n_by_source": by_source, "objective": row.get("objective"),
+        "selection": (selection.get("neighbourhood") or row.get("selection")),
+        "dev_window": sel.get("dev_window_actual"), "dev_window_planned": row.get("dev_window"),
+        "evaluator": row.get("evaluator"), "trade_counts": tcounts, "entry_counts": ecounts,
+        "median_trades_ok": med_trades, "train_trades_per_param_per_fold": budget,
+        "resumed": sel.get("resumed", any(e.get("event") == "resumed"
+                                          for e in ledger.study_events(sid, ledger_dir=ledger_dir))),
+        "eval_start_effective": sel.get("eval_start_effective"), "data_gaps": sel.get("data_gaps"),
+        "m_trades_across_data_gap": sel.get("m_trades_across_data_gap"),
+        "symbols": row.get("symbols"), "conversion_legs": row.get("conversion_legs"),
+        "evaluator_code": row.get("evaluator_code"), "parent_study": row.get("parent_study"),
+        "notes": row.get("notes"), "git_commit": row.get("git_commit"),
+        "studies_dir": str(sdir), "loaded_read_only": True,
+    }
+    if space_obj is not None:
+        meta["search_space_obj"] = space_obj
+    for k_led, k_meta in (("periods_per_year", "periods_per_year"), ("method_requested", "method_requested"),
+                          ("tpe_batch", "tpe_batch"), ("n_tpe_duplicates", "n_tpe_duplicates"),
+                          ("optuna_storage", "storage"), ("mp_start_method", "mp_start_method"),
+                          ("worker_threads", "worker_threads")):
+        if k_led in sel:
+            meta[k_meta] = sel[k_led]
+    study = StudyResult(study_id=sid, param_names=space.names, trials=trials, returns=returns,
+                        selected_params=_unpy(sel.get("selected_params") or {}), selection=selection,
+                        cpcv_paths=cpcv_df, wfo_oos=wfo_oos, wfo_params=wfo_params, meta=meta)
+    try:
+        gates.verify_trial_store(study, studies_dir=studies_dir, ledger_dir=ledger_dir)
+    except gates.GateError as e:
+        raise StudyError(f"load_study: {e}") from e
+    return study
 
 
 def _run_tpe(bk: _Book, runner: _Runner, space: SearchSpace, sid: str, n_trials: int, seed: int,

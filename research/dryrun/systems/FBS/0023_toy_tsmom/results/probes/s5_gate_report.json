@@ -1,0 +1,259 @@
+{
+ "verdict": "FAIL",
+ "rows": [
+  {
+   "gate": "dsr",
+   "value": 0.00019700712894813049,
+   "threshold": ">= 0.95",
+   "status": "FAIL",
+   "interpretation": "DSR 0.00: 0% probability the true Sharpe exceeds the 1.07 expected from the best of N = 840 raw null trials (840 this study + 0 from related earlier studies) over 2352 days.",
+   "display": null
+  },
+  {
+   "gate": "cscv_oos_loss",
+   "value": 0.7887334887334887,
+   "threshold": "< 0.1",
+   "status": "FAIL",
+   "interpretation": "The in-sample-best config lost money out of sample in 79% of 12870 CSCV splits (median OOS Sharpe -0.30); PBO 0.53 (diagnostic).",
+   "display": null
+  },
+  {
+   "gate": "oos_sharpe",
+   "value": -0.6825940469582321,
+   "threshold": ">= 1.0",
+   "status": "FAIL",
+   "interpretation": "Median OOS Sharpe -0.68 across 9 CPCV paths (IQR -0.78\u2013-0.51); 0% of paths positive; in-sample -0.12.",
+   "display": null
+  },
+  {
+   "gate": "wfo_oos",
+   "value": 0.06735869322974737,
+   "threshold": ">= 0.5 and recent \u2153 > 0",
+   "status": "FAIL",
+   "interpretation": "WFO OOS Sharpe 0.07 over 1826 days (2018-05-02 \u2192 2025-05-14); -0.07 over the most recent third (2023-01-10 \u2192 2025-05-14); the procedure does not hold up out of sample.",
+   "display": "0.07 / recent -0.07"
+  },
+  {
+   "gate": "cost_stress_sharpe",
+   "value": -0.9174275932628458,
+   "threshold": "> 0.5",
+   "status": "FAIL",
+   "interpretation": "Worst Sharpe -0.92 at 1.5\u00d7 spread + 1 stress unit of slippage (1 pip / tick / median spread by asset class) on all market and stop fills (slippage 10 points per fill for EURUSD = 0.31\u00d7 the median dev spread of 32 points), bar-extreme stops, swap \u00d70.5, 1, 1.5 (-0.92, -0.92, -0.92); base -0.12.",
+   "display": null
+  },
+  {
+   "gate": "plateau",
+   "value": 0.0,
+   "threshold": ">= 0.6",
+   "status": "FAIL",
+   "interpretation": "Weakest parameter axis: lookback keeps 0/4 judge-run perturbations (\u00b1\u00bd, \u00b11 of each param's pre-registered plateau scale; r = 0.2, ledger study_created row; joint axis: 8 points) at \u2265 50% of the peak Sharpe -0.12; score = min over 4 axes (pooled 0%); 6 point(s) outside the search bounds evaluated; selected at search-space edge (stop_mult); 21 evaluations in 4.2 s; sharp, fragile optimum.",
+   "display": null
+  },
+  {
+   "gate": "positive_years",
+   "value": 0.6,
+   "threshold": ">= 60%",
+   "status": "PASS",
+   "interpretation": "60% of 10 years positive; losing years [2016, 2018, 2019, 2025].",
+   "display": null
+  },
+  {
+   "gate": "max_year_share",
+   "value": Infinity,
+   "threshold": "<= 40%",
+   "status": "FAIL",
+   "interpretation": "Total PnL \u2264 0: no share defined; PnL is concentrated.",
+   "display": null
+  },
+  {
+   "gate": "trade_count",
+   "value": 670.0,
+   "threshold": "\u2265 MinTRL (95%)",
+   "status": "FAIL",
+   "interpretation": "670 trades vs per-trade MinTRL inf; 2352 days vs daily MinTRL inf at claimed Sharpe -0.68 (95%).",
+   "display": "670 trades / need inf"
+  },
+  {
+   "gate": "mechanism",
+   "value": null,
+   "threshold": "ablation matches hypothesis",
+   "status": "MANUAL",
+   "interpretation": "Hypothesis-specific component ablation; to be judged against the card.",
+   "display": null
+  }
+ ],
+ "holdout_band": {
+  "sharpe_lo": -1.751585540288226,
+  "ret_at_budget_lo": -0.002665346762565986,
+  "max_dd_mag_hi": 0.20715005733872682,
+  "trades_lo": 56.0,
+  "trades_hi": 117.0,
+  "leverage": 0.17185749036604756,
+  "horizon_days": 262,
+  "n_boot": 2000,
+  "mean_block": 4.6000640866679925,
+  "source": "wfo_oos",
+  "sharpe_median": 0.0644367070538622,
+  "seed": 583009915,
+  "tail_level": 0.04602301150544008,
+  "target_coverage": 0.9,
+  "joint_coverage": 0.9005,
+  "trades_source": "wfo_oos.n_trades",
+  "trades_joint": true,
+  "p_pass_zero_edge": 0.888,
+  "n_power": 1000,
+  "max_zero_edge_pass": 0.3,
+  "decisive": false,
+  "horizon_source": "manifest",
+  "horizon_end": "2026-05-15 10:36:00",
+  "holdout_start": "2025-05-15 00:00:00",
+  "locked_end": "2026-05-15 00:00:00",
+  "newer_data_included": false,
+  "symbols": [
+   "EURUSD"
+  ],
+  "periods_per_year": 260.0,
+  "manifest_sha": "3248c9fecc1f8bff",
+  "conversion_legs": [],
+  "n_boot_requested": 2000,
+  "n_power_requested": 1000
+ },
+ "effective_trials": {
+  "dsr": 0.00019700712894813049,
+  "sr0": 0.06610429410934095,
+  "sr0_annual": 1.0658997147576803,
+  "v0": 0.0004253509145044662,
+  "n_trials": 840.0,
+  "n_trials_study": 840.0,
+  "n_trials_prior": 0.0,
+  "psr0": 0.3622040777570093,
+  "sr": -0.007302747798051943,
+  "sr_annual": -0.1177532700374289,
+  "n_obs": 2352,
+  "skew": 1.159192294546639,
+  "kurt": 12.282570469725757,
+  "var_sr": 0.00019906671018906757,
+  "n_eff": 12.0,
+  "dsr_neff_cross": 0.06855864634820577,
+  "dsr_raw_cross": 0.0056079311233988415,
+  "sr0_neff_cross_annual": 0.37874859598352345,
+  "n_columns": 840,
+  "dsr_raw_n": 0.00019700712894813049,
+  "n_trials_raw": 840.0,
+  "eigen": 7.113342416958067,
+  "cluster": 12.0,
+  "liji": 110.99999400000002,
+  "prior_source": "ledger: no earlier related studies",
+  "prior_trials_ledger": 0.0,
+  "prior_studies": [],
+  "book": "FBS",
+  "system": "toy_tsmom",
+  "issue": 23,
+  "attempt": 1,
+  "n_trials_in_memory": 840.0,
+  "n_trials_store": 840.0,
+  "n_trials_ledger": 840.0
+ },
+ "diagnostics": {
+  "pbo_detail": {
+   "pbo": 0.5312354312354313,
+   "slope": -0.7412520096262047,
+   "r2": 0.14185670242462936,
+   "prob_oos_loss": 0.7887334887334887,
+   "median_logit": -0.15488678585976054,
+   "n_combos": 12870,
+   "n_strategies": 840
+  },
+  "cpcv_path_sharpe": {
+   "median": -0.6825940469582321,
+   "p25": -0.783501995244233,
+   "p75": -0.5139174363634007,
+   "min": -0.9444345042911514,
+   "n_paths": 9
+  },
+  "wfo_oos": {
+   "sharpe_all": 0.06735869322974737,
+   "sharpe_recent": -0.07403172677579248,
+   "n_days": 1826,
+   "recent_from": "2023-01-10",
+   "recent_to": "2025-05-14"
+  },
+  "cost_stress_by_swap_mult": {
+   "0.5": -0.9174275932628458,
+   "1": -0.9174275932628458,
+   "1.5": -0.9174275932628458
+  },
+  "cost_stress_pip_points": {
+   "pip_points": 10.0,
+   "spec_source": "load_instrument(EURUSD)",
+   "slippage_points": 10.0,
+   "added_slippage_points": 10.0,
+   "median_spread_points": 32.0,
+   "slippage_x_median_spread": 0.3125
+  },
+  "cost_stress_version": "fbs-v2-uncalibrated+spread_mult1.5+slippage10+stop_fill=bar_extreme",
+  "plateau_optimizer": {
+   "score": 0.0,
+   "neighbourhood": {
+    "knn": null,
+    "min_centre_quantile": 0.5,
+    "min_neighbours": 1,
+    "neighbourhood": "grid",
+    "peak_fraction": 0.5,
+    "radius": 1
+   }
+  },
+  "plateau": {
+   "kind": "judge-run",
+   "plateau_score": 0.0,
+   "score_rule": "min over parameter axes",
+   "pooled_share": 0.0,
+   "weakest_axis": "lookback",
+   "n_points": 20,
+   "n_evaluations": 21,
+   "peak_sharpe": -0.1177532700374289,
+   "peak_sharpe_study": -0.1177532700374289,
+   "radius": 0.2,
+   "radius_source": "ledger study_created row",
+   "runtime_s": 4.222461259982083,
+   "pass_share_by_param": {
+    "lookback": 0.0,
+    "stop_mult": 0.0,
+    "hold": 0.0,
+    "joint": 0.0
+   },
+   "n_outside_search_bounds": 6,
+   "selected_at_search_space_edge": [
+    "stop_mult"
+   ],
+   "unordered_not_judged": []
+  },
+  "min_trl_days": Infinity,
+  "return_at_10pct_dd_budget": {
+   "leverage": 0.10957275056955873,
+   "mean_monthly": -0.00014929156417563732,
+   "band_p5_p50_p95": [
+    -0.0007875568915577663,
+    -0.00015054117374581067,
+    0.0004753818296682534
+   ],
+   "label": "unprofitable"
+  }
+ },
+ "ledger_context": {
+  "book": "FBS",
+  "system": "toy_tsmom",
+  "issue": 23,
+  "attempt": 1,
+  "method": "grid",
+  "seed": 0,
+  "plateau_radius": 0.2,
+  "radius_source": "ledger study_created row",
+  "data_dependent": false,
+  "ledger_dir": "the default research/ledger",
+  "trial_store": "/home/douglaso/Finances/DataScienceAndTrading/research/dryrun/studies",
+  "cost_model_version": "fbs-v2-uncalibrated"
+ },
+ "ledger_row_seq": 3,
+ "periods_per_year": 260.0
+}

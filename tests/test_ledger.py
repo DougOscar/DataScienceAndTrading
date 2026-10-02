@@ -224,3 +224,35 @@ def test_data_dependence_flag_never_resets_and_trial_source_is_stored(tmp_path, 
         rec.add({"a": 1}, {"sharpe": 0.1}, source="tpe")
         rec.add({"a": 2}, {"sharpe": 0.2})
     assert ledger.load_trials("s1", tmp_path / "studies")["source"].to_list() == ["tpe", None]
+
+
+# --------------------------------------------------------------------------- dry run #23 #69: diagnostic evaluations
+def test_log_diagnostic_counts_for_later_related_studies_not_itself(tmp_path):
+    ledger.create_study(ledger_dir=tmp_path, **_study())
+    ledger.log_event("fbs-0007-a1", "trials", ledger_dir=tmp_path, n_trials=100)
+    for bad in ({"n_evaluations": 0}, {"n_evaluations": 2.5}, {"n_evaluations": True}):
+        with pytest.raises(LedgerError, match="positive int"):
+            ledger.log_diagnostic("fbs-0007-a1", scope="x", note="y", ledger_dir=tmp_path, **bad)
+    with pytest.raises(LedgerError, match="scope"):
+        ledger.log_diagnostic("fbs-0007-a1", n_evaluations=3, scope=" ", note="y", ledger_dir=tmp_path)
+    with pytest.raises(LedgerError, match="unknown study"):
+        ledger.log_diagnostic("nope", n_evaluations=3, scope="x", note="y", ledger_dir=tmp_path)
+    row = ledger.log_diagnostic("fbs-0007-a1", n_evaluations=840, scope="cost-free grid EURUSD H4",
+                                note="S6: is it the costs?", ledger_dir=tmp_path)
+    ledger.log_diagnostic("fbs-0007-a1", n_evaluations=5043, scope="grid on GBPUSD, USDJPY, XAUUSD",
+                          note="S6 other symbols", ledger_dir=tmp_path)
+    assert row["event"] == "diagnostic" and row["diagnostic"]["n_evaluations"] == 840
+    assert ledger.diagnostic_evaluations("fbs-0007-a1", ledger_dir=tmp_path) == 5883
+    # a later related study (same system, new issue / same issue, renamed) is deflated for them
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0007-a2", attempt=2))
+    ledger.create_study(ledger_dir=tmp_path, **_study(study_id="fbs-0031-a1", issue=31, system="Donchian"))
+    for sid in ("fbs-0007-a2", "fbs-0031-a1"):
+        tot, used, _ = ledger.related_prior_trials(sid, ledger_dir=tmp_path)
+        assert "fbs-0007-a1" in used and tot == 100 + 5883
+    # the study's own diagnostics do not enter its own N
+    tot, _, _ = ledger.related_prior_trials("fbs-0007-a1", ledger_dir=tmp_path)
+    assert tot == 0
+    assert ledger.system_prior_trials("FBS", "donchian", exclude_study="fbs-0007-a2", ledger_dir=tmp_path)[0] == 5983
+    # the fold keeps the study's own trial count untouched
+    assert ledger.study_trial_count(ledger.studies(tmp_path)["fbs-0007-a1"]) == 100
+    ledger.verify_chain(tmp_path)

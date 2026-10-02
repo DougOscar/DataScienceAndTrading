@@ -13,13 +13,18 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 
 ## Read first
 - `research/DESIGN.md` §1 (architecture), §4.3 (execution realism), §5 (risk semantics), §7 (performance).
-- The hypothesis card (`research/systems/<book>/<issue#>_<slug>/hypothesis.md` or the GitHub issue).
+- The hypothesis card (`research/systems/<book>/<issue:04d>_<slug>/hypothesis.md`, created with
+  `quantlab.systems.create_system`, or the GitHub issue).
 - Existing `quantlab/` APIs — reuse them. Python: `.venv/bin/python`.
 
 ## Implementation rules
 - Strategies are **pure functions of past data**: signals at bar *t* may use only bars ≤ *t*;
   orders fill at the **next bar's open** through `quantlab.engine` (never at the signal bar's close).
+- Strategy code goes in `quantlab/strategies/<slug>.py`.
 - Declare parameters with types and the card's prior ranges; declare the card's risk-semantics type.
+  Each numeric parameter's plateau scale (`plateau_scale="relative"` or `plateau_step=`) is copied
+  verbatim from the card — never chosen or changed by you. A numeric knob is never a categorical
+  (`opt` refuses it; use `IntParam`/`FloatParam` with `levels=`).
 - Load data only via `quantlab.data` (it enforces the holdout lock and timezone normalisation).
   Never read Parquet files directly, never bypass or catch `HoldoutLocked`.
 - Vectorise signal computation (Polars/NumPy); path-dependent logic goes in Numba via the engine.
@@ -38,7 +43,7 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 3. **Rule-conformance test** — each rule in the card maps to an assertion (e.g., no position
    outside session for B3, stop never widened).
 
-## Notebook (`research/systems/<book>/<issue#>_<slug>/<slug>.ipynb`)
+## Notebook (in `research/systems/<book>/<issue:04d>_<slug>/`, created from the template by `create_system`)
 Sections: 0 Card & hypothesis · 1 Data (dev period only) · 2 Strategy · 3 Baseline with prior
 params and costs on · 4 Optimisation (filled by optimization-architect) · 5 Validation
 (validation-statistician) · 6 Red-team findings · 7 Report (report-builder) · 8 Holdout (locked).

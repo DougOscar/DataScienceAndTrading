@@ -47,7 +47,7 @@ You ──► main session running /research-cycle   (the orchestrator; subagent
 | `costs` | One cost model per book (§4.3). Takes its parameters from the MT5 export (`ExportBrokerSpecs.mq5`). |
 | `engine` | Signals are vectorised (Polars/NumPy); the fill/stop/size loop is compiled with Numba. Entries execute at the next bar's open. Stop/target order inside a bar is resolved from the **M1 path**. Lot-step and minimum-lot rounding. |
 | `stats` | PSR/DSR, MinTRL, CSCV-PBO, SPA / Reality Check, stationary bootstrap, regime splits, component ablation tests, effective-number-of-trials estimation. |
-| `opt` | Search spaces, Optuna studies that log every trial, CPCV and anchored walk-forward with purging/embargo, plateau selection. |
+| `opt` | Search spaces (every numeric parameter pre-registers its plateau scale), data-independent candidate sets (grid for ≤ 3 parameters, else Sobol; Optuna TPE for exploration only, which disables the OOS gates), every trial logged, CPCV and anchored walk-forward with purging/embargo, plateau selection. |
 | `portfolio` | Per-book combination (HRP / risk parity / equal-risk), stress-period correlation, leverage to a drawdown budget. |
 | `report` | Notebook tear sheet with a metric-interpretation table, plus the Obsidian card generator. |
 | `ledger` | Append-only writer and reader, trial counters, holdout access log. |
@@ -64,7 +64,7 @@ research/
   ledger/studies.jsonl                  git-tracked, append-only, one row per study
   ledger/holdout_access.jsonl           git-tracked, append-only
   studies/<study_id>/                   gitignored: per-trial parameters, metrics, return matrices (parquet)
-  systems/<book>/<issue#>_<slug>/
+  systems/<book>/<issue:04d>_<slug>/        created by quantlab.systems.create_system
       hypothesis.md                     the card approved at checkpoint A
       <slug>.ipynb                      notebook: implement → optimise → validate → report
       results/                          figures + metrics.json
@@ -104,9 +104,11 @@ The model split follows your answer: Opus for judgment roles, Sonnet for mechani
 S0 Idea ─► hypothesis card (GitHub issue, label `hypothesis`)
    ★ A  you approve the batch of ideas to test
 S1 Power check      statistician: can the dev period (2016-05→2025-05) even show this edge?
-                    (MinTRL given the expected Sharpe and trade frequency) ─► may kill early
+                    (MinTRL at the expected Sharpe, and the DSR hurdle at the grid's trial
+                    count) ─► may kill early
 S2 Implement        engineer + look-ahead tests; red team audits the code          label `testing`
 S3 Baseline         prior parameters, costs on. Is the gross edge larger than the costs?
+                    (logged; kill if the gross edge's upper 95 % bound ≤ cost per trade)
 S4 Optimise         optimizer: CPCV/walk-forward, every trial logged, plateau selection
 S5 Validate         statistician: gates (§4)
 S6 Attack           red team
@@ -120,7 +122,7 @@ S9 Portfolio fit    portfolio manager: marginal contribution to the book
 D1 MQL5/ONNX port + parity test ─► MT5
 ```
 
-- **Issue labels:** `hypothesis` → `testing` → one of the two **done** states, `killed` or `promoted`. Both close the issue. `promoted` hands the system to deployment. After deployment, `retired` marks a system removed by a decay review (§4.6).
+- **Issue labels:** `hypothesis` → `testing` → (`holdout_pending` while a NOT_DECISIVE holdout waits for more data, §4.4) → one of the two **done** states, `killed` or `promoted`. Both close the issue. `promoted` hands the system to deployment. After deployment, `retired` marks a system removed by a decay review (§4.6).
 - **Killed systems still get an Obsidian card**, with the reason. Recorded negative results stop us from retesting the same idea.
 
 ---
@@ -138,15 +140,15 @@ D1 MQL5/ONNX port + parity test ─► MT5
 
 | Gate | Threshold | Why |
 |---|---|---|
-| Deflated Sharpe probability | ≥ 0.95 | Is the Sharpe real after accounting for *all* trials? Hurdle from the null sampling variance 1/(T−1) and the **raw** trial count of the study plus earlier attempts (v1.2; effective-N estimates are diagnostics only) |
+| Deflated Sharpe probability | ≥ 0.95 | Is the Sharpe real after accounting for *all* trials? Hurdle from the null sampling variance 1/(T−1) and the **raw** trial count of the study plus every other ledger study sharing its normalised system name or issue (earlier attempts, bug-fix re-runs, renamed variants) and their logged diagnostic evaluations (`ledger.log_diagnostic`), plus data-mining and prior-work trials declared on the card (v1.2; effective-N estimates are diagnostics only) |
 | CSCV out-of-sample loss | P(OOS Sharpe of the in-sample best < 0) < 0.10 | Does the chosen configuration lose money out of sample? (v1.2: replaces PBO < 0.30, which stays as a diagnostic) |
 | OOS Sharpe (CPCV path median) | ≥ 1.0 annualised | The minimum edge needed to enter a book |
 | Walk-forward procedure OOS | Sharpe ≥ 0.5 over the whole WFO OOS span, and > 0 over its most recent third | The re-optimisation procedure (§4.6) still works, and recently (v1.2, new) |
-| Cost stress | Sharpe > 0.5 at 1.5× spread + 1 pip adverse slippage on every market and stop fill | The edge must survive worse fills |
-| Parameter plateau | The judge re-runs the system at ±r/2 and ±r on each parameter axis and on a joint axis (all parameters together); on the **weakest axis** ≥ 60% of points keep ≥ 50% of the peak Sharpe (and > 0). Each numeric parameter pre-registers its scale (relative, r = 0.20 default, floor 0.10; or an absolute step), reviewed by the red team at S2 | Rejects sharp, fragile optima, independent of grid resolution and parametrisation tricks |
+| Cost stress | Sharpe > 0.5 at 1.5× spread + 1 pip-equivalent adverse slippage on every market and stop fill (FX 1 pip; gold 0.1, silver 0.01; crypto 1× median spread; B3 1 tick) | The edge must survive worse fills |
+| Parameter plateau | The judge re-runs the system at ±r/2 and ±r on each parameter axis and on a joint axis (all parameters together); on the **weakest axis** ≥ 60% of points keep ≥ 50% of the peak Sharpe (and > 0). Each numeric parameter pre-registers its scale (relative, r = 0.20 default, floor 0.10; or an absolute step), reviewed by the red team at S2; the outer move is never smaller than 5% of the declared range (the inner move 2.5%). A selected configuration that loses money in-sample (peak Sharpe ≤ 0) fails the plateau gate as "not assessable". Numeric categoricals are refused (use numeric parameters with levels); unordered categoricals are not judged and are reviewed at S2 | Rejects sharp, fragile optima, independent of grid resolution and parametrisation tricks |
 | Time stability | Positive in ≥ 60% of years, and no single year > 40% of total PnL | Your own finding: past edges were concentrated in 2016–18 and 2021–22 |
 | Trade count | ≥ MinTRL | Enough evidence for the claimed Sharpe |
-| Mechanism check | Component ablation matches the hypothesis | The system must make money *for the stated reason* |
+| Mechanism check | Component ablation matches the hypothesis (statistician runs `stats.ablation_compare`, red team attacks it; the main session records the decision with its evidence via `ledger.record_mechanism_review`, reviewed by the user at checkpoint B) | The system must make money *for the stated reason* |
 
 **Component tests** apply when the Scout proposes a filter or a risk-management rule rather than a full system. The null model depends on the component:
 - **Filter:** compare against a random filter with the same selectivity, applied to the same base system.
@@ -196,7 +198,7 @@ Fail → `killed`, with no re-tries on the same holdout. NOT_DECISIVE is not a f
 
 Edges decay, so a system is validated as a **procedure**, not as one fixed parameter set.
 
-1. **The re-optimisation schedule is part of the system.** The optimizer fixes a schedule (e.g., re-fit quarterly on an anchored or rolling window of length L) and validates *that schedule* with an anchored walk-forward. Every re-fit uses only data available at that moment. CPCV is still used for parameter-plateau and PBO analysis inside each window.
+1. **The re-optimisation schedule is part of the system.** The optimizer fixes a schedule (e.g., re-fit quarterly on an anchored or rolling window of length L) and validates *that schedule* with an anchored walk-forward. Every re-fit uses only data available at that moment. A final test window shorter than a quarter of the median window (`WFOConfig.min_test_rows`) is merged into the previous re-fit's window rather than traded on a few days of evidence. CPCV (full dev window) feeds the OOS-Sharpe and CSCV-loss gates; the walk-forward OOS series feeds the `wfo_oos` gate and the holdout band; the plateau is judge-run on the full dev window (§4.2).
 2. **The holdout exam runs the procedure.** The scheduled re-fits happen *inside* the holdout, exactly as they would live. The procedure is frozen; the parameters are allowed to move.
 3. **Parameter drift is a diagnostic.** If the chosen parameters jump between very different regions from one re-fit to the next, the edge is probably unstable. This counts as a red-team finding.
 4. **Decay review** (`/decay-review <system>`, run when you ask). Each promoted system is re-run on all data after its holdout (newer MT5 exports). Checks:
@@ -226,7 +228,7 @@ Every hypothesis card declares the system's **risk semantics**. The report switc
 - **Risk-adjusted:** Sharpe (from daily returns), Sortino, Calmar, PSR/DSR.
 - **Risk:** max DD, longest drawdown duration, Ulcer index, daily CVaR95, worst month, % of time under water.
 - **Costs:** cost as % of gross P&L, break-even spread multiple, share of costs from swap.
-- **Robustness:** PBO, plateau score, cost-stress Sharpe, year consistency, holdout z-score.
+- **Robustness:** DSR, CSCV OOS loss, OOS Sharpe (CPCV), walk-forward OOS, plateau (judge, weakest axis), cost-stress Sharpe, year consistency, holdout verdict (PASS / FAIL / NOT_DECISIVE, §4.4); PBO as a diagnostic.
 
 **Every tear sheet includes:**
 - a **metrics applicability table**: metric → included/excluded → why;
@@ -243,7 +245,7 @@ Every hypothesis card declares the system's **risk semantics**. The report switc
 **Result:** profitable | reasonable | unprofitable — <X.X>%/month at 10% DD budget
 **Risk profile:** <label> — MaxDD <..>, longest DD <n> months, max losing streak <n>,
                   skew <..>, CVaR95 <..>
-**Robustness:** DSR <0.xx> · PBO <0.xx> · holdout z <..> (or "not unlocked")
+**Robustness:** DSR <0.xx> · CSCV OOS loss <0.xx> · WFO OOS Sharpe <x.xx> (recent third <x.xx>) · holdout <PASS|FAIL|NOT_DECISIVE> (or "not unlocked")
 ![[<slug>_sharpe_yearly.png]]
 ![[<slug>_sharpe_monthly.png]]
 ```
@@ -283,18 +285,23 @@ Rules:
 ## 8. Ledger schema (`research/ledger/studies.jsonl`, append-only)
 
 ```json
-{"study_id": "fbs-0007-a2", "issue": 7, "book": "FBS", "system": "donchian_breakout",
- "attempt": 2, "parent_study": "fbs-0007-a1", "created": "2026-10-02T14:03Z",
- "git_commit": "abc1234", "data_manifest_sha": "…", "cost_model_version": "fbs-v1",
- "dev_window": ["2016-05-02", "2025-05-14"], "search_space": {"…": "…"},
- "cv_scheme": "CPCV(n=10,k=2,purge=…,embargo=…)",
- "n_trials": 480, "effective_trials": 37.2, "selected_params": {"…": "…"},
- "gates": {"dsr": 0.97, "pbo": 0.18, "oos_sharpe": 1.21, "…": "…"},
- "decision": "pass|fail|killed", "notes": "…"}
+{"event": "study_created", "study_id": "fbs-0007-a2", "issue": 7, "book": "FBS",
+ "system": "donchian_breakout", "attempt": 2, "parent_study": "fbs-0007-a1",
+ "created": "2026-10-02T14:03Z", "git_commit": "abc1234", "data_manifest_sha": "…",
+ "cost_model_version": "fbs-v2-uncalibrated", "evaluator": {"…": "…"}, "source_sha256": "…",
+ "method": "grid|sobol", "seed": 7, "search_space": {"…": "…"}, "plateau_radius": 0.2,
+ "candidate_set_data_dependent": false, "symbols": ["EURUSD"], "conversion_legs": []}
+{"event": "selection", "study_id": "fbs-0007-a2", "selected_params": {"…": "…"},
+ "cv_scheme": "CPCV(n=10,k=2)+anchored WFO", "embargo_capped": false, "artifacts_sha256": {"…": "…"}}
+{"event": "gates", "study_id": "fbs-0007-a2", "gate_run": 1,
+ "gates": {"dsr": 0.97, "cscv_oos_loss": 0.04, "oos_sharpe": 1.21, "wfo_oos": 0.9, "…": "…"},
+ "verdict": "PASS|FAIL|INCOMPLETE", "n_trials_study": 480, "n_trials_prior": 96, "n_trials_dsr": 576,
+ "holdout_band": {"…": "…"}}
 ```
+One row per event (append-only, hash-chained); `ledger.studies()` folds them into one state per study. Bug-fix re-runs (red-team BLOCKER fixes, cost-model or code changes) get the id `<study_id>-r<n>` with `parent_study` set: they are not new attempts, but their trials count in the DSR like every related study.
 
 - Detail for each trial (parameters, per-fold metrics, return matrix) goes in `research/studies/<id>/*.parquet`. These files are gitignored and can be backed up to the T7 drive.
-- `holdout_access.jsonl` has one row per unlock. The data guard refuses a second unlock for the same system.
+- `holdout_access.jsonl` has one row per unlock and per exam; holdout reads go to `holdout_reads.jsonl`. The ledger enforces the §4.4 life cycle per holdout family (same book, shared normalised system name or issue).
 
 ---
 

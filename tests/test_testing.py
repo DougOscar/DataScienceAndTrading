@@ -385,9 +385,11 @@ def test_dense_always_in_market_strategy_audits_768_bars_quickly():
     *changes* (plus a 200-cut cap) must keep this fast even on a strategy that is never
     flat and never null."""
     bars = testing.synthetic_bars(768, seed=1, timeframe="H1")
-    t0 = time.time()
-    testing.assert_no_lookahead(HoldEveryRowStrategy, bars, n_checks=25, seed=0, min_history=60)
-    elapsed = time.time() - t0
+    elapsed = float("inf")
+    for _ in range(2):   # best of 2: background load only slows a run; the O(n^2) regression slows both
+        t0 = time.perf_counter()
+        testing.assert_no_lookahead(HoldEveryRowStrategy, bars, n_checks=25, seed=0, min_history=60)
+        elapsed = min(elapsed, time.perf_counter() - t0)
     assert elapsed < 3.0, f"audit took {elapsed:.1f}s (budget: 3s, N6)"
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pickle
 import warnings
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -191,6 +191,91 @@ def test_rule_evaluator_cross_at_week_open_and_data_start(symbol, start):
         assert out.metrics["n_trades"] > 0
     finally:
         evaluators.clear_cache()
+
+
+# --------------------------------------------------------------------------- edge_breakdown (#25)
+def _outcome(trades: pl.DataFrame, *, n_days: int = 10) -> Outcome:
+    dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n_days)]
+    daily = pl.DataFrame({"date": dates, "ret": [0.0] * n_days}).with_columns(pl.col("date").cast(pl.Date))
+    return Outcome(daily=daily, trades=trades, metrics={})
+
+
+def _trades(pnl, spread, swap, exit_reason=None, skipped=None) -> pl.DataFrame:
+    n = len(pnl)
+    cols = {"pnl_points": pnl, "spread_cost_points": spread, "swap_points": swap}
+    if exit_reason is not None:
+        cols["exit_reason"] = exit_reason
+    if skipped is not None:
+        cols["skipped"] = skipped
+    return pl.DataFrame(cols)
+
+
+def test_edge_breakdown_gross_net_and_spread_swap_split():
+    # 3 trades: pnl_points net of spread+slippage already; spread_cost_points a pure cost;
+    # swap_points signed (negative = paid, positive = earned).
+    t = _trades(pnl=[2.0, -1.0, 4.0], spread=[1.0, 1.0, 1.0], swap=[-0.5, 0.2, -0.3])
+    out = evaluators.edge_breakdown(_outcome(t))
+
+    assert out["n_trades"] == 3
+    pnl_mean = (2.0 - 1.0 + 4.0) / 3
+    spread_mean = 1.0
+    swap_mean = (-0.5 + 0.2 - 0.3) / 3
+    assert out["spread_points_per_trade"] == pytest.approx(spread_mean)
+    assert out["swap_points_per_trade"] == pytest.approx(-swap_mean)     # cost sign, reversed
+    assert out["slippage_points_per_trade"] == 0.0                       # no cost= passed
+    assert out["gross_points_per_trade"] == pytest.approx(pnl_mean + spread_mean)
+    assert out["net_points_per_trade"] == pytest.approx(pnl_mean + swap_mean)
+    # the three cost components sum exactly to gross - net
+    total = out["spread_points_per_trade"] + out["swap_points_per_trade"] + out["slippage_points_per_trade"]
+    assert out["cost_points_per_trade"] == pytest.approx(total)
+    assert out["cost_points_per_trade"] == pytest.approx(
+        out["gross_points_per_trade"] - out["net_points_per_trade"])
+    assert out["cost_pct_of_gross"] == pytest.approx(
+        100.0 * out["cost_points_per_trade"] / abs(out["gross_points_per_trade"]))
+    assert out["trades_per_year"] == pytest.approx(3 / (9 / 365.25))   # 10-day window, span=9 days
+
+
+def test_edge_breakdown_slippage_needs_cost_and_spares_target_exits():
+    t = _trades(
+        pnl=[1.0, 1.0, 1.0], spread=[0.5, 0.5, 0.5], swap=[0.0, 0.0, 0.0],
+        exit_reason=["stop", "target", "gap_target"],
+    )
+    cost = CostModel(slippage_points=0.3)
+    out = evaluators.edge_breakdown(_outcome(t), cost=cost)
+    # entry always slips (+0.3); "stop" exit also slips (+0.3), target/gap_target never do
+    # entry leg always slips; "stop" also slips on exit (2 legs), target/gap_target exits don't (1 leg)
+    expected = (2 * 0.3 + 1 * 0.3 + 1 * 0.3) / 3
+    assert out["slippage_points_per_trade"] == pytest.approx(expected)
+    assert out["gross_points_per_trade"] == pytest.approx(1.0 + 0.5 + expected)
+    assert out["net_points_per_trade"] == pytest.approx(1.0)
+
+
+def test_edge_breakdown_gross_near_zero_guard_and_no_trades():
+    t = _trades(pnl=[1e-12], spread=[0.0], swap=[0.0])
+    out = evaluators.edge_breakdown(_outcome(t), gross_eps=1e-6)
+    assert out["cost_pct_of_gross"] == "n/a"
+
+    empty = _trades(pnl=[], spread=[], swap=[])
+    out2 = evaluators.edge_breakdown(_outcome(empty))
+    assert out2["n_trades"] == 0
+    assert out2["cost_pct_of_gross"] == "n/a"
+    assert np.isnan(out2["gross_points_per_trade"])
+
+
+def test_edge_breakdown_missing_columns_degrades_gracefully():
+    """SyntheticEvaluator's trades frame has no engine columns at all."""
+    t = pl.DataFrame({"entry_ts": [datetime(2020, 1, 1)], "exit_ts": [datetime(2020, 1, 2)]})
+    out = evaluators.edge_breakdown(_outcome(t))
+    assert out["cost_pct_of_gross"] == "n/a"
+    assert np.isnan(out["gross_points_per_trade"]) and np.isnan(out["net_points_per_trade"])
+    assert out["n_trades"] == 1   # no "skipped" column -> every row counted
+
+
+def test_edge_breakdown_skips_skipped_trades():
+    t = _trades(pnl=[10.0, 1.0], spread=[0.0, 1.0], swap=[0.0, 0.0], skipped=[True, False])
+    out = evaluators.edge_breakdown(_outcome(t))
+    assert out["n_trades"] == 1
+    assert out["gross_points_per_trade"] == pytest.approx(1.0 + 1.0)
 
 
 # --------------------------------------------------------------------------- SyntheticEvaluator

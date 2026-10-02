@@ -678,3 +678,25 @@ def test_fallback_b3_unknown_symbol_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BROKER_DIR", tmp_path)
     with pytest.raises(ValueError, match="unknown B3 symbol"):
         costs.load_instrument("INDFUT1", book="B3")
+
+
+# --------------------------------------------------------------------------- dry run #23 #71: costs-off preset
+def test_frictionless_zeroes_every_cost_knob_and_is_versioned():
+    base = costs.CostModel(version_tag="fbs-x", spread_multiplier=1.3, extra_spread_points=2.0,
+                           slippage_points=4.0, swap_multiplier=1.5, stop_fill="bar_extreme")
+    for f in (costs.CostModel.frictionless(), costs.CostModel.frictionless(base)):
+        assert f.spread_multiplier == 0 and f.extra_spread_points == 0 and f.slippage_points == 0
+        assert f.swap_multiplier == 0 and f.stop_fill == "level"
+        assert "spread_mult0" in f.version and "swap_mult0" in f.version
+        assert f.effective_spread(np.array([12.0, 30.0])).tolist() == [0.0, 0.0]
+    assert costs.CostModel.frictionless(base).version.startswith("fbs-x+")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        spec = costs.load_instrument("EURUSD", book="FBS")
+    fs = costs.frictionless_spec(replace_spec(spec, commission_per_lot_rt=7.0, swap_long=-3.0, swap_short=1.0))
+    assert fs.commission_per_lot_rt == 0 and fs.swap_long == 0 and fs.swap_short == 0 and fs.symbol == "EURUSD"
+
+
+def replace_spec(spec, **kw):
+    from dataclasses import replace
+    return replace(spec, **kw)

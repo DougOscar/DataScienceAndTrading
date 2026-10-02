@@ -41,7 +41,9 @@ Gates and the series each one uses
   lift a fragile one; 0.60 ⇒ ≥ 3 of 4 on every axis).
   Search bounds are not validity limits: points outside them are evaluated (and reported);
   invalid (constraint, or natural: positive params > 0, lookback ints ≥ 1) and erroring points
-  fail.  These ≤ 4·d evaluations are judge diagnostics (logged with the
+  fail.  When the re-evaluated peak Sharpe is ≤ 0 no point can pass (score 0, FAIL) and the row
+  reads "not assessable: the selected configuration loses money in-sample" (dry run #23 #49).
+  These ≤ 4·d evaluations are judge diagnostics (logged with the
   gates event), not selection trials: they do not enter the DSR's N.  Without an evaluator the
   matrix-based ±radius box over the recorded trials is used and labelled as such
   (:func:`plateau_score`).
@@ -49,6 +51,10 @@ Gates and the series each one uses
 * ``trade_count`` — (a) trades ≥ per-trade MinTRL (95 %) and (b) dev days ≥ daily MinTRL at the
   claimed Sharpe = min(selected full-dev Sharpe, CPCV-median OOS Sharpe).
 * ``mechanism`` — component ablation (callable) or MANUAL.
+
+Logging: ``log=True`` writes the ``gates`` event (one per study unless ``rerun_reason=`` is
+given; the first band is the registered one, whatever the verdict); ``log=False`` writes a
+``gates_preview`` event that is never a gate run.  ``GateReport.to_json`` is the strict-JSON dump.
 
 SKIPs that block PASS: ``oos_sharpe``, ``wfo_oos`` and ``cscv_oos_loss`` when the candidate set
 is data-dependent (B3 / N1 — read from the **ledger**: the created row, or any later event that
@@ -168,6 +174,7 @@ class GateReport:
     ledger_context: dict[str, Any] = field(default_factory=dict)   # identity read from the ledger (N2)
     holdout_band_run: dict[str, Any] | None = None   # this run's band; == holdout_band unless one is registered
     ledger_row: dict[str, Any] | None = None          # the gates event written by evaluate_gates(log=True)
+    preview_row: dict[str, Any] | None = None         # the gates_preview event of a log=False run (#70)
 
     def row(self, gate: str) -> GateRow:
         for r in self.rows:
@@ -277,6 +284,65 @@ class GateReport:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(self.to_markdown())
         return p
+
+    def to_dict(self) -> dict[str, Any]:
+        """The whole report as plain JSON types (dry run #23 #56): rows (gate, label, value,
+        display, threshold, status, interpretation), verdict, holdout band (registered and this
+        run's), trials, diagnostics, plateau detail, ledger context and the ledger / preview rows.
+        Non-finite floats become None, numpy / polars values plain Python, tuples lists."""
+        d = {"study_id": self.study_id, "verdict": self.verdict, "periods_per_year": self.periods_per_year,
+             "gate_version": "4.2-v1.2",
+             "rows": [{"gate": r.gate, "label": GATE_LABELS.get(r.gate, r.gate), "value": r.value,
+                       "display": r.display, "threshold": r.threshold, "status": r.status,
+                       "interpretation": r.interpretation} for r in self.rows],
+             "holdout_band": self.holdout_band, "holdout_band_run": self.holdout_band_run,
+             "effective_trials": self.effective_trials, "diagnostics": self.diagnostics,
+             "prior_gate_runs": self.prior_gate_runs, "plateau_detail": self.plateau_detail,
+             "ledger_context": self.ledger_context, "ledger_row": self.ledger_row,
+             "preview_row": self.preview_row}
+        return _jsonable(d)
+
+    def to_json(self, path: str | Path | None = None, *, indent: int | None = 1) -> str:
+        """Strict JSON (``allow_nan=False``: NaN / ±inf are written as null) of :meth:`to_dict`;
+        written to ``path`` when given.  Returns the JSON text."""
+        txt = json.dumps(self.to_dict(), indent=indent, allow_nan=False, sort_keys=False)
+        if path is not None:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(txt)
+        return txt
+
+
+def _jsonable(v: Any) -> Any:
+    """Plain-JSON copy of ``v``: non-finite floats → None, numpy scalars / arrays → Python,
+    polars frames → list of row dicts, Series → list, tuples / sets → lists, other objects → str."""
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, (np.bool_,)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        f = float(v)
+        return f if math.isfinite(f) else None
+    if isinstance(v, Mapping):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, np.ndarray):
+        return [_jsonable(x) for x in v.tolist()]
+    if isinstance(v, pl.DataFrame):
+        return [_jsonable(r) for r in v.to_dicts()]
+    if isinstance(v, pl.Series):
+        return [_jsonable(x) for x in v.to_list()]
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    if hasattr(v, "to_json") and callable(v.to_json):
+        try:
+            return _jsonable(v.to_json())
+        except Exception:  # noqa: BLE001
+            pass
+    return str(v)
 
 
 def _fmt(v) -> str:
@@ -760,13 +826,15 @@ _MEDIAN_SPREAD: dict[tuple[str, str, str], float] = {}
 
 
 def _median_spread(symbol: str, book: str) -> float:
-    """Median dev-window D1 spread in points (display in the cost-stress row); NaN if unavailable.
-    Cached per (symbol, book, manifest)."""
+    """Median dev-window **H1** bar spread in points (display in the cost-stress row only); NaN if
+    unavailable.  Not D1 (dry run #23 #51): a D1 bar's spread is the 00:00 rollover spike, about
+    2.6× the typical EURUSD spread.  The stress slippage itself is unaffected (FX / metals / B3 use
+    a pip / tick; see ``costs.stress_slippage_points``).  Cached per (symbol, book, manifest)."""
     key = (str(symbol), str(book), ledger.manifest_sha())
     if key not in _MEDIAN_SPREAD:
         try:
-            from .costs import _median_dev_spread_points
-            _MEDIAN_SPREAD[key] = float(_median_dev_spread_points(symbol, book=book))
+            bars = data.load_bars(symbol, "H1", book=book)
+            _MEDIAN_SPREAD[key] = float(bars["spread"].median())
         except Exception:  # noqa: BLE001 — display only
             _MEDIAN_SPREAD[key] = float("nan")
     return _MEDIAN_SPREAD[key]
@@ -1123,7 +1191,8 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
                    n_jobs: Any = 1, plateau_radius: Any = _REMOVED,
                    prior_effective_trials: Any = _REMOVED,
                    holdout_symbols: str | list[str] | None = None,
-                   studies_dir: Path | None = None, log: bool = False) -> GateReport:
+                   studies_dir: Path | None = None, log: bool = False, rerun_reason: str | None = None,
+                   _log_preview: bool = True) -> GateReport:
     """Run every DESIGN §4.2 v1.2 gate on a study.  See the module docstring for series choices.
 
     ``evaluator``: needed for the cost-stress gate (else SKIPPED) and, when
@@ -1160,8 +1229,18 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     raises :class:`GateError`.
 
     ``log=True`` (R3-1) appends the ``gates`` event for the report computed here — the only way a
-    gate result reaches the ledger (the first run's band becomes the registered band); the row is
-    returned in ``report.ledger_row``.
+    gate result reaches the ledger (the first run's band becomes the registered band, even when
+    the verdict is FAIL — harmless: a FAILed study can never be unlocked, dry run #23 #53); the
+    row is returned in ``report.ledger_row``.  A study that already has a ``gates`` event raises
+    :class:`GateError` unless ``rerun_reason="…"`` says why it is gated again (dry run #23 #45);
+    the re-run is logged with ``gate_run`` n + 1, ``rerun=True`` and the reason, and its band is a
+    diagnostic only.
+
+    ``log=False`` (a preview) appends a ``gates_preview`` event (verdict, gate values and
+    statuses, ``counts_as_gate_run=False``; no band) so previews are visible in the ledger (dry run
+    #23 #70).  A preview never counts as a gate run, never registers a band and never sets the
+    study's verdict; the row is in ``report.preview_row``.  (``_log_preview=False`` is internal:
+    :func:`unlock_holdout` records its recomputation in the unlock row instead.)
     Removed: ``plateau_radius`` (pre-registered via ``opt.run_study(plateau_radius=)`` and read
     from the ledger, N3) and ``prior_effective_trials`` (use ``prior_trials``) raise TypeError."""
     if plateau_radius is not _REMOVED:
@@ -1172,6 +1251,11 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
         raise TypeError("evaluate_gates(prior_effective_trials=) was removed (red-team N2): the DSR uses raw trial "
                         "counts read from the ledger; pass prior_trials= only to RAISE N above the ledger's count")
     ctx = ledger_context(study, ledger_dir)
+    n_logged_runs = len(ledger.study_events(study.study_id, "gates", ledger_dir=ledger_dir))
+    if log and n_logged_runs and not (rerun_reason and str(rerun_reason).strip()):
+        raise GateError(f"study {study.study_id} already has {n_logged_runs} logged gate run(s); a logged re-run needs "
+                        f"rerun_reason=\"…\" (why it is gated again — re-gating until PASS is a search, dry run #23 "
+                        f"#45). Use log=False for a preview")
     band_seed = st.holdout_band_seed(study.study_id)
     if n_boot is not None and int(n_boot) != st.HOLDOUT_BAND_N_BOOT:
         raise GateError(f"n_boot={n_boot!r}: the holdout band's bootstrap size is fixed at "
@@ -1321,7 +1405,7 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
             slip_pts = float(stressed.slippage_points - bc.slippage_points)
             sym = getattr(ispec, "symbol", "?")
             med_spread = _median_spread(sym, getattr(evaluator, "book", "FBS"))
-            spread_txt = (f" = {slip_pts / med_spread:.2f}× the median dev spread of {med_spread:g} points"
+            spread_txt = (f" = {slip_pts / med_spread:.2f}× the median dev H1 spread of {med_spread:g} points"
                           if np.isfinite(med_spread) and med_spread > 0 else "; median spread n/a")
             pip_txt = f"slippage {slip_pts:g} points per fill for {sym}{spread_txt}"
         else:
@@ -1335,11 +1419,22 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
             srs[mlt] = _outcome_sharpe(evaluator(dict(study.selected_params), cost=cm), ppy)
         worst = min(srs.values())
         ok = _cmp(op, worst, thr)
+        swap_txt = f"swap ×{', '.join(f'{m:g}' for m in mults)} ({', '.join(f'{v:.2f}' for v in srs.values())})"
+        vals = [v for v in srs.values() if v is not None and np.isfinite(v)]
+        swap_zero = ispec is not None and (getattr(ispec, "swap_mode", None) == "disabled" or (
+            float(getattr(ispec, "swap_long", 0.0) or 0.0) == 0.0 and float(getattr(ispec, "swap_short", 0.0) or 0.0) == 0.0))
+        swap_flat = len(vals) == len(srs) and len(vals) > 1 and max(vals) - min(vals) <= 1e-12
+        if swap_flat and swap_zero:        # #50: the band cannot bite on a zero swap
+            swap_txt += (" — the swap band had no effect: swap is 0 in the cost model (instrument spec "
+                         f"{'uncalibrated' if not getattr(ispec, 'calibrated', True) else 'swap rates 0 / disabled'})")
+        elif swap_flat:
+            swap_txt += " — the swap band had no effect on this system's Sharpe"
         rows.append(GateRow("cost_stress_sharpe", worst, f"{op} {thr}", "PASS" if ok else "FAIL",
                             f"Worst Sharpe {worst:.2f} at 1.5× spread + 1 stress unit of slippage (1 pip / tick / "
                             f"median spread by asset class) on all market and stop fills "
-                            f"({pip_txt}), bar-extreme stops, swap ×{', '.join(f'{m:g}' for m in mults)} "
-                            f"({', '.join(f'{v:.2f}' for v in srs.values())}); base {sel_sr_ann:.2f}."))
+                            f"({pip_txt}), bar-extreme stops, {swap_txt}; base {sel_sr_ann:.2f}."))
+        diag["cost_stress_swap_no_effect"] = bool(swap_flat)
+        diag["cost_stress_swap_zero"] = bool(swap_zero)
         diag["cost_stress_by_swap_mult"] = {f"{k:g}": v for k, v in srs.items()}
         diag["cost_stress_pip_points"] = {"pip_points": pip_pts, "spec_source": spec_src if ispec is not None
                                           else "synthetic", "slippage_points": stressed.slippage_points,
@@ -1384,18 +1479,26 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
             k_pass, k_n = pj["weakest_axis_passes"]
             ni, no = pj["n_invalid"], pj["n_outside_search_bounds"]
             edge = pj["selected_at_edge"]
-            rows.append(GateRow("plateau", psc, f"{op} {thr}", "PASS" if ok else "FAIL",
-                                f"Weakest parameter axis: {pj['weakest_axis']} keeps {k_pass}/{k_n} judge-run "
-                                f"perturbations (±½, ±1 of each param's pre-registered plateau scale; r = {radius}, "
-                                f"{ctx['radius_source']}; joint axis: {pj['n_joint_points']} points) at ≥ 50% of the peak "
-                                f"Sharpe {pj['peak_sharpe']:.2f}; score = min over {pj['n_axes']} axes (pooled "
-                                f"{pj['pooled_share']:.0%})"
-                                + (f"; {no} point(s) outside the search bounds evaluated" if no else "")
-                                + (f"; {ni} invalid counted as failed" if ni else "")
-                                + (f"; selected at search-space edge ({', '.join(edge)})" if edge else "")
-                                + (f"; {space_note}" if space_note else "") + un_txt
-                                + f"; {pj['n_evaluations']} evaluations in {pj['runtime_s']:.1f} s; "
-                                + ("broad optimum." if ok else "sharp, fragile optimum.")))
+            pk = pj["peak_sharpe"]
+            if pk is None or not np.isfinite(pk) or pk <= 0:
+                # #49: nothing can keep ≥ 50 % of a losing peak and be > 0 — the rule is undefined here
+                rows.append(GateRow("plateau", psc, f"{op} {thr}", "FAIL",
+                                    f"Not assessable: the selected configuration loses money in-sample (re-evaluated "
+                                    f"peak Sharpe {pk:.2f} ≤ 0), so no neighbour can keep ≥ 50% of it; scored 0 "
+                                    f"by rule; {pj['n_evaluations']} evaluations."))
+            else:
+                rows.append(GateRow("plateau", psc, f"{op} {thr}", "PASS" if ok else "FAIL",
+                                    f"Weakest parameter axis: {pj['weakest_axis']} keeps {k_pass}/{k_n} judge-run "
+                                    f"perturbations (±½, ±1 of each param's pre-registered plateau scale; r = {radius}, "
+                                    f"{ctx['radius_source']}; joint axis: {pj['n_joint_points']} points) at ≥ 50% of the peak "
+                                    f"Sharpe {pj['peak_sharpe']:.2f}; score = min over {pj['n_axes']} axes (pooled "
+                                    f"{pj['pooled_share']:.0%})"
+                                    + (f"; {no} point(s) outside the search bounds evaluated" if no else "")
+                                    + (f"; {ni} invalid counted as failed" if ni else "")
+                                    + (f"; selected at search-space edge ({', '.join(edge)})" if edge else "")
+                                    + (f"; {space_note}" if space_note else "") + un_txt
+                                    + f"; {pj['n_evaluations']} evaluations in {pj['runtime_s']:.1f} s; "
+                                    + ("broad optimum." if ok else "sharp, fragile optimum.")))
     else:
         why = "no evaluator" if evaluator is None else space_note
         pl_info = plateau_score(study, ppy, radius=radius, space=ctx.get("space") or {})
@@ -1410,6 +1513,11 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
             rows.append(GateRow("plateau", None, f"{op} {thr}", "SKIPPED",
                                 f"Matrix-based fallback ({why}): no trial inside the pre-registered neighbourhood "
                                 f"({pl_info['method']}); plateau cannot be judged."))
+        elif not (np.isfinite(pl_info["peak_sharpe"]) and pl_info["peak_sharpe"] > 0):
+            rows.append(GateRow("plateau", psc, f"{op} {thr}", "FAIL",
+                                f"Matrix-based fallback ({why}): not assessable: the selected configuration loses "
+                                f"money in-sample (peak Sharpe {pl_info['peak_sharpe']:.2f} ≤ 0), so no neighbour can "
+                                f"keep ≥ 50% of it; scored 0 by rule."))
         else:
             ok = _cmp(op, psc, thr)
             rows.append(GateRow("plateau", psc, f"{op} {thr}", "PASS" if ok else "FAIL",
@@ -1518,6 +1626,9 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
                       for e in ledger.study_events(study.study_id, "gates", ledger_dir=ledger_dir)]
     except Exception as e:  # noqa: BLE001
         diag["prior_gate_runs_error"] = repr(e)
+    n_prev_previews = len(ledger.study_events(study.study_id, "gates_preview", ledger_dir=ledger_dir))
+    if n_prev_previews:
+        diag["gates_preview_runs_before"] = n_prev_previews
 
     statuses = [r.status for r in rows]
     verdict = "FAIL" if "FAIL" in statuses else ("PASS" if all(s == "PASS" for s in statuses) else "INCOMPLETE")
@@ -1529,7 +1640,10 @@ def evaluate_gates(study: StudyResult, evaluator: Evaluator | None, *, periods_p
     report = GateReport(study.study_id, rows, verdict, band, eff, diag, ppy, prior_runs, plateau_detail, lctx,
                         band_run)
     if log:
-        report.ledger_row = _log_gates(report, ledger_dir=ledger_dir)
+        report.ledger_row = _log_gates(report, ledger_dir=ledger_dir,
+                                       rerun_reason=str(rerun_reason) if n_logged_runs else None)
+    elif _log_preview:
+        report.preview_row = _log_preview_event(report, ledger_dir=ledger_dir)
     return report
 
 
@@ -1540,7 +1654,21 @@ def log_gates(*_: Any, **__: Any) -> None:
                     "the report it computed itself")
 
 
-def _log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: Path | None = None) -> dict[str, Any]:
+def _log_preview_event(report: GateReport, *, ledger_dir: Path | None = None) -> dict[str, Any]:
+    """``gates_preview`` event for an unlogged run (dry run #23 #70): verdict, values and statuses
+    only.  Keys are prefixed ``preview_`` so the study's folded state (``ledger.studies``) never
+    mistakes a preview for its gate verdict; no band is written."""
+    sid = report.study_id
+    n_prev = len(ledger.study_events(sid, "gates_preview", ledger_dir=ledger_dir))
+    return ledger.log_event(sid, "gates_preview", ledger_dir=ledger_dir, counts_as_gate_run=False,
+                            preview_run=n_prev + 1, preview_verdict=report.verdict,
+                            preview_gates=report.values(), preview_gate_status=report.statuses(),
+                            preview_n_trials_dsr=report.effective_trials.get("n_trials"),
+                            preview_prior_gate_runs=len(report.prior_gate_runs), gate_version="4.2-v1.2")
+
+
+def _log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: Path | None = None,
+               rerun_reason: str | None = None) -> dict[str, Any]:
     """Append the gate results to the study's ledger row (event ``gates``, DESIGN §8).  Private:
     called only by :func:`evaluate_gates` (``log=True``) on the report it just computed (R3-1).
 
@@ -1552,7 +1680,10 @@ def _log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: P
     Holdout band (R2-3): the band of the study's FIRST gates run that produces one is its
     registered band (``holdout_band``; checked with :func:`ledger.check_band_construction`).
     Every later run logs its band as ``holdout_band_diagnostic`` only — it never replaces the
-    registered band (a later band must go through :func:`rebuild_holdout_band`)."""
+    registered band (a later band must go through :func:`rebuild_holdout_band`).  A band is
+    registered whatever the verdict (dry run #23 #53: on a FAIL it is harmless — the unlock
+    recomputes every gate and refuses a study that is not PASS — just noise in the ledger).
+    ``rerun_reason`` (run ≥ 2 only) is logged with ``rerun=True``."""
     sid = study_id or report.study_id
     n_prev = len(ledger.study_events(sid, "gates", ledger_dir=ledger_dir))
     band_kw: dict[str, Any] = {}
@@ -1586,7 +1717,8 @@ def _log_gates(report: GateReport, study_id: str | None = None, *, ledger_dir: P
                             prior_studies=et.get("prior_studies"), n_trials_dsr=et.get("n_trials"),
                             effective_trials_study=float(et.get("n_eff", float("nan"))),
                             n_trials_ledger=et.get("n_trials_ledger"), n_trials_store=et.get("n_trials_store"),
-                            plateau=plateau, ledger_context=report.ledger_context, **band_kw)
+                            plateau=plateau, ledger_context=report.ledger_context,
+                            **({"rerun": True, "rerun_reason": rerun_reason} if n_prev else {}), **band_kw)
 
 
 # --------------------------------------------------------------------------- holdout horizon / exam (§4.4)
@@ -1744,7 +1876,7 @@ def unlock_holdout(study: StudyResult, evaluator: Evaluator | None, *, periods_p
         raise GateError(f"study {study.study_id}: no registered holdout band (run evaluate_gates(..., log=True) at S5)")
     rep = evaluate_gates(study, evaluator, periods_per_year=periods_per_year, selected_trades=selected_trades,
                          mechanism_check=mechanism_check, base_cost=base_cost, spec=spec, space=space, n_jobs=n_jobs,
-                         ledger_dir=ledger_dir, studies_dir=studies_dir, log=False)
+                         ledger_dir=ledger_dir, studies_dir=studies_dir, log=False, _log_preview=False)
     st = rep.statuses()
     stat_bad = {g: s for g, s in st.items() if g != "mechanism" and s != "PASS"}
     if stat_bad:

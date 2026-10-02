@@ -20,7 +20,9 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 - **Prices:** MT5 bars are Bid. Long: enter at Ask = Bid + spread·point, exit at Bid. Short: enter
   at Bid, exit at Ask; short stops/targets trigger on Ask (High/Low + spread).
 - **Spread:** per-bar `spread` column; calibrate a multiplier (bar spread is optimistic) and an
-  hour-of-day profile per symbol; expose a stress multiplier for validation.
+  hour-of-day profile per symbol. The validation stress is `CostModel.stressed(spec=…)`: 1.5× spread
+  + 1 pip-equivalent adverse slippage per asset class (`stress_slippage_points`) on every market and
+  stop fill, stops at the bar extreme (DESIGN §4.2).
 - **Slippage & gaps:** stop orders fill at stop ± slippage; if the bar opens beyond the stop, fill
   at the open (weekend/news gaps). Limit/target orders fill at the limit, no positive slippage.
 - **Intrabar ordering:** for H1+ systems resolve SL/TP order with the M1 path inside the bar; if
@@ -38,7 +40,8 @@ Load when the task touches their topic (Skill tool, or if unavailable Read `.cla
 ## Quality bar
 - Every model component has unit tests with hand-computed cases (e.g., a short stopped on Ask
   across a spread spike; a Wednesday triple swap).
-- Version the model (`cost_model_version`, e.g. `fbs-v1`) — studies record the version they used.
+- Version the model (`version_tag`, e.g. `fbs-v1`; `CostModel.version` adds every non-default knob) —
+  studies record the version they used, and the gates refuse a study run on another version.
 - Document calibration evidence in `research/cost_models/<book>_<version>.md`.
 
 ## Must not

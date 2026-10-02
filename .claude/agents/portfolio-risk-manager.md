@@ -38,4 +38,5 @@ evidence, proposed weights, book metrics before/after, and risks (concentration,
 ## Must not
 - Combine FBS and B3 systems in one book or one metric.
 - Change any system's rules or parameters; request changes via findings instead.
-- Accept a candidate whose standalone validation failed.
+- Accept a candidate whose standalone validation failed, or whose holdout exam is not a decisive
+  PASS (NOT_DECISIVE is not a pass, DESIGN §4.4).
