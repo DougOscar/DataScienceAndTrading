@@ -419,11 +419,13 @@ def test_cost_breakdown_signs_and_identities():
     rng = np.random.default_rng(0)
     trades = _trades_for_metrics(rng, RiskType.A, n=60)
     cb = m.cost_breakdown(trades)
-    assert cb["gross_pnl_ccy"] == pytest.approx(cb["net_pnl_ccy"] + cb["spread_cost_ccy"])
+    # gross adds back every cost netted in pnl_ccy (spread + commission − signed swap; PR #24 review)
+    assert cb["gross_pnl_ccy"] == pytest.approx(cb["net_pnl_ccy"] + cb["cost_total_ccy"])
+    assert cb["cost_total_ccy"] == pytest.approx(cb["spread_cost_ccy"] + cb["commission_ccy"] - cb["swap_ccy"])
     assert np.isfinite(cb["cost_total_ccy"])
     if cb["gross_pnl_ccy"] > 0:
         assert 0.0 <= cb["cost_pct_of_gross"] or cb["cost_pct_of_gross"] < 0  # always finite, no crash
-    assert math.isfinite(cb["cost_pct_of_gross"]) or cb["gross_pnl_ccy"] <= 0
+    assert math.isfinite(cb["cost_pct_of_gross"]) or cb["cost_pct_of_gross_note"]
 
 
 def test_cost_breakdown_missing_columns_returns_nan():
@@ -675,3 +677,25 @@ def test_write_card_scope_is_optional(tmp_path):
                              vault_dir=tmp_path / "vault")
     status_line = next(l for l in card.read_text().splitlines() if l.startswith("**Book:**"))
     assert status_line == "**Book:** FBS   **Status:** killed (S5, failed the plateau gate)   **Issue:** #10"
+
+
+def _cost_row(**kw):
+    base = dict(pnl_ccy=100.0, spread_cost_points=50.0, swap_points=0.0, swap_money_per_lot=0.0,
+                commission_per_lot=50.0, value_per_point_acct=1.0, value_per_point_acct_exit=1.0, lots=1.0)
+    base.update(kw)
+    return pl.DataFrame({k: [v] for k, v in base.items()})
+
+
+def test_cost_breakdown_gross_adds_back_every_cost():
+    """PR #24 review: gross used to add back only the spread, while pnl_ccy also nets commission and
+    swap -- net 100, spread 50, commission 50 reported gross 150 / 67 % instead of 200 / 50 %."""
+    from quantlab import metrics
+    out = metrics.cost_breakdown(_cost_row())
+    assert out["gross_pnl_ccy"] == pytest.approx(200.0) and out["cost_pct_of_gross"] == pytest.approx(0.5)
+    assert out["gross_pnl_ccy"] - out["cost_total_ccy"] == pytest.approx(out["net_pnl_ccy"])
+    drag = metrics.cost_breakdown(_cost_row(swap_money_per_lot=-20.0))          # swap drag 20
+    assert drag["cost_total_ccy"] == pytest.approx(120.0) and drag["gross_pnl_ccy"] == pytest.approx(220.0)
+    assert drag["swap_share_of_costs"] == pytest.approx(20.0 / 120.0)
+    credit = metrics.cost_breakdown(_cost_row(swap_money_per_lot=20.0))         # swap credit 20
+    assert credit["cost_total_ccy"] == pytest.approx(80.0) and credit["gross_pnl_ccy"] == pytest.approx(180.0)
+    assert credit["swap_share_of_costs"] == 0.0

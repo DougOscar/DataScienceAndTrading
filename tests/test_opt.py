@@ -865,3 +865,14 @@ def test_wfo_short_final_test_window_is_merged_into_the_previous_refit():
     assert last >= rd and opt.WFOConfig(min_test_rows=5).describe().endswith(",min_test=5r)")
     with pytest.raises(ValueError):
         opt.WFOConfig(min_test_rows=-1)
+
+
+def test_plateau_select_reports_centre_diagnostics():
+    """FINDINGS #38 option (d): the selection logs how the centre sits on the surface (no behaviour change)."""
+    scores = np.array([0.1, -0.3, 0.2, -0.5])
+    nbr = np.array([[0, 1, 0, 0], [1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0]], dtype=bool)
+    r = opt.plateau_select(scores, nbr)
+    w = r["index"]
+    assert r["gap_to_argmax"] == pytest.approx(scores.max() - scores[w])
+    assert r["centre_minus_smoothed"] == pytest.approx(scores[w] - r["smoothed"])
+    assert 0.0 < r["centre_pct_rank"] <= 1.0 and r["share_objective_positive"] == pytest.approx(0.5)

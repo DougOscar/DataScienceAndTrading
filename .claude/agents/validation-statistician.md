@@ -75,8 +75,9 @@ trade-count gate).
 Load the study read-only with `opt.load_study(study_id)`. `evaluate_gates(log=True)` runs once; a
 second logged run raises unless `rerun_reason=` is given (and is flagged).
 
-Run `quantlab.gates.evaluate_gates(study, evaluator, periods_per_year=…, mechanism_check=…, log=True)`
-once for the official verdict. `log=True` is the only way a gate result reaches the ledger (there is
+Run `quantlab.gates.evaluate_gates(study, evaluator, periods_per_year=…, log=True)` once for the
+official verdict. Never pass `mechanism_check=` for a real system (it is for synthetic calibration
+studies only): the mechanism gate stays MANUAL and is settled by the user's recorded review. `log=True` is the only way a gate result reaches the ledger (there is
 no `log_gates`); the first logged run's band becomes the **registered holdout band**, later runs are
 numbered and never replace it. It refuses (`GateError`) a study that differs from its trial store,
 an evaluator / cost-model version / strategy source other than the study's, or an unlogged study —

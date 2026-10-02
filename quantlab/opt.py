@@ -839,6 +839,11 @@ def plateau_select(scores: np.ndarray, nbr: np.ndarray, *, eligible: Optional[np
         "plateau_score": _pscore(g, w), "plateau_score_objective": _pscore(s, w),
         "raw_plateau_score": _pscore(g, raw),
         "n_neighbours": int(n_nb[w]), "gate_value": float(g[w]) if np.isfinite(g[w]) else float("nan"),
+        # diagnostics only (dry run #23 / FINDINGS #38, option d): how the centre sits on the surface
+        "centre_pct_rank": float(np.mean(s[elig] <= s[w])),
+        "centre_minus_smoothed": float(s[w] - smoothed[w]),
+        "gap_to_argmax": float(s[raw] - s[w]),
+        "share_objective_positive": float(np.mean(s[elig] > 0)),
         "smoothed_all": smoothed,
     }
 
@@ -1872,6 +1877,8 @@ def run_study(evaluator: Any, space: SearchSpace, *, book: str, system: str, iss
             "raw_argmax_trial": int(S.trial_ids[raw]), "raw_argmax_params": _py_params(S.params[raw]),
             "raw_argmax_objective": full["raw_objective"], "raw_argmax_smoothed": full["raw_smoothed"],
             "raw_argmax_plateau_score": full["raw_plateau_score"], "objective_spec": objective.describe(),
+            "centre_pct_rank": full["centre_pct_rank"], "centre_minus_smoothed": full["centre_minus_smoothed"],
+            "gap_to_argmax": full["gap_to_argmax"], "share_objective_positive": full["share_objective_positive"],
         }
 
     paths, splits_df, cmeta = cpcv_paths(returns, trials, space, cv, objective=objective, selection=cfg,

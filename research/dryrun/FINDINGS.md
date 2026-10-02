@@ -106,7 +106,7 @@ Card-content majors that a real cycle would send back to checkpoint A: ablation 
 **Fixed in the card template / skills / DESIGN:** 1–7 · 11 · 13–20 · 22–23 · 29 (S3 kill rule with uncertainty) · 30 · 32 · 39 · 40 (min_trades documented as S4 choice) · 42/58 (early-kill short-circuit) · 46 (real systems never pass `mechanism_check`) · 55 (prior-work field) · 57.
 **Accepted / documented:** 53 (band registered on FAIL is harmless; the unlock recomputes every gate) · 54 (horizon_end minute detail).
 **Deferred (need a decision or a later phase):**
-- 38 plateau centre guard on mostly-losing surfaces — user decision (options analysed; a behaviour change needs re-calibration).
+- 38 plateau centre guard: resolved with option (d) on the user's "fix everything" (2026-10-02) — no behaviour change; the selection now logs `centre_pct_rank`, `centre_minus_smoothed`, `gap_to_argmax` and `share_objective_positive`. A stricter rule (option a) remains possible later, with re-calibration.
 - 47b fully unbiased ablation (re-selection inside every null draw, ~3 h per system) — build when the first real candidate reaches S5.
 - 48 engine cannot close+reopen on a same-side signal; engine commission knob for `frictionless()` — engine change, next time the engine is touched.
 - 73 rollover-hour spread share — cost-model calibration (needs the broker export).
