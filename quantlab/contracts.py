@@ -7,8 +7,21 @@ Bars are ``polars.DataFrame`` with columns::
     ts        Datetime[ms]  bar OPEN time, naive broker server time (MT5 convention)
     ts_utc    Datetime[ms, UTC]
     open, high, low, close   Float64   **Bid** prices (MT5 bars are Bid)
-    spread    Int32/Float64  spread in points at bar open (M1: as exported; resampled: first M1 bar)
+    spread    Int32/Float64  spread in points: M1 = MT5's M1 ``spread`` field as exported (exact
+                             semantics UNVERIFIED -- likely a low-biased per-minute value, not a
+                             first-tick snapshot); resampled = the FIRST M1 bar's spread, i.e. the
+                             cost of executing at the bar open. NOT comparable to a native MT5
+                             H1/D1 bar's spread, which is the bar's MINIMUM (use ``spread_min``).
     spread_max Float64       max M1 spread inside the bar (resampled bars only; = spread for M1)
+
+Optional columns (``OPTIONAL_BAR_COLUMNS``; ``data.load_bars`` adds them, hand-built frames may
+omit them, and nothing in the engine requires them)::
+
+    spread_min Float64       min M1 spread inside the bar (= spread for M1). Reproduces MT5's own
+                             native H1/D1 bar spread exactly (audit 2026-10-07_bar_spread_semantics)
+
+See ``research/audits/2026-10-07_bar_spread_semantics.md`` for the evidence, and
+``costs.conservative_spread`` for a cost estimate that does not trust a single M1 value.
     tick_vol  Int64
 
 A bar with open time ``ts`` covers ``[ts, ts + timeframe)`` and is *closed* at
@@ -49,6 +62,7 @@ class RiskType(str, Enum):
 
 SIGNAL_COLUMNS = ("signal", "stop_dist", "target_dist")
 BAR_COLUMNS = ("ts", "ts_utc", "open", "high", "low", "close", "spread", "spread_max", "tick_vol")
+OPTIONAL_BAR_COLUMNS = ("spread_min",)
 
 
 @dataclass(frozen=True)

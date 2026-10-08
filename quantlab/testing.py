@@ -343,10 +343,12 @@ def _independent_future_walk(bars: pl.DataFrame, t: int, rng: np.random.Generato
 
     future_values = {
         "open": open_, "high": high, "low": low, "close": close,
-        "spread": spread, "spread_max": spread, "tick_vol": tick_vol,
+        "spread": spread, "spread_max": spread, "spread_min": spread, "tick_vol": tick_vol,
     }
     out = bars
-    for col in _PRICE_COLUMNS:
+    # optional columns (e.g. spread_min from data.load_bars) are redrawn too, so their real
+    # future values can never survive into a "perturbed" frame
+    for col in (*_PRICE_COLUMNS, *(c for c in contracts.OPTIONAL_BAR_COLUMNS if c in bars.columns)):
         values = out[col].to_numpy().copy()
         values[future_idx] = future_values[col]
         out = out.with_columns(pl.Series(col, values, dtype=out[col].dtype))

@@ -30,6 +30,13 @@ on server-midnight-aligned boundaries and a "1d" window always lands on
 server calendar days.  Timezone only enters the picture afterwards, to build
 ``ts_utc`` from the resampled ``ts``.
 
+**Spread columns (audit 2026-10-07).**  A resampled bar's ``spread`` is the *first* M1 bar's
+spread (the cost of executing at the bar open); ``spread_max``/``spread_min`` are the max/min M1
+spread inside it.  MT5's own native H1/D1 bar spread is the **minimum** (it equals
+``spread_min`` exactly), so never compare a resampled ``spread`` with a native export's.  The
+M1 field itself is unverified (likely low-biased); ``costs.conservative_spread`` does not trust
+a single M1 value.
+
 **The holdout guard filters on the resampled bar's own window, not just its
 open time.**  A D1 or H4 bar "belongs" to the dev period only if its *entire*
 ``[ts, ts + timeframe)`` window is before the cutoff.  Filtering only on
@@ -194,7 +201,8 @@ _RAW_COLUMNS = ("ts", "open", "high", "low", "close", "spread", "tick_vol")
 # Bump whenever `_resample_full`'s semantics change: this is folded into the cache key
 # (Minor 8) so a stale on-disk cache from before the change can never be served silently.
 # v3: crypto's spring-forward-gap M1 rows (N2) are now dropped before aggregation, not after.
-_RESAMPLE_SCHEMA_VERSION = "v3-2026-09-24"
+# v4: `spread_min` (min M1 spread in the bar = MT5's native H1/D1 spread) added (spread audit 2026-10-07).
+_RESAMPLE_SCHEMA_VERSION = "v4-2026-10-07"
 
 
 # --------------------------------------------------------------------------- catalog
@@ -375,8 +383,11 @@ def _resample_full(src_path: Path, timeframe: str, *, drop_non_existent_local_tz
             pl.col("high").max().alias("high"),
             pl.col("low").min().alias("low"),
             pl.col("close").last().alias("close"),
+            # first M1 spread = cost of executing at the bar open; NOT what MT5 calls a bar's
+            # spread -- MT5's native H1/D1 spread is the bar's MIN M1 spread (= spread_min)
             pl.col("spread").first().cast(pl.Float64).alias("spread"),
             pl.col("spread").max().cast(pl.Float64).alias("spread_max"),
+            pl.col("spread").min().cast(pl.Float64).alias("spread_min"),
             pl.col("tick_vol").sum().alias("tick_vol"),
         )
     )
@@ -385,7 +396,7 @@ def _resample_full(src_path: Path, timeframe: str, *, drop_non_existent_local_tz
 
 def _load_resampled(src_path: Path, native_tf: str, timeframe: str, *,
                      drop_non_existent_local_tz: str | None = None) -> pl.LazyFrame:
-    """Full series at ``timeframe`` (ts, OHLC, spread, spread_max, tick_vol), cached (DESIGN §7).
+    """Full series at ``timeframe`` (ts, OHLC, spread, spread_max, spread_min, tick_vol), cached (DESIGN §7).
 
     ``drop_non_existent_local_tz``: see :func:`_resample_full`. Threaded through here too
     (rather than filtered by the caller after the fact) so it also applies to the native
@@ -402,6 +413,7 @@ def _load_resampled(src_path: Path, native_tf: str, timeframe: str, *,
             .with_columns(
                 pl.col("spread").cast(pl.Float64),
                 pl.col("spread").cast(pl.Float64).alias("spread_max"),
+                pl.col("spread").cast(pl.Float64).alias("spread_min"),
             )
             .sort("ts")
         )
@@ -544,8 +556,9 @@ def load_bars(symbol: str, timeframe: str = "M1", *, book: str | None = None,
         tz_expr.alias("ts_utc"),
         pl.col("spread").cast(pl.Float64),
         pl.col("spread_max").cast(pl.Float64),
+        pl.col("spread_min").cast(pl.Float64),
     )
-    return bars.select(list(contracts.BAR_COLUMNS)).sort("ts")
+    return bars.select([*contracts.BAR_COLUMNS, *contracts.OPTIONAL_BAR_COLUMNS]).sort("ts")
 
 
 # --------------------------------------------------------------------------- point size
