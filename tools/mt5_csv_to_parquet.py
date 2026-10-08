@@ -1,7 +1,8 @@
 """Convert MetaTrader 5 CSV exports (bars or ticks) to zstd Parquet.
 
 MT5 exports are tab-separated, CRLF, with ``<DATE>`` = ``yyyy.MM.dd`` and
-``<TIME>`` = ``HH:MM:SS`` (bars) or ``HH:MM:SS.fff`` (ticks).  Timestamps are
+``<TIME>`` = ``HH:MM:SS`` (bars) or ``HH:MM:SS.fff`` (ticks); daily/weekly/monthly bar
+exports have no ``<TIME>`` column (bar opens at server midnight).  Timestamps are
 kept as naive *broker server time* — timezone normalisation belongs to the
 loader, once each broker's offset/DST rule is verified.
 
@@ -30,6 +31,7 @@ DATA = ROOT / "data"
 MANIFEST = DATA / "manifest.json"
 
 BAR_HEADER = ["<DATE>", "<TIME>", "<OPEN>", "<HIGH>", "<LOW>", "<CLOSE>", "<TICKVOL>", "<VOL>", "<SPREAD>"]
+DAILY_BAR_HEADER = [h for h in BAR_HEADER if h != "<TIME>"]
 TICK_HEADER = ["<DATE>", "<TIME>", "<BID>", "<ASK>", "<LAST>", "<VOLUME>", "<FLAGS>"]
 
 BAR_SCHEMA = {
@@ -42,6 +44,8 @@ TICK_SCHEMA = {
     "<BID>": pl.Float64, "<ASK>": pl.Float64, "<LAST>": pl.Float64,
     "<VOLUME>": pl.Float64, "<FLAGS>": pl.Int32,
 }
+# MT5's export file names spell D1/W1/MN1 out; the catalog uses the MT5 enum names.
+TIMEFRAME_ALIASES = {"Daily": "D1", "Weekly": "W1", "Monthly": "MN1"}
 BROKER_BY_MARKET = {"forex": "FBS", "crypto": "FBS", "b3": "Clear"}
 
 
@@ -72,7 +76,13 @@ def _first_data_line(path: Path) -> str:
 
 def convert(path: Path) -> dict:
     header = _header(path)
-    if header == BAR_HEADER:
+    n_time_fields = 2
+    if header == DAILY_BAR_HEADER:
+        kind, fmt, n_time_fields = "bars", "%Y.%m.%d", 1
+        schema = {k: v for k, v in BAR_SCHEMA.items() if k != "<TIME>"}
+        rename = {"<OPEN>": "open", "<HIGH>": "high", "<LOW>": "low", "<CLOSE>": "close",
+                  "<TICKVOL>": "tick_vol", "<VOL>": "volume", "<SPREAD>": "spread"}
+    elif header == BAR_HEADER:
         kind, schema, fmt = "bars", BAR_SCHEMA, "%Y.%m.%d %H:%M:%S"
         rename = {"<OPEN>": "open", "<HIGH>": "high", "<LOW>": "low", "<CLOSE>": "close",
                   "<TICKVOL>": "tick_vol", "<VOL>": "volume", "<SPREAD>": "spread"}
@@ -84,14 +94,11 @@ def convert(path: Path) -> dict:
         raise ValueError(f"{path.name}: unrecognised header {header}")
 
     out = path.with_suffix(".parquet")
+    stamp = pl.col("<DATE>") + " " + pl.col("<TIME>") if n_time_fields == 2 else pl.col("<DATE>")
     lf = (
         pl.scan_csv(path, separator="\t", schema=schema, has_header=True)
-        .with_columns(
-            (pl.col("<DATE>") + " " + pl.col("<TIME>"))
-            .str.to_datetime(fmt, time_unit="ms", strict=True)
-            .alias("ts")
-        )
-        .drop("<DATE>", "<TIME>")
+        .with_columns(stamp.str.to_datetime(fmt, time_unit="ms", strict=True).alias("ts"))
+        .drop([c for c in ("<DATE>", "<TIME>") if c in schema])
         .rename(rename)
         .select("ts", *rename.values())
     )
@@ -117,7 +124,7 @@ def convert(path: Path) -> dict:
     last_csv = _last_line(path).split("\t")
     # Compare numerically (CSV "1.00000000" vs parquet 1.0); empty CSV fields ↔ None.
     def _same(csv_fields: list[str], row) -> bool:
-        for raw, val in zip(csv_fields[2:], row[1:]):
+        for raw, val in zip(csv_fields[n_time_fields:], row[1:]):
             if raw == "":
                 if val is not None:
                     return False
@@ -138,7 +145,7 @@ def convert(path: Path) -> dict:
         "market": path.parent.name,
         "broker": BROKER_BY_MARKET.get(path.parent.name, "unknown"),
         "symbol": stem_parts[0],
-        "timeframe": stem_parts[1] if kind == "bars" else "tick",
+        "timeframe": TIMEFRAME_ALIASES.get(stem_parts[1], stem_parts[1]) if kind == "bars" else "tick",
         "kind": kind,
         "rows": stats["rows"],
         "start": str(stats["start"]),

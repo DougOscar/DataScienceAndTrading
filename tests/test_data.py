@@ -578,3 +578,15 @@ def test_conversion_rate_at_series_start_falls_back_to_the_first_bars_open():
     assert later.to_list() == pytest.approx([1.0 / first["close"]])   # the normal close path
     with pytest.raises(ValueError, match="before the series start"):
         data.conversion_rate("JPY", "USD", pl.Series([first["ts_utc"] - timedelta(minutes=1)]))
+
+
+def test_resampled_spread_min_is_bar_minimum(known_answer_bars):
+    """spread_min = min M1 spread in the bar: MT5's own native H1/D1 spread rule (audit
+    2026-10-07). M1 spreads are 10, 8 | 12 | 5, 7 for the 00h | 01h | 05h buckets."""
+    m1 = data.load_bars("TESTX", "M1", book="FBS")
+    assert (m1["spread_min"] == m1["spread"]).all()
+    h1 = data.load_bars("TESTX", "H1", book="FBS").sort("ts")
+    assert h1["spread_min"].to_list() == [8.0, 12.0, 5.0]
+    assert h1["spread"].to_list() == [10.0, 12.0, 5.0]        # first M1 spread, unchanged
+    d1 = data.load_bars("TESTX", "D1", book="FBS")
+    assert d1["spread_min"].to_list() == [5.0] and d1["spread"].to_list() == [10.0]

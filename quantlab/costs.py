@@ -52,6 +52,8 @@ __all__ = [
     "pip_points",
     "stress_slippage_points",
     "frictionless_spec",
+    "hourly_spread_profile",
+    "conservative_spread",
 ]
 
 # --------------------------------------------------------------------------- InstrumentSpec
@@ -470,6 +472,54 @@ def _median_dev_spread_points(symbol: str, *, book: str) -> float:
     from .data import load_bars
     bars = load_bars(symbol, "D1", book=book)
     return float(bars["spread"].median())
+
+
+# --------------------------------------------------------------------------- conservative spread
+# Spread audit 2026-10-07 (research/audits/2026-10-07_bar_spread_semantics.md): the M1 `spread`
+# field's exact semantics is unverified and looks low-biased (MT5's own H1/D1 spread is the MIN of
+# the M1 values), and a single M1 value at the rollover minute is a noisy estimate of what a fill
+# there costs. These two helpers give a cost estimate that does not trust one M1 value.
+
+def hourly_spread_profile(symbol: str, *, book: str = "FBS", q: float = 0.75,
+                          start=None, end=None) -> pl.DataFrame:
+    """Per server-hour quantile ``q`` of the M1 ``spread`` (points) over the dev window.
+
+    Returns ``hour`` (0-23, broker server time) and ``spread_floor``. Reads M1 through
+    ``data.load_bars``, so the holdout lock applies (default ``end`` = the book's holdout start).
+    This is a *cost assumption* computed over the whole dev window, not a signal input: applying
+    it to earlier bars makes costs more conservative, never more optimistic.
+    """
+    if not 0.0 < q < 1.0:
+        raise ValueError(f"q must be in (0, 1), got {q!r}")
+    from .data import load_bars      # lazy, same reason as _median_dev_spread_points
+    m1 = load_bars(symbol, "M1", book=book, start=start, end=end)
+    return (m1.group_by(pl.col("ts").dt.hour().alias("hour"))
+              .agg(pl.col("spread").cast(pl.Float64).quantile(q).alias("spread_floor"))
+              .sort("hour"))
+
+
+def conservative_spread(bars: pl.DataFrame, profile: pl.DataFrame, *,
+                        rollover_hours: tuple[int, ...] = (), rollover_mult: float = 1.0) -> pl.DataFrame:
+    """``bars`` with a spread that never falls below the hour-of-day floor (audit recommendation 2).
+
+    * ``spread``     := max(``spread``, ``profile.spread_floor`` at the bar's open hour),
+      then x ``rollover_mult`` for bars opening in ``rollover_hours`` (e.g. ``(0,)`` with 2.0 for
+      the "2x rollover stress" of anything executing at the D1 open / server midnight);
+    * ``spread_max`` := max(``spread_max``, new ``spread``), so stop/short fills stay consistent.
+
+    Hours missing from ``profile`` keep the bar's own spread. Other columns are untouched.
+    """
+    if rollover_mult < 1.0:
+        raise ValueError("rollover_mult must be >= 1 (this is a conservative adjustment)")
+    prof = profile.select(pl.col("hour").cast(pl.Int8), pl.col("spread_floor").cast(pl.Float64))
+    out = (bars.with_columns(pl.col("ts").dt.hour().cast(pl.Int8).alias("__hour"))
+               .join(prof, left_on="__hour", right_on="hour", how="left"))
+    sp = pl.max_horizontal(pl.col("spread").cast(pl.Float64), pl.col("spread_floor").fill_null(0.0))
+    if rollover_hours:
+        sp = pl.when(pl.col("__hour").is_in(list(rollover_hours))).then(sp * rollover_mult).otherwise(sp)
+    out = out.with_columns(sp.alias("spread"))
+    out = out.with_columns(pl.max_horizontal(pl.col("spread_max").cast(pl.Float64), pl.col("spread")).alias("spread_max"))
+    return out.drop("__hour", "spread_floor").select(bars.columns)
 
 
 def stress_slippage_points(

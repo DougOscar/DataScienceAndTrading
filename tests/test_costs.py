@@ -700,3 +700,38 @@ def test_frictionless_zeroes_every_cost_knob_and_is_versioned():
 def replace_spec(spec, **kw):
     from dataclasses import replace
     return replace(spec, **kw)
+
+
+# --------------------------------------------------------------------------- conservative spread
+def _cs_bars(hours, spreads, spread_max=None):
+    from datetime import datetime as _dt
+    ts = [_dt(2021, 1, 4, h) for h in hours]
+    return pl.DataFrame({"ts": ts, "spread": [float(x) for x in spreads],
+                         "spread_max": [float(x) for x in (spread_max or spreads)],
+                         "close": [1.0] * len(ts)}).with_columns(pl.col("ts").cast(pl.Datetime("ms")))
+
+
+def test_conservative_spread_floor_and_rollover():
+    from quantlab.costs import conservative_spread
+    prof = pl.DataFrame({"hour": [0, 10], "spread_floor": [30.0, 8.0]})
+    bars = _cs_bars([0, 0, 10, 10, 15], [20, 50, 5, 12, 9], spread_max=[25, 60, 7, 12, 11])
+    out = conservative_spread(bars, prof)
+    assert out["spread"].to_list() == [30.0, 50.0, 8.0, 12.0, 9.0]       # hour 15 not in profile: own value
+    assert out["spread_max"].to_list() == [30.0, 60.0, 8.0, 12.0, 11.0]  # never below the new spread
+    assert out.columns == bars.columns
+    out2 = conservative_spread(bars, prof, rollover_hours=(0,), rollover_mult=2.0)
+    assert out2["spread"].to_list() == [60.0, 100.0, 8.0, 12.0, 9.0]
+    assert out2["spread_max"].to_list() == [60.0, 100.0, 8.0, 12.0, 11.0]
+    with pytest.raises(ValueError):
+        conservative_spread(bars, prof, rollover_mult=0.5)
+
+
+def test_hourly_spread_profile_quantile(monkeypatch):
+    import quantlab.data as qdata
+    from quantlab.costs import hourly_spread_profile
+    fake = _cs_bars([0] * 4 + [10] * 4, [10, 20, 30, 40, 1, 2, 3, 4])
+    monkeypatch.setattr(qdata, "load_bars", lambda *a, **k: fake)
+    prof = hourly_spread_profile("EURUSD", q=0.5)
+    got = dict(zip(prof["hour"].to_list(), prof["spread_floor"].to_list()))
+    assert got[10] == pytest.approx(fake.filter(pl.col("ts").dt.hour() == 10)["spread"].quantile(0.5))
+    assert got[0] == pytest.approx(fake.filter(pl.col("ts").dt.hour() == 0)["spread"].quantile(0.5))

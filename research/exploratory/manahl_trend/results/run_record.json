@@ -1,0 +1,110 @@
+{
+  "system": "manahl_trend",
+  "book": "FBS",
+  "kind": "exploratory mechanics run (pre-card)",
+  "trials": 1,
+  "post_hoc_looks": [
+    "daytime-spread what-if (notebook \u00a78)",
+    "red-team probe 2026-10-07: execution at 01:00, 02:00, 10:00 server time (3 looks)"
+  ],
+  "created": "2026-10-07T19:38:40",
+  "git_commit": "a7c62d3-dirty",
+  "data_manifest_sha": "a0078aacd666fcaa",
+  "symbols": [
+    "EURUSD",
+    "GBPJPY",
+    "NZDCHF",
+    "XAUUSD"
+  ],
+  "timeframe": "D1",
+  "dev_window": [
+    "2016-05-03",
+    "2025-05-14"
+  ],
+  "eval_start": "2017-08-18",
+  "params": {
+    "lookback_mode": "scaled",
+    "lookback_base": 20,
+    "lookbacks": [
+      20,
+      60,
+      120,
+      240
+    ],
+    "thresh_mode": "volz",
+    "pct_up": 0.0,
+    "pct_down": 0.0,
+    "z_min": 0.0,
+    "vol_period": 60,
+    "position_mode": "scaled",
+    "wait_after_stop": true,
+    "er_mode": "absolute",
+    "er_period": 10,
+    "er_min": 30.0,
+    "stop_mode": "atr",
+    "atr_period": 20,
+    "stop_atr_mult": 4.0,
+    "swing_strength": 2,
+    "swing_lookback": 200,
+    "swing_atr_pad": 0.5,
+    "min_stop_atr": 1.0,
+    "sizing_mode": "vol_target",
+    "portfolio_vol_pct": 12.0,
+    "assumed_corr": 0.3,
+    "risk_percent": 1.0,
+    "fixed_lots": 0.1,
+    "max_leverage": 5.0,
+    "days_per_year": 260.0
+  },
+  "cost_model_version": "fbs-v2-uncalibrated",
+  "specs_calibrated": {
+    "EURUSD": false,
+    "GBPJPY": false,
+    "NZDCHF": false,
+    "XAUUSD": false
+  },
+  "metrics": {
+    "Sharpe (ann.)": 0.032680896899076835,
+    "t-stat (Lo 2002)": 0.0907973591033136,
+    "CAGR": -0.0004533239495949637,
+    "realised vol (ann.)": 0.07720607278281941,
+    "max drawdown": -0.13979109556635494,
+    "longest drawdown (days)": 1339.0,
+    "skew": 0.2701361931637191,
+    "OnTester score (mean \u2212 0.5\u00b7sd)": -0.16804426341368872,
+    "legs closed": 693.0,
+    "final equity": 99732.35105386199
+  },
+  "cost_sensitivity": [
+    {
+      "cost model": "frictionless",
+      "Sharpe": 0.26692900668919967,
+      "CAGR": 0.017804886377448703,
+      "max DD": -0.09247803989312064
+    },
+    {
+      "cost model": "base",
+      "Sharpe": 0.032680896899076835,
+      "CAGR": -0.0004533239495949637,
+      "max DD": -0.13979109556635494
+    },
+    {
+      "cost model": "stressed",
+      "Sharpe": -0.1340915632736988,
+      "CAGR": -0.013251956908949314,
+      "max DD": -0.19883296663344452
+    },
+    {
+      "cost model": "daytime spread (what-if)",
+      "Sharpe": 0.2428306128370356,
+      "CAGR": 0.015818923130610063,
+      "max DD": -0.09540553418907127
+    },
+    {
+      "cost model": "rollover-conservative (p75 floor, 2\u00d7 at 00:00)",
+      "Sharpe": -0.3017255674599837,
+      "CAGR": -0.02630950238288443,
+      "max DD": -0.24652154061982323
+    }
+  ]
+}
